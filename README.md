@@ -62,6 +62,135 @@ aiteach config path
 aiteach doctor --profile work
 ```
 
+### Реальные Сценарии
+
+#### 1. Первый запуск и проверка профиля
+
+```bash
+aiteach setup
+aiteach profile list
+aiteach doctor
+```
+
+Что происходит:
+
+- `setup` помогает выбрать provider и модель.
+- Токен сохраняется в OS keychain, а не в config.
+- `doctor` проверяет config, активный профиль, `base_url` и наличие токена без вывода секрета.
+
+#### 2. Один короткий ответ
+
+```bash
+aiteach ask \
+  "Объясни ownership в Rust простыми словами" \
+  --max-tokens 140 \
+  --completion-instruction "Ответь максимум в 3 коротких пунктах и закончи мысль полностью."
+```
+
+Используйте это для быстрых терминальных вопросов, где нужен лаконичный ответ. `max-tokens` задает жесткий верхний предел, а инструкция просит модель не обрывать мысль.
+
+#### 3. JSON для скрипта или пайплайна
+
+```bash
+aiteach ask \
+  "Разбери задачу: сделать CLI чат на Rust" \
+  --response-format json-object \
+  --format-instruction "Верни JSON object с полями title, risks, next_steps." \
+  --max-tokens 220
+```
+
+Такой режим удобен, когда результат дальше читает другой скрипт. CLI отправляет `response_format: {"type":"json_object"}` и добавляет system-инструкцию про формат.
+
+#### 4. Остановить ответ по маркеру
+
+```bash
+aiteach ask \
+  "Сделай краткий план миграции проекта" \
+  --stop "END_OF_ANSWER" \
+  --completion-instruction "Дай 5 пунктов максимум. После последнего пункта напиши END_OF_ANSWER."
+```
+
+Модель сама завершает мысль и пишет маркер, а API останавливает генерацию на `stop` sequence. Это мягче, чем просто упереться в лимит токенов.
+
+#### 5. Интерактивный чат с управлением ответа
+
+```bash
+aiteach chat --max-tokens 180
+```
+
+Внутри чата:
+
+```text
+/format json-object
+/max-tokens 120
+/completion-instruction Отвечай только списком из 3 пунктов.
+/control
+/clear
+/exit
+```
+
+Это удобно, когда вы настраиваете стиль ответа по ходу разговора.
+
+#### 6. Сравнить один prompt без контроля и с контролем
+
+```bash
+aiteach compare \
+  "Объясни async Rust" \
+  --max-tokens 160 \
+  --completion-instruction "Ответь в 3 коротких пунктах без вступления."
+```
+
+Результат покажет два блока:
+
+- `Without constraints` - обычный ответ.
+- `With constraints` - тот же prompt с ограничениями.
+
+#### 7. Собрать сущность и остановить диалог
+
+```bash
+aiteach chat \
+  --required-field topic \
+  --required-field audience \
+  --required-field format \
+  --goal-stop-mode combined
+```
+
+Пользователь отвечает на уточняющие вопросы, а CLI останавливает диалог только когда:
+
+- все required fields заполнены;
+- модель вернула `done: true`.
+
+#### 8. Сравнить способы завершения диалога
+
+```bash
+aiteach compare-goal \
+  "Собери требования к статье про Rust ownership" \
+  --required-field topic \
+  --required-field audience \
+  --required-field format
+```
+
+CLI сравнит три стратегии:
+
+- `state` - остановка по заполненности полей в коде.
+- `instruction` - остановка по сигналу модели `done: true`.
+- `combined` - оба условия одновременно.
+
+#### 9. Несколько профилей
+
+```bash
+aiteach profile add
+aiteach profile list
+aiteach profile use openrouter
+aiteach ask "Проверь, какой профиль сейчас активен"
+```
+
+Профиль можно выбрать явно:
+
+```bash
+aiteach ask --profile deepseek "Сделай краткое резюме"
+```
+
 ### Провайдеры
 
 Поддерживаются профили:
@@ -390,6 +519,135 @@ aiteach chat --profile work
 
 aiteach config path
 aiteach doctor --profile work
+```
+
+### Real Usage Examples
+
+#### 1. First run and profile check
+
+```bash
+aiteach setup
+aiteach profile list
+aiteach doctor
+```
+
+What happens:
+
+- `setup` helps choose a provider and model.
+- The token is stored in the OS keychain, not in config.
+- `doctor` checks config, active profile, `base_url`, and token presence without printing the secret.
+
+#### 2. One short answer
+
+```bash
+aiteach ask \
+  "Explain Rust ownership in simple words" \
+  --max-tokens 140 \
+  --completion-instruction "Answer in at most 3 short bullets and complete the thought."
+```
+
+Use this for quick terminal questions where you want a concise answer. `max-tokens` sets the hard cap, while the instruction asks the model to finish cleanly.
+
+#### 3. JSON for a script or pipeline
+
+```bash
+aiteach ask \
+  "Analyze this task: build a Rust CLI chat" \
+  --response-format json-object \
+  --format-instruction "Return a JSON object with title, risks, next_steps." \
+  --max-tokens 220
+```
+
+This is useful when another script reads the result. The CLI sends `response_format: {"type":"json_object"}` and adds a system instruction for the format.
+
+#### 4. Stop an answer with a marker
+
+```bash
+aiteach ask \
+  "Create a short project migration plan" \
+  --stop "END_OF_ANSWER" \
+  --completion-instruction "Give at most 5 bullets. After the last bullet, write END_OF_ANSWER."
+```
+
+The model finishes the thought and writes the marker, while the API stops generation at the `stop` sequence. This is cleaner than only hitting a token limit.
+
+#### 5. Interactive chat with response control
+
+```bash
+aiteach chat --max-tokens 180
+```
+
+Inside chat:
+
+```text
+/format json-object
+/max-tokens 120
+/completion-instruction Answer only as a 3-item list.
+/control
+/clear
+/exit
+```
+
+Use this when you want to adjust answer style during the conversation.
+
+#### 6. Compare one prompt without and with controls
+
+```bash
+aiteach compare \
+  "Explain async Rust" \
+  --max-tokens 160 \
+  --completion-instruction "Answer in 3 short bullets without an intro."
+```
+
+The result shows two blocks:
+
+- `Without constraints` - the regular answer.
+- `With constraints` - the same prompt with controls.
+
+#### 7. Collect an entity and stop the dialogue
+
+```bash
+aiteach chat \
+  --required-field topic \
+  --required-field audience \
+  --required-field format \
+  --goal-stop-mode combined
+```
+
+The user answers follow-up questions, and the CLI stops the dialogue only when:
+
+- all required fields are filled;
+- the model returned `done: true`.
+
+#### 8. Compare dialogue completion strategies
+
+```bash
+aiteach compare-goal \
+  "Collect requirements for an article about Rust ownership" \
+  --required-field topic \
+  --required-field audience \
+  --required-field format
+```
+
+The CLI compares three strategies:
+
+- `state` - stop by field completeness in code.
+- `instruction` - stop by the model signal `done: true`.
+- `combined` - require both conditions.
+
+#### 9. Multiple profiles
+
+```bash
+aiteach profile add
+aiteach profile list
+aiteach profile use openrouter
+aiteach ask "Check which profile is active"
+```
+
+You can also select a profile explicitly:
+
+```bash
+aiteach ask --profile deepseek "Create a short summary"
 ```
 
 ### Providers
