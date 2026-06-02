@@ -60,6 +60,8 @@ pub enum AppError {
     UnsupportedProvider(String),
     #[error("Invalid base_url for profile '{profile}': {url}")]
     InvalidBaseUrl { profile: String, url: String },
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl std::fmt::Display for ProviderHttpError {

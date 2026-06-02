@@ -40,9 +40,11 @@ enum Command {
         command: ModelsCommand,
     },
     Ask(AskArgs),
-    Chat(ProfileArg),
+    Chat(ChatArgs),
     #[command(about = "Run the same prompt once without controls and once with response controls")]
     Compare(CompareArgs),
+    #[command(about = "Compare state-based, instruction-based, and combined dialogue stopping")]
+    CompareGoal(CompareGoalArgs),
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -99,11 +101,32 @@ struct CompareArgs {
 }
 
 #[derive(Debug, Args)]
-struct ProfileArg {
+struct CompareGoalArgs {
+    prompt: String,
+    #[arg(long)]
+    profile: Option<String>,
+    #[arg(
+        long,
+        action = clap::ArgAction::Append,
+        help = "Required entity field; provide at least one"
+    )]
+    required_field: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct ChatArgs {
     #[arg(long)]
     profile: Option<String>,
     #[command(flatten)]
     control: ResponseControlArgs,
+    #[command(flatten)]
+    goal: ConversationGoalArgs,
+}
+
+#[derive(Debug, Args)]
+struct ProfileArg {
+    #[arg(long)]
+    profile: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -143,11 +166,37 @@ struct ResponseControlArgs {
     completion_instruction: Option<String>,
 }
 
+#[derive(Debug, Clone, Args)]
+struct ConversationGoalArgs {
+    #[arg(
+        long,
+        action = clap::ArgAction::Append,
+        help = "Required field for stateful dialogue completion; can be provided multiple times"
+    )]
+    required_field: Vec<String>,
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = CliConversationStopMode::Manual,
+        help = "How chat decides that the dialogue goal is complete"
+    )]
+    goal_stop_mode: CliConversationStopMode,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
 enum CliResponseFormat {
     #[default]
     Text,
     JsonObject,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+enum CliConversationStopMode {
+    #[default]
+    Manual,
+    State,
+    Instruction,
+    Combined,
 }
 
 impl From<&ResponseControlArgs> for ResponseControl {
@@ -161,6 +210,20 @@ impl From<&ResponseControlArgs> for ResponseControl {
             stop: args.stop.clone(),
             format_instruction: args.format_instruction.clone(),
             completion_instruction: args.completion_instruction.clone(),
+        }
+    }
+}
+
+impl From<&ConversationGoalArgs> for chat::ConversationGoal {
+    fn from(args: &ConversationGoalArgs) -> Self {
+        Self {
+            required_fields: args.required_field.clone(),
+            mode: match args.goal_stop_mode {
+                CliConversationStopMode::Manual => chat::ConversationStopMode::Manual,
+                CliConversationStopMode::State => chat::ConversationStopMode::State,
+                CliConversationStopMode::Instruction => chat::ConversationStopMode::Instruction,
+                CliConversationStopMode::Combined => chat::ConversationStopMode::Combined,
+            },
         }
     }
 }
@@ -190,6 +253,7 @@ async fn run_with_store(cli: &Cli, secrets: &dyn SecretStore) -> Result<(), AppE
         Command::Ask(args) => ask_command(args, secrets).await,
         Command::Chat(args) => chat_command(args, secrets).await,
         Command::Compare(args) => compare_command(args, secrets).await,
+        Command::CompareGoal(args) => compare_goal_command(args, secrets).await,
         Command::Config { command } => match command {
             ConfigCommand::Path => {
                 println!("{}", AppConfig::config_path()?.display());
@@ -321,7 +385,7 @@ async fn ask_command(args: &AskArgs, secrets: &dyn SecretStore) -> Result<(), Ap
     Ok(())
 }
 
-async fn chat_command(args: &ProfileArg, secrets: &dyn SecretStore) -> Result<(), AppError> {
+async fn chat_command(args: &ChatArgs, secrets: &dyn SecretStore) -> Result<(), AppError> {
     let config = AppConfig::load()?;
     let (name, profile) = config.selected_profile(args.profile.as_deref())?;
     let client = ReqwestProviderClient::new()?;
@@ -332,6 +396,7 @@ async fn chat_command(args: &ProfileArg, secrets: &dyn SecretStore) -> Result<()
         &name,
         profile,
         ResponseControl::from(&args.control),
+        chat::ConversationGoal::from(&args.goal),
     )
     .await
 }
@@ -354,6 +419,41 @@ async fn compare_command(args: &CompareArgs, secrets: &dyn SecretStore) -> Resul
     println!("## Without constraints\n{unrestricted}\n");
     println!("## With constraints\n{controlled}");
     Ok(())
+}
+
+async fn compare_goal_command(
+    args: &CompareGoalArgs,
+    secrets: &dyn SecretStore,
+) -> Result<(), AppError> {
+    let config = AppConfig::load()?;
+    let (name, profile) = config.selected_profile(args.profile.as_deref())?;
+    if args.required_field.is_empty() {
+        return Err(AppError::InvalidInput(
+            "compare-goal requires at least one --required-field".to_string(),
+        ));
+    }
+    eprintln!("Waiting for state, instruction, and combined goal-stop responses...");
+    let client = ReqwestProviderClient::new()?;
+    let comparison = chat::compare_goal_stop(
+        &client,
+        secrets,
+        &name,
+        profile,
+        args.prompt.clone(),
+        args.required_field.clone(),
+    )
+    .await?;
+    print_goal_run("State-based stop", &comparison.state);
+    print_goal_run("Instruction-based stop", &comparison.instruction);
+    print_goal_run("Combined stop", &comparison.combined);
+    Ok(())
+}
+
+fn print_goal_run(title: &str, run: &chat::GoalRun) {
+    println!(
+        "## {title}\nmode: {}\nstopped: {}\nstate: {}\n{}",
+        run.mode, run.stopped, run.state_summary, run.response
+    );
 }
 
 fn doctor_command(args: &ProfileArg, secrets: &dyn SecretStore) -> Result<(), AppError> {

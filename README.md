@@ -32,6 +32,11 @@ aiteach ask --profile work "Объясни ownership в Rust"
 aiteach ask --profile work "Верни краткое резюме" --max-tokens 120
 aiteach ask --profile work "Верни объект с полями title и bullets" --response-format json-object
 aiteach compare --profile work "Сравни Rust и Go" --max-tokens 120 --stop "END"
+aiteach compare-goal --profile work \
+  "Собери требования к статье" \
+  --required-field topic \
+  --required-field audience \
+  --required-field format
 aiteach chat --profile work
 
 aiteach config path
@@ -103,6 +108,13 @@ Config хранит только несекретные поля:
 - `/stop clear`
 - `/format-instruction <text>`
 - `/completion-instruction <text>`
+- `/goal`
+- `/goal clear`
+- `/goal field <name>`
+- `/goal mode manual`
+- `/goal mode state`
+- `/goal mode instruction`
+- `/goal mode combined`
 
 История сохраняется локально и не содержит токены. Prompt/response не логируются в debug output без явного будущего режима `--log-conversation`.
 
@@ -137,6 +149,71 @@ aiteach compare --profile work \
 
 Результат показывает два блока: `Without constraints` и `With constraints`.
 
+### Завершение Диалога
+
+Есть два разных уровня остановки:
+
+- Остановка ответа: `stop`, `max_tokens`, `completion_instruction`. Это завершает одну генерацию provider.
+- Остановка диалога: приложение решает, продолжать ли агентный цикл сбора данных.
+
+Для остановки диалога `aiteach` поддерживает сущность с required fields. Модель должна возвращать JSON:
+
+```json
+{
+  "fields": {
+    "topic": "Rust ownership",
+    "audience": "junior developers",
+    "format": null
+  },
+  "next_question": "Какой формат нужен?",
+  "done": false
+}
+```
+
+Режимы:
+
+- `manual` - CLI не останавливает диалог автоматически.
+- `state` - deterministic code path: CLI останавливается, когда все `--required-field` заполнены не-null значениями.
+- `instruction` - agent-instruction path: CLI доверяет сигналу модели `done: true`.
+- `combined` - оба условия обязательны: все поля заполнены и `done: true`.
+
+Интерактивный пример:
+
+```bash
+aiteach chat --profile work \
+  --required-field topic \
+  --required-field audience \
+  --required-field format \
+  --goal-stop-mode combined
+```
+
+Внутри chat можно менять цель:
+
+```text
+/goal
+/goal field deadline
+/goal mode state
+/goal mode instruction
+/goal mode combined
+/goal clear
+```
+
+Сравнение способов остановки:
+
+```bash
+aiteach compare-goal --profile work \
+  "Собери требования к статье" \
+  --required-field topic \
+  --required-field audience \
+  --required-field format
+```
+
+`compare-goal` отправляет один и тот же prompt в трех вариантах:
+
+1. `state` - приложение проверяет заполненность полей.
+2. `instruction` - приложение доверяет `done: true`.
+3. `combined` - приложение требует и заполненные поля, и `done: true`.
+
 ### Как Это Реализуется В API
 
 Все текущие provider-профили используют `POST /chat/completions`.
@@ -148,6 +225,7 @@ aiteach compare --profile work \
 - `max_tokens` отправляется как верхний лимит output tokens.
 - `stop` отправляется как массив stop sequences.
 - Явное описание формата и условие завершения добавляются как `system` messages перед user prompt.
+- Для dialogue stop CLI добавляет system-инструкцию вернуть JSON с `fields`, `next_question` и `done`, а затем локально проверяет `GoalState`.
 
 Примечание: для некоторых новых OpenAI reasoning-моделей может использоваться `max_completion_tokens`; этот CLI сейчас ориентирован на OpenAI-compatible Chat Completions и отправляет `max_tokens`.
 
@@ -157,6 +235,7 @@ aiteach compare --profile work \
 - OpenRouter принимает OpenAI-compatible body и документирует `response_format`, `max_tokens` и `stop`.
 - CLI добавляет обязательные provider headers `HTTP-Referer` и `X-Title`, затем отправляет те же control-поля.
 - Provider нормализует `finish_reason`, включая `stop` и `length`.
+- Dialogue stop реализован на стороне CLI: OpenRouter получает обычный OpenAI-compatible JSON-mode request, а `aiteach` проверяет required fields и `done`.
 
 Docs: [OpenRouter parameters](https://openrouter.ai/docs/api/reference/parameters), [OpenRouter API overview](https://openrouter.ai/docs/api-reference/overview).
 
@@ -166,6 +245,7 @@ Docs: [OpenRouter parameters](https://openrouter.ai/docs/api/reference/parameter
 - DeepSeek JSON Output реализуется через `response_format: {"type":"json_object"}`.
 - DeepSeek рекомендует задавать разумный `max_tokens`, чтобы JSON не обрезался посередине.
 - `stop` поддерживается как строка или список stop sequences.
+- Для dialogue stop используется DeepSeek JSON Output: CLI просит JSON object и локально сравнивает `fields`/`done` с выбранным stop mode.
 
 Docs: [DeepSeek JSON Output](https://api-docs.deepseek.com/guides/json_mode/), [DeepSeek chat completion](https://api-docs.deepseek.com/zh-cn/api/create-chat-completion/).
 
@@ -175,6 +255,7 @@ Docs: [DeepSeek JSON Output](https://api-docs.deepseek.com/guides/json_mode/), [
 - GigaChat Chat Completions использует OpenAI-like request shape с `messages`, `model` и `max_tokens`.
 - CLI отправляет `max_tokens`, `stop` и `response_format` в том же body. Если конкретная GigaChat-модель или тариф не поддерживает поле, provider вернет HTTP/API error, который CLI покажет без раскрытия токена.
 - Явное описание формата и условие завершения всегда доступны через `system` messages.
+- Для dialogue stop CLI не полагается на provider-specific session state: состояние required fields хранится локально.
 
 Docs: [GigaChat model selection example](https://developers.sber.ru/docs/ru/gigachat/guides/selecting-a-model), [GigaChat streaming example](https://developers.sber.ru/docs/ru/gigachat/guides/response-token-streaming).
 
@@ -184,6 +265,7 @@ Docs: [GigaChat model selection example](https://developers.sber.ru/docs/ru/giga
 - Kimi/Moonshot работает через OpenAI-compatible Chat Completions.
 - CLI отправляет `response_format`, `max_tokens` и `stop` в request body.
 - Для thinking-моделей reasoning tokens тоже входят в token budget, поэтому маленький `max_tokens` может оставить мало места для финального ответа.
+- Для dialogue stop CLI использует тот же JSON object contract и локальную проверку заполненности сущности.
 
 Docs: [Kimi FAQ](https://platform.kimi.ai/docs/guide/faq), [Kimi thinking models](https://platform.moonshot.ai/docs/guide/use-kimi-k2-thinking-model.en-US).
 
@@ -261,6 +343,11 @@ aiteach ask --profile work "Explain Rust ownership"
 aiteach ask --profile work "Return a short summary" --max-tokens 120
 aiteach ask --profile work "Return an object with title and bullets" --response-format json-object
 aiteach compare --profile work "Compare Rust and Go" --max-tokens 120 --stop "END"
+aiteach compare-goal --profile work \
+  "Collect article requirements" \
+  --required-field topic \
+  --required-field audience \
+  --required-field format
 aiteach chat --profile work
 
 aiteach config path
@@ -332,6 +419,13 @@ Commands only show whether a token exists. The full token value is never printed
 - `/stop clear`
 - `/format-instruction <text>`
 - `/completion-instruction <text>`
+- `/goal`
+- `/goal clear`
+- `/goal field <name>`
+- `/goal mode manual`
+- `/goal mode state`
+- `/goal mode instruction`
+- `/goal mode combined`
 
 History is stored locally and does not contain tokens. Prompts and responses are not logged in debug output unless an explicit future `--log-conversation` mode is implemented.
 
@@ -366,6 +460,71 @@ aiteach compare --profile work \
 
 The result prints two blocks: `Without constraints` and `With constraints`.
 
+### Dialogue Completion
+
+There are two different stopping levels:
+
+- Response stop: `stop`, `max_tokens`, `completion_instruction`. This ends one provider generation.
+- Dialogue stop: the application decides whether to continue the agentic data-collection loop.
+
+For dialogue stop, `aiteach` supports an entity with required fields. The model is asked to return JSON:
+
+```json
+{
+  "fields": {
+    "topic": "Rust ownership",
+    "audience": "junior developers",
+    "format": null
+  },
+  "next_question": "Which format do you need?",
+  "done": false
+}
+```
+
+Modes:
+
+- `manual` - the CLI does not stop the dialogue automatically.
+- `state` - deterministic code path: the CLI stops when every `--required-field` has a non-null value.
+- `instruction` - agent-instruction path: the CLI trusts the model signal `done: true`.
+- `combined` - both conditions are required: all fields are filled and `done: true`.
+
+Interactive example:
+
+```bash
+aiteach chat --profile work \
+  --required-field topic \
+  --required-field audience \
+  --required-field format \
+  --goal-stop-mode combined
+```
+
+Inside chat, the goal can be changed:
+
+```text
+/goal
+/goal field deadline
+/goal mode state
+/goal mode instruction
+/goal mode combined
+/goal clear
+```
+
+Compare stopping strategies:
+
+```bash
+aiteach compare-goal --profile work \
+  "Collect article requirements" \
+  --required-field topic \
+  --required-field audience \
+  --required-field format
+```
+
+`compare-goal` sends the same prompt in three variants:
+
+1. `state` - the application checks field completeness.
+2. `instruction` - the application trusts `done: true`.
+3. `combined` - the application requires both complete fields and `done: true`.
+
 ### API Implementation Details
 
 All current provider profiles use `POST /chat/completions`.
@@ -377,6 +536,7 @@ All current provider profiles use `POST /chat/completions`.
 - `max_tokens` is sent as the output token cap.
 - `stop` is sent as an array of stop sequences.
 - Explicit format and completion conditions are added as `system` messages before the user prompt.
+- For dialogue stop, the CLI adds a system instruction to return JSON with `fields`, `next_question`, and `done`, then checks local `GoalState`.
 
 Note: some newer OpenAI reasoning models use `max_completion_tokens`; this CLI currently targets OpenAI-compatible Chat Completions and sends `max_tokens`.
 
@@ -386,6 +546,7 @@ Note: some newer OpenAI reasoning models use `max_completion_tokens`; this CLI c
 - OpenRouter accepts an OpenAI-compatible body and documents `response_format`, `max_tokens`, and `stop`.
 - The CLI adds provider headers `HTTP-Referer` and `X-Title`, then sends the same control fields.
 - The provider normalizes `finish_reason`, including `stop` and `length`.
+- Dialogue stop is implemented by the CLI: OpenRouter receives a regular OpenAI-compatible JSON-mode request, while `aiteach` checks required fields and `done`.
 
 Docs: [OpenRouter parameters](https://openrouter.ai/docs/api/reference/parameters), [OpenRouter API overview](https://openrouter.ai/docs/api-reference/overview).
 
@@ -395,6 +556,7 @@ Docs: [OpenRouter parameters](https://openrouter.ai/docs/api/reference/parameter
 - DeepSeek JSON Output is implemented with `response_format: {"type":"json_object"}`.
 - DeepSeek recommends setting a reasonable `max_tokens` value so JSON is not truncated midway.
 - `stop` is supported as a string or a list of stop sequences.
+- Dialogue stop uses DeepSeek JSON Output: the CLI requests a JSON object and locally compares `fields`/`done` against the selected stop mode.
 
 Docs: [DeepSeek JSON Output](https://api-docs.deepseek.com/guides/json_mode/), [DeepSeek chat completion](https://api-docs.deepseek.com/zh-cn/api/create-chat-completion/).
 
@@ -404,6 +566,7 @@ Docs: [DeepSeek JSON Output](https://api-docs.deepseek.com/guides/json_mode/), [
 - GigaChat Chat Completions uses an OpenAI-like request shape with `messages`, `model`, and `max_tokens`.
 - The CLI sends `max_tokens`, `stop`, and `response_format` in the same body. If a concrete GigaChat model or plan does not support a field, the provider returns an HTTP/API error and the CLI reports it without exposing the token.
 - Explicit format and completion conditions remain available through `system` messages.
+- For dialogue stop, the CLI does not rely on provider-specific session state: required field state is stored locally.
 
 Docs: [GigaChat model selection example](https://developers.sber.ru/docs/ru/gigachat/guides/selecting-a-model), [GigaChat streaming example](https://developers.sber.ru/docs/ru/gigachat/guides/response-token-streaming).
 
@@ -413,6 +576,7 @@ Docs: [GigaChat model selection example](https://developers.sber.ru/docs/ru/giga
 - Kimi/Moonshot works through OpenAI-compatible Chat Completions.
 - The CLI sends `response_format`, `max_tokens`, and `stop` in the request body.
 - For thinking models, reasoning tokens also count toward the token budget, so a small `max_tokens` value can leave little room for the final answer.
+- Dialogue stop uses the same JSON object contract and local entity completeness check.
 
 Docs: [Kimi FAQ](https://platform.kimi.ai/docs/guide/faq), [Kimi thinking models](https://platform.moonshot.ai/docs/guide/use-kimi-k2-thinking-model.en-US).
 

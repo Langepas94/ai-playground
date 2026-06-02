@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     io::{self, Write},
     path::PathBuf,
@@ -12,6 +13,132 @@ use crate::{
     providers::{ChatMessage, ChatRequest, ProviderClient, ResponseControl, ResponseFormat, Role},
     secrets::SecretStore,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConversationStopMode {
+    #[default]
+    Manual,
+    State,
+    Instruction,
+    Combined,
+}
+
+impl std::fmt::Display for ConversationStopMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Manual => write!(f, "manual"),
+            Self::State => write!(f, "state"),
+            Self::Instruction => write!(f, "instruction"),
+            Self::Combined => write!(f, "combined"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ConversationGoal {
+    pub required_fields: Vec<String>,
+    pub mode: ConversationStopMode,
+}
+
+impl ConversationGoal {
+    pub fn disabled() -> Self {
+        Self::default()
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        !self.required_fields.is_empty() && self.mode != ConversationStopMode::Manual
+    }
+
+    pub fn apply_to_control(&self, mut control: ResponseControl) -> ResponseControl {
+        if !self.is_enabled() {
+            return control;
+        }
+
+        control.format = ResponseFormat::JsonObject;
+        control.format_instruction = Some(merge_instruction(
+            control.format_instruction,
+            goal_format_instruction(&self.required_fields),
+        ));
+        if matches!(
+            self.mode,
+            ConversationStopMode::Instruction | ConversationStopMode::Combined
+        ) {
+            control.completion_instruction = Some(merge_instruction(
+                control.completion_instruction,
+                goal_completion_instruction(&self.required_fields),
+            ));
+        }
+        control
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalState {
+    required_fields: Vec<String>,
+    values: BTreeMap<String, serde_json::Value>,
+    done_signal: bool,
+}
+
+impl GoalState {
+    pub fn new(required_fields: Vec<String>) -> Self {
+        Self {
+            required_fields,
+            values: BTreeMap::new(),
+            done_signal: false,
+        }
+    }
+
+    pub fn update_from_response(&mut self, text: &str) -> Result<(), AppError> {
+        let value: serde_json::Value =
+            serde_json::from_str(text).map_err(|error| AppError::Json(error.to_string()))?;
+        self.done_signal = value
+            .get("done")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+
+        let fields = value.get("fields").unwrap_or(&value);
+        for field in &self.required_fields {
+            if let Some(field_value) = fields.get(field)
+                && is_filled(field_value)
+            {
+                self.values.insert(field.clone(), field_value.clone());
+            }
+        }
+        Ok(())
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.required_fields
+            .iter()
+            .all(|field| self.values.get(field).is_some_and(is_filled))
+    }
+
+    pub fn done_signal(&self) -> bool {
+        self.done_signal
+    }
+
+    pub fn should_stop(&self, mode: ConversationStopMode) -> bool {
+        match mode {
+            ConversationStopMode::Manual => false,
+            ConversationStopMode::State => self.is_complete(),
+            ConversationStopMode::Instruction => self.done_signal,
+            ConversationStopMode::Combined => self.is_complete() && self.done_signal,
+        }
+    }
+
+    pub fn summary(&self) -> String {
+        let filled = self
+            .required_fields
+            .iter()
+            .filter(|field| self.values.get(*field).is_some_and(is_filled))
+            .count();
+        format!(
+            "{filled}/{} required fields filled; done_signal={}",
+            self.required_fields.len(),
+            self.done_signal
+        )
+    }
+}
 
 pub async fn ask_once(
     client: &dyn ProviderClient,
@@ -83,6 +210,53 @@ pub async fn compare_response_control(
     Ok((unrestricted, restricted))
 }
 
+pub async fn compare_goal_stop(
+    client: &dyn ProviderClient,
+    secrets: &dyn SecretStore,
+    profile_name: &str,
+    profile: &ProfileConfig,
+    prompt: String,
+    required_fields: Vec<String>,
+) -> Result<GoalComparison, AppError> {
+    let token = secrets
+        .get_token(&profile.token_ref)?
+        .ok_or_else(|| AppError::MissingToken {
+            profile: profile_name.to_string(),
+        })?;
+    let state = run_goal_once(
+        client,
+        profile,
+        &token,
+        prompt.clone(),
+        &required_fields,
+        ConversationStopMode::State,
+    )
+    .await?;
+    let instruction = run_goal_once(
+        client,
+        profile,
+        &token,
+        prompt.clone(),
+        &required_fields,
+        ConversationStopMode::Instruction,
+    )
+    .await?;
+    let combined = run_goal_once(
+        client,
+        profile,
+        &token,
+        prompt,
+        &required_fields,
+        ConversationStopMode::Combined,
+    )
+    .await?;
+    Ok(GoalComparison {
+        state,
+        instruction,
+        combined,
+    })
+}
+
 pub async fn interactive_chat(
     client: &dyn ProviderClient,
     secrets: &dyn SecretStore,
@@ -90,6 +264,7 @@ pub async fn interactive_chat(
     profile_name: &str,
     profile: &ProfileConfig,
     mut control: ResponseControl,
+    mut goal: ConversationGoal,
 ) -> Result<(), AppError> {
     let token = secrets
         .get_token(&profile.token_ref)?
@@ -97,11 +272,14 @@ pub async fn interactive_chat(
             profile: profile_name.to_string(),
         })?;
     let mut messages = Vec::<ChatMessage>::new();
+    let mut goal_state = GoalState::new(goal.required_fields.clone());
     println!(
         "Chat started with profile '{profile_name}' and model '{}'.",
         profile.model
     );
-    println!("Use /exit, /profile, /model, /clear, /save, /control, /format, /max-tokens, /stop.");
+    println!(
+        "Use /exit, /profile, /model, /clear, /save, /control, /format, /max-tokens, /stop, /goal."
+    );
 
     loop {
         print!("> ");
@@ -141,9 +319,19 @@ pub async fn interactive_chat(
                 println!("{}", describe_control(&control));
                 continue;
             }
+            "/goal" => {
+                println!("{}", describe_goal(&goal, &goal_state));
+                continue;
+            }
             "/control clear" => {
                 control = ResponseControl::uncontrolled();
                 println!("Response control cleared.");
+                continue;
+            }
+            "/goal clear" => {
+                goal = ConversationGoal::disabled();
+                goal_state = GoalState::new(Vec::new());
+                println!("Conversation goal cleared.");
                 continue;
             }
             "/stop clear" => {
@@ -190,6 +378,33 @@ pub async fn interactive_chat(
             continue;
         }
 
+        if let Some(value) = line.strip_prefix("/goal field ") {
+            if value.is_empty() {
+                println!("Use /goal field <name>.");
+            } else if goal.required_fields.iter().any(|field| field == value) {
+                println!("Goal field already exists.");
+            } else {
+                goal.required_fields.push(value.to_string());
+                goal_state = GoalState::new(goal.required_fields.clone());
+                if goal.mode == ConversationStopMode::Manual {
+                    goal.mode = ConversationStopMode::State;
+                }
+                println!("Goal field added: {value}");
+            }
+            continue;
+        }
+
+        if let Some(value) = line.strip_prefix("/goal mode ") {
+            match parse_stop_mode(value) {
+                Some(mode) => {
+                    goal.mode = mode;
+                    println!("Goal stop mode: {mode}");
+                }
+                None => println!("Use /goal mode manual|state|instruction|combined."),
+            }
+            continue;
+        }
+
         if let Some(value) = line.strip_prefix("/completion-instruction ") {
             control.completion_instruction = Some(value.to_string());
             println!("Completion instruction updated.");
@@ -207,6 +422,7 @@ pub async fn interactive_chat(
             content: line.to_string(),
         });
         eprintln!("Waiting for provider response...");
+        let effective_control = goal.apply_to_control(control.clone());
         let response = client
             .chat_completion(
                 profile,
@@ -214,11 +430,25 @@ pub async fn interactive_chat(
                 ChatRequest {
                     model: profile.model.clone(),
                     messages: messages.clone(),
-                    control: control.clone(),
+                    control: effective_control,
                 },
             )
             .await?;
         println!("{}", response.text);
+
+        if goal.is_enabled() {
+            match goal_state.update_from_response(&response.text) {
+                Ok(()) => {
+                    println!("Goal state: {}", goal_state.summary());
+                    if goal_state.should_stop(goal.mode) {
+                        println!("Conversation goal reached by {} stop mode.", goal.mode);
+                        break;
+                    }
+                }
+                Err(error) => println!("Goal state was not updated: {error}"),
+            }
+        }
+
         messages.push(ChatMessage {
             role: Role::Assistant,
             content: response.text,
@@ -229,6 +459,58 @@ pub async fn interactive_chat(
         println!("Session used non-active profile '{profile_name}'.");
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalRun {
+    pub mode: ConversationStopMode,
+    pub response: String,
+    pub state_summary: String,
+    pub stopped: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalComparison {
+    pub state: GoalRun,
+    pub instruction: GoalRun,
+    pub combined: GoalRun,
+}
+
+async fn run_goal_once(
+    client: &dyn ProviderClient,
+    profile: &ProfileConfig,
+    token: &str,
+    prompt: String,
+    required_fields: &[String],
+    mode: ConversationStopMode,
+) -> Result<GoalRun, AppError> {
+    let goal = ConversationGoal {
+        required_fields: required_fields.to_vec(),
+        mode,
+    };
+    let response = client
+        .chat_completion(
+            profile,
+            token,
+            ChatRequest {
+                model: profile.model.clone(),
+                messages: vec![ChatMessage {
+                    role: Role::User,
+                    content: prompt,
+                }],
+                control: goal.apply_to_control(ResponseControl::uncontrolled()),
+            },
+        )
+        .await?;
+    let mut state = GoalState::new(required_fields.to_vec());
+    state.update_from_response(&response.text)?;
+    let stopped = state.should_stop(mode);
+    Ok(GoalRun {
+        mode,
+        response: response.text,
+        state_summary: state.summary(),
+        stopped,
+    })
 }
 
 pub fn describe_control(control: &ResponseControl) -> String {
@@ -251,6 +533,63 @@ pub fn describe_control(control: &ResponseControl) -> String {
         control.format_instruction.as_deref().unwrap_or("none"),
         control.completion_instruction.as_deref().unwrap_or("none")
     )
+}
+
+pub fn describe_goal(goal: &ConversationGoal, state: &GoalState) -> String {
+    if !goal.is_enabled() {
+        return "Conversation goal: none".to_string();
+    }
+    format!(
+        "Conversation goal: mode={}, required_fields={}, {}",
+        goal.mode,
+        goal.required_fields.join(", "),
+        state.summary()
+    )
+}
+
+fn parse_stop_mode(value: &str) -> Option<ConversationStopMode> {
+    match value {
+        "manual" => Some(ConversationStopMode::Manual),
+        "state" => Some(ConversationStopMode::State),
+        "instruction" => Some(ConversationStopMode::Instruction),
+        "combined" => Some(ConversationStopMode::Combined),
+        _ => None,
+    }
+}
+
+fn goal_format_instruction(required_fields: &[String]) -> String {
+    format!(
+        "You are collecting a structured entity. Return only a JSON object with this shape: {{\"fields\":{{{}}},\"next_question\":\"string or null\",\"done\":boolean}}. Use null for unknown fields.",
+        required_fields
+            .iter()
+            .map(|field| format!("\"{field}\":null"))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn goal_completion_instruction(required_fields: &[String]) -> String {
+    format!(
+        "When all required fields are known ({}), set done=true and stop asking follow-up questions. Otherwise set done=false and ask one next_question.",
+        required_fields.join(", ")
+    )
+}
+
+fn merge_instruction(existing: Option<String>, added: String) -> String {
+    match existing {
+        Some(existing) if !existing.trim().is_empty() => format!("{existing}\n{added}"),
+        _ => added,
+    }
+}
+
+fn is_filled(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => false,
+        serde_json::Value::String(value) => !value.trim().is_empty(),
+        serde_json::Value::Array(value) => !value.is_empty(),
+        serde_json::Value::Object(value) => !value.is_empty(),
+        serde_json::Value::Bool(_) | serde_json::Value::Number(_) => true,
+    }
 }
 
 pub fn save_history(profile_name: &str, messages: &[ChatMessage]) -> Result<PathBuf, AppError> {
@@ -282,4 +621,73 @@ pub fn save_history(profile_name: &str, messages: &[ChatMessage]) -> Result<Path
         message: format!("could not write history: {error}"),
     })?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_stop_uses_filled_required_fields() {
+        let mut state = GoalState::new(vec!["topic".to_string(), "audience".to_string()]);
+        state
+            .update_from_response(r#"{"fields":{"topic":"Rust","audience":"junior"},"done":false}"#)
+            .expect("update");
+
+        assert!(state.is_complete());
+        assert!(state.should_stop(ConversationStopMode::State));
+        assert!(!state.should_stop(ConversationStopMode::Instruction));
+        assert!(!state.should_stop(ConversationStopMode::Combined));
+    }
+
+    #[test]
+    fn instruction_stop_trusts_done_signal() {
+        let mut state = GoalState::new(vec!["topic".to_string(), "audience".to_string()]);
+        state
+            .update_from_response(r#"{"fields":{"topic":"Rust","audience":null},"done":true}"#)
+            .expect("update");
+
+        assert!(!state.is_complete());
+        assert!(!state.should_stop(ConversationStopMode::State));
+        assert!(state.should_stop(ConversationStopMode::Instruction));
+        assert!(!state.should_stop(ConversationStopMode::Combined));
+    }
+
+    #[test]
+    fn combined_stop_requires_state_and_done_signal() {
+        let mut state = GoalState::new(vec!["topic".to_string()]);
+        state
+            .update_from_response(r#"{"fields":{"topic":"Rust"},"done":true}"#)
+            .expect("update");
+
+        assert!(state.should_stop(ConversationStopMode::State));
+        assert!(state.should_stop(ConversationStopMode::Instruction));
+        assert!(state.should_stop(ConversationStopMode::Combined));
+    }
+
+    #[test]
+    fn goal_control_forces_json_and_preserves_user_instruction() {
+        let goal = ConversationGoal {
+            required_fields: vec!["topic".to_string()],
+            mode: ConversationStopMode::Combined,
+        };
+        let control = goal.apply_to_control(ResponseControl {
+            format_instruction: Some("Use concise values.".to_string()),
+            ..ResponseControl::uncontrolled()
+        });
+
+        assert_eq!(control.format, ResponseFormat::JsonObject);
+        assert!(
+            control
+                .format_instruction
+                .expect("format instruction")
+                .contains("Use concise values.")
+        );
+        assert!(
+            control
+                .completion_instruction
+                .expect("completion instruction")
+                .contains("done=true")
+        );
+    }
 }
