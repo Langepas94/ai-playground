@@ -367,6 +367,10 @@ fn profile_command(command: &ProfileCommand, secrets: &dyn SecretStore) -> Resul
 }
 
 fn setup_command(args: &SetupArgs, secrets: &dyn SecretStore) -> Result<(), AppError> {
+    println!("aiteach setup");
+    println!("Press Enter to accept the value shown in brackets.");
+    println!();
+
     let mut config = AppConfig::load()?;
     let profile = collect_profile_input(
         args.name.clone(),
@@ -380,8 +384,10 @@ fn setup_command(args: &SetupArgs, secrets: &dyn SecretStore) -> Result<(), AppE
     let token_ref = config.profiles[&profile.name].token_ref.clone();
     config.save()?;
 
+    println!();
     println!("Profile '{}' is active.", profile.name);
-    let token = prompt_optional_secret("Paste API token now, or press Enter to skip")?;
+    println!("The token will be stored in the OS keychain, not in config.");
+    let token = prompt_optional_secret("API token (paste it, or press Enter to skip)")?;
     if let Some(token) = token {
         secrets.set_token(&token_ref, &token)?;
         println!("Token saved for profile '{}'.", profile.name);
@@ -391,6 +397,11 @@ fn setup_command(args: &SetupArgs, secrets: &dyn SecretStore) -> Result<(), AppE
             profile.name
         );
     }
+    println!();
+    println!("Next commands:");
+    println!("  aiteach doctor");
+    println!("  aiteach ask \"Сколько будет 3 + 2?\"");
+    println!("  aiteach chat");
     Ok(())
 }
 
@@ -437,15 +448,24 @@ fn collect_profile_input(
     };
     let name = match name {
         Some(name) => name,
-        None => prompt_with_default("Profile name", &provider.to_string())?,
+        None => prompt_with_default(
+            "Profile name. This is just a local nickname for this provider",
+            &provider.to_string(),
+        )?,
     };
     let model = match model {
         Some(model) => model,
-        None => prompt_with_default("Model", provider.default_model())?,
+        None => prompt_with_default(
+            "Model. Press Enter if you do not know what to choose",
+            provider.default_model(),
+        )?,
     };
     let base_url = match base_url {
         Some(base_url) => base_url,
-        None => prompt_with_default("Base URL", provider.default_base_url())?,
+        None => prompt_with_default(
+            "Base URL. Press Enter unless you use a custom compatible endpoint",
+            provider.default_base_url(),
+        )?,
     };
 
     Ok(CollectedProfile {
@@ -460,20 +480,27 @@ fn collect_profile_input(
 }
 
 fn prompt_provider() -> Result<ProviderKind, AppError> {
-    println!("Choose provider:");
+    println!("Choose provider.");
+    println!("If unsure, choose 2 for OpenRouter or press Enter for the recommended default.");
     for (index, provider) in ProviderKind::all().iter().enumerate() {
         let spec = provider.spec();
+        let recommended = if *provider == ProviderKind::OpenRouter {
+            " recommended"
+        } else {
+            ""
+        };
         println!(
-            "  {}. {} ({}) - default model: {}",
+            "  {}. {} ({}) - default model: {}{}",
             index + 1,
             spec.display_name,
             provider,
-            spec.default_model
+            spec.default_model,
+            recommended
         );
     }
 
     loop {
-        let raw = prompt("Provider number or name")?;
+        let raw = prompt("Provider number or name [2]")?;
         if raw.trim().is_empty() {
             return Ok(ProviderKind::OpenRouter);
         }
@@ -492,6 +519,7 @@ fn prompt_provider() -> Result<ProviderKind, AppError> {
 fn prompt_with_default(label: &str, default: &str) -> Result<String, AppError> {
     let raw = prompt(&format!("{label} [{default}]"))?;
     if raw.trim().is_empty() {
+        println!("Using default: {default}");
         Ok(default.to_string())
     } else {
         Ok(raw)

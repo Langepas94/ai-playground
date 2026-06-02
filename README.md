@@ -26,6 +26,18 @@ aiteach setup
 
 `setup` показывает список провайдеров, предлагает дефолтную модель, `base_url`, имя профиля и позволяет сразу сохранить токен в OS keychain. Токен не пишется в config.
 
+В `setup` можно нажимать Enter, чтобы принять значение в квадратных скобках:
+
+```text
+Provider number or name [2]:      # Enter выберет OpenRouter
+Profile name [openrouter]:        # Enter оставит имя openrouter
+Model [openai/gpt-4.1-mini]:      # Enter оставит модель по умолчанию
+Base URL [https://...]:           # Enter оставит адрес по умолчанию
+API token (...):                  # вставьте токен или Enter, чтобы добавить позже
+```
+
+Если не знаете, что вводить в `Model` или `Base URL`, нажимайте Enter.
+
 `profile add` тоже можно запускать без аргументов:
 
 ```bash
@@ -644,6 +656,18 @@ aiteach setup
 ```
 
 `setup` shows a provider menu, suggests the default model, `base_url`, profile name, and lets the user save the token directly into the OS keychain. The token is not written to config.
+
+In `setup`, press Enter to accept the value shown in brackets:
+
+```text
+Provider number or name [2]:      # Enter selects OpenRouter
+Profile name [openrouter]:        # Enter keeps openrouter
+Model [openai/gpt-4.1-mini]:      # Enter keeps the default model
+Base URL [https://...]:           # Enter keeps the default URL
+API token (...):                  # paste token or press Enter to add it later
+```
+
+If you do not know what to enter for `Model` or `Base URL`, press Enter.
 
 `profile add` can also run without arguments:
 
