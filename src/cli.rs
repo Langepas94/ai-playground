@@ -1,13 +1,16 @@
 use std::io::{self, Write};
 
 use anyhow::Result;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::{
     chat,
     config::{AppConfig, ProfileConfig},
     errors::AppError,
-    providers::{ProviderClient, ProviderKind, ReqwestProviderClient, validate_base_url},
+    providers::{
+        ProviderClient, ProviderKind, ReqwestProviderClient, ResponseControl, ResponseFormat,
+        validate_base_url,
+    },
     secrets::{KeyringSecretStore, SecretStore},
 };
 
@@ -38,6 +41,8 @@ enum Command {
     },
     Ask(AskArgs),
     Chat(ProfileArg),
+    #[command(about = "Run the same prompt once without controls and once with response controls")]
+    Compare(CompareArgs),
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -80,17 +85,84 @@ struct AskArgs {
     prompt: String,
     #[arg(long)]
     profile: Option<String>,
+    #[command(flatten)]
+    control: ResponseControlArgs,
+}
+
+#[derive(Debug, Args)]
+struct CompareArgs {
+    prompt: String,
+    #[arg(long)]
+    profile: Option<String>,
+    #[command(flatten)]
+    control: ResponseControlArgs,
 }
 
 #[derive(Debug, Args)]
 struct ProfileArg {
     #[arg(long)]
     profile: Option<String>,
+    #[command(flatten)]
+    control: ResponseControlArgs,
 }
 
 #[derive(Debug, Subcommand)]
 enum ConfigCommand {
     Path,
+}
+
+#[derive(Debug, Clone, Args, Default)]
+struct ResponseControlArgs {
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = CliResponseFormat::Text,
+        help = "Response format requested from the provider"
+    )]
+    response_format: CliResponseFormat,
+    #[arg(
+        long,
+        help = "Maximum number of output tokens requested from the provider"
+    )]
+    max_tokens: Option<u32>,
+    #[arg(
+        long,
+        action = clap::ArgAction::Append,
+        help = "Stop sequence; can be provided multiple times"
+    )]
+    stop: Vec<String>,
+    #[arg(
+        long,
+        help = "System instruction that explicitly describes the response format"
+    )]
+    format_instruction: Option<String>,
+    #[arg(
+        long,
+        help = "System instruction that describes when the answer should finish"
+    )]
+    completion_instruction: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+enum CliResponseFormat {
+    #[default]
+    Text,
+    JsonObject,
+}
+
+impl From<&ResponseControlArgs> for ResponseControl {
+    fn from(args: &ResponseControlArgs) -> Self {
+        Self {
+            format: match args.response_format {
+                CliResponseFormat::Text => ResponseFormat::Text,
+                CliResponseFormat::JsonObject => ResponseFormat::JsonObject,
+            },
+            max_tokens: args.max_tokens,
+            stop: args.stop.clone(),
+            format_instruction: args.format_instruction.clone(),
+            completion_instruction: args.completion_instruction.clone(),
+        }
+    }
 }
 
 pub async fn run() -> Result<()> {
@@ -117,6 +189,7 @@ async fn run_with_store(cli: &Cli, secrets: &dyn SecretStore) -> Result<(), AppE
         Command::Models { command } => models_command(command, secrets).await,
         Command::Ask(args) => ask_command(args, secrets).await,
         Command::Chat(args) => chat_command(args, secrets).await,
+        Command::Compare(args) => compare_command(args, secrets).await,
         Command::Config { command } => match command {
             ConfigCommand::Path => {
                 println!("{}", AppConfig::config_path()?.display());
@@ -235,7 +308,15 @@ async fn ask_command(args: &AskArgs, secrets: &dyn SecretStore) -> Result<(), Ap
     let (name, profile) = config.selected_profile(args.profile.as_deref())?;
     eprintln!("Waiting for provider response...");
     let client = ReqwestProviderClient::new()?;
-    let text = chat::ask_once(&client, secrets, &name, profile, args.prompt.clone()).await?;
+    let text = chat::ask_once(
+        &client,
+        secrets,
+        &name,
+        profile,
+        args.prompt.clone(),
+        ResponseControl::from(&args.control),
+    )
+    .await?;
     println!("{text}");
     Ok(())
 }
@@ -244,7 +325,35 @@ async fn chat_command(args: &ProfileArg, secrets: &dyn SecretStore) -> Result<()
     let config = AppConfig::load()?;
     let (name, profile) = config.selected_profile(args.profile.as_deref())?;
     let client = ReqwestProviderClient::new()?;
-    chat::interactive_chat(&client, secrets, &config, &name, profile).await
+    chat::interactive_chat(
+        &client,
+        secrets,
+        &config,
+        &name,
+        profile,
+        ResponseControl::from(&args.control),
+    )
+    .await
+}
+
+async fn compare_command(args: &CompareArgs, secrets: &dyn SecretStore) -> Result<(), AppError> {
+    let config = AppConfig::load()?;
+    let (name, profile) = config.selected_profile(args.profile.as_deref())?;
+    let control = ResponseControl::from(&args.control);
+    eprintln!("Waiting for unrestricted and controlled provider responses...");
+    let client = ReqwestProviderClient::new()?;
+    let (unrestricted, controlled) = chat::compare_response_control(
+        &client,
+        secrets,
+        &name,
+        profile,
+        args.prompt.clone(),
+        control,
+    )
+    .await?;
+    println!("## Without constraints\n{unrestricted}\n");
+    println!("## With constraints\n{controlled}");
+    Ok(())
 }
 
 fn doctor_command(args: &ProfileArg, secrets: &dyn SecretStore) -> Result<(), AppError> {

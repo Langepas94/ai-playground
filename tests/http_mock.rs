@@ -2,7 +2,8 @@ use aiteach::{
     config::ProfileConfig,
     errors::{AppError, HttpProblem},
     providers::{
-        ChatMessage, ChatRequest, ProviderClient, ProviderKind, ReqwestProviderClient, Role,
+        ChatMessage, ChatRequest, ProviderClient, ProviderKind, ReqwestProviderClient,
+        ResponseControl, Role,
     },
 };
 use reqwest::StatusCode;
@@ -41,6 +42,7 @@ async fn chat_completion_uses_mock_provider() {
                     role: Role::User,
                     content: "hello".to_string(),
                 }],
+                control: ResponseControl::uncontrolled(),
             },
         )
         .await

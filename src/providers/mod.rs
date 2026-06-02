@@ -103,15 +103,86 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResponseFormat {
+    #[default]
+    Text,
+    JsonObject,
+}
+
+impl std::fmt::Display for ResponseFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Text => write!(f, "text"),
+            Self::JsonObject => write!(f, "json-object"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ResponseControl {
+    pub format: ResponseFormat,
+    pub max_tokens: Option<u32>,
+    pub stop: Vec<String>,
+    pub format_instruction: Option<String>,
+    pub completion_instruction: Option<String>,
+}
+
+impl ResponseControl {
+    pub fn uncontrolled() -> Self {
+        Self::default()
+    }
+
+    pub fn is_uncontrolled(&self) -> bool {
+        self.format == ResponseFormat::Text
+            && self.max_tokens.is_none()
+            && self.stop.is_empty()
+            && self.format_instruction.is_none()
+            && self.completion_instruction.is_none()
+    }
+
+    pub fn instruction_messages(&self) -> Vec<ChatMessage> {
+        let mut messages = Vec::new();
+        match self.format {
+            ResponseFormat::Text => {
+                if let Some(instruction) = &self.format_instruction {
+                    messages.push(ChatMessage {
+                        role: Role::System,
+                        content: instruction.clone(),
+                    });
+                }
+            }
+            ResponseFormat::JsonObject => {
+                messages.push(ChatMessage {
+                    role: Role::System,
+                    content: self.format_instruction.clone().unwrap_or_else(|| {
+                        "Return only a valid JSON object. Do not include Markdown, prose, or code fences."
+                            .to_string()
+                    }),
+                });
+            }
+        }
+        if let Some(instruction) = &self.completion_instruction {
+            messages.push(ChatMessage {
+                role: Role::System,
+                content: instruction.clone(),
+            });
+        }
+        messages
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
+    pub control: ResponseControl,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatResponse {
     pub text: String,
+    pub finish_reason: Option<String>,
 }
 
 #[async_trait]
@@ -194,11 +265,37 @@ mod tests {
                 role: Role::User,
                 content: "hello".to_string(),
             }],
+            control: ResponseControl::uncontrolled(),
         });
 
         assert_eq!(payload.model, "m");
         assert_eq!(payload.messages[0].role, Role::User);
         assert_eq!(payload.messages[0].content, "hello");
+    }
+
+    #[test]
+    fn provider_request_mapping_includes_response_control() {
+        let payload = openai_compatible::chat_payload(ChatRequest {
+            model: "m".to_string(),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: "return data".to_string(),
+            }],
+            control: ResponseControl {
+                format: ResponseFormat::JsonObject,
+                max_tokens: Some(64),
+                stop: vec!["END".to_string()],
+                format_instruction: None,
+                completion_instruction: Some("Stop after the summary field.".to_string()),
+            },
+        });
+
+        assert_eq!(payload.max_tokens, Some(64));
+        assert_eq!(payload.stop, vec!["END"]);
+        assert_eq!(payload.response_format.expect("format").kind, "json_object");
+        assert_eq!(payload.messages[0].role, Role::System);
+        assert!(payload.messages[0].content.contains("valid JSON object"));
+        assert_eq!(payload.messages[2].role, Role::User);
     }
 
     #[test]

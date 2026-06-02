@@ -7,7 +7,7 @@ use crate::{
     errors::{AppError, EndpointCategory, HttpProblem, ProviderHttpError, map_http_status},
     providers::{
         AuthScheme, ChatMessage, ChatRequest, ChatResponse, ProviderKind, ProviderSpec,
-        StaticHeader,
+        ResponseControl, ResponseFormat, StaticHeader,
     },
 };
 
@@ -132,6 +132,18 @@ fn short_reason(body: &str) -> String {
 pub struct OpenAiChatPayload {
     pub model: String,
     pub messages: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<OpenAiResponseFormat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stop: Vec<String>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct OpenAiResponseFormat {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -142,6 +154,7 @@ struct OpenAiChatResponse {
 #[derive(Debug, Deserialize)]
 struct OpenAiChoice {
     message: OpenAiChoiceMessage,
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -160,10 +173,29 @@ struct ModelEntry {
 }
 
 pub fn chat_payload(request: ChatRequest) -> OpenAiChatPayload {
+    let response_format = api_response_format(request.control.format);
     OpenAiChatPayload {
         model: request.model,
-        messages: request.messages,
+        messages: controlled_messages(request.messages, &request.control),
+        response_format,
+        max_tokens: request.control.max_tokens,
+        stop: request.control.stop,
     }
+}
+
+fn api_response_format(format: ResponseFormat) -> Option<OpenAiResponseFormat> {
+    match format {
+        ResponseFormat::Text => None,
+        ResponseFormat::JsonObject => Some(OpenAiResponseFormat {
+            kind: "json_object",
+        }),
+    }
+}
+
+fn controlled_messages(messages: Vec<ChatMessage>, control: &ResponseControl) -> Vec<ChatMessage> {
+    let mut controlled = control.instruction_messages();
+    controlled.extend(messages);
+    controlled
 }
 
 fn parse_chat_response(spec: ProviderSpec, raw: &str) -> Result<ChatResponse, AppError> {
@@ -176,22 +208,28 @@ fn parse_chat_response(spec: ProviderSpec, raw: &str) -> Result<ChatResponse, Ap
             reason: error.to_string(),
         })
     })?;
-    let text = parsed
-        .choices
-        .into_iter()
-        .next()
-        .map(|choice| choice.message.content)
-        .filter(|content| !content.is_empty())
-        .ok_or_else(|| {
-            AppError::ProviderHttp(ProviderHttpError {
-                provider: spec.kind.to_string(),
-                endpoint: EndpointCategory::Chat,
-                status: Some(StatusCode::OK),
-                problem: HttpProblem::UnexpectedFormat,
-                reason: "missing choices[0].message.content".to_string(),
-            })
-        })?;
-    Ok(ChatResponse { text })
+    let choice = parsed.choices.into_iter().next().ok_or_else(|| {
+        AppError::ProviderHttp(ProviderHttpError {
+            provider: spec.kind.to_string(),
+            endpoint: EndpointCategory::Chat,
+            status: Some(StatusCode::OK),
+            problem: HttpProblem::UnexpectedFormat,
+            reason: "missing choices[0].message.content".to_string(),
+        })
+    })?;
+    if choice.message.content.is_empty() {
+        return Err(AppError::ProviderHttp(ProviderHttpError {
+            provider: spec.kind.to_string(),
+            endpoint: EndpointCategory::Chat,
+            status: Some(StatusCode::OK),
+            problem: HttpProblem::UnexpectedFormat,
+            reason: "empty choices[0].message.content".to_string(),
+        }));
+    }
+    Ok(ChatResponse {
+        text: choice.message.content,
+        finish_reason: choice.finish_reason,
+    })
 }
 
 fn parse_models_response(spec: ProviderSpec, raw: &str) -> Result<Vec<String>, AppError> {
