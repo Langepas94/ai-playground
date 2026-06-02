@@ -62,57 +62,145 @@ aiteach config path
 aiteach doctor --profile work
 ```
 
-### Реальные Сценарии
+### Учебные Примеры Использования
 
-#### 1. Первый запуск и проверка профиля
+Этот раздел показывает не только команды, но и зачем они нужны. Думайте о настройках ответа как о ручках управления учителем: можно попросить “реши задачу”, а можно сказать “реши кратко, в 3 шага, верни JSON, остановись после слова END”.
+
+#### 1. Первый запуск: не придумывать профиль вручную
+
+Задача: пользователь впервые открыл CLI и не знает, что такое profile/provider/base_url.
 
 ```bash
 aiteach setup
+```
+
+Что делает CLI:
+
+1. Показывает список провайдеров: OpenRouter, DeepSeek, GigaChat, Kimi, OpenAI-compatible.
+2. Предлагает модель по умолчанию.
+3. Предлагает `base_url` по умолчанию.
+4. Предлагает имя профиля, например `openrouter`.
+5. Спрашивает токен и сохраняет его в OS keychain.
+
+Потом можно проверить:
+
+```bash
 aiteach profile list
 aiteach doctor
 ```
 
-Что происходит:
+Зачем это нужно: пользователь не должен помнить внутреннюю структуру config. Он выбирает из списка, как в мастере установки.
 
-- `setup` помогает выбрать provider и модель.
-- Токен сохраняется в OS keychain, а не в config.
-- `doctor` проверяет config, активный профиль, `base_url` и наличие токена без вывода секрета.
+#### 2. Простая задача “про яблоки” без контроля
 
-#### 2. Один короткий ответ
+Задача: спросить обычный вопрос.
 
 ```bash
-aiteach ask \
-  "Объясни ownership в Rust простыми словами" \
-  --max-tokens 140 \
-  --completion-instruction "Ответь максимум в 3 коротких пунктах и закончи мысль полностью."
+aiteach ask "У Маши было 3 яблока, она купила еще 2. Сколько яблок стало?"
 ```
 
-Используйте это для быстрых терминальных вопросов, где нужен лаконичный ответ. `max-tokens` задает жесткий верхний предел, а инструкция просит модель не обрывать мысль.
+Возможный ответ:
 
-#### 3. JSON для скрипта или пайплайна
+```text
+У Маши стало 5 яблок.
+```
+
+Зачем это нужно: обычный режим подходит, когда формат не важен и ответ можно просто прочитать глазами.
+
+#### 3. Та же задача, но нужен очень короткий ответ
+
+Проблема: модель может начать объяснять слишком подробно.
 
 ```bash
 aiteach ask \
-  "Разбери задачу: сделать CLI чат на Rust" \
+  "У Маши было 3 яблока, она купила еще 2. Сколько яблок стало?" \
+  --max-tokens 40 \
+  --completion-instruction "Ответь одним коротким предложением. Не добавляй объяснение."
+```
+
+Ожидаемый ответ:
+
+```text
+У Маши стало 5 яблок.
+```
+
+Что здесь происходит:
+
+- `--max-tokens 40` ставит жесткий потолок длины.
+- `--completion-instruction` объясняет модели, какой стиль нужен.
+
+Зачем это нужно: токены защищают от слишком длинного ответа, а инструкция помогает не получить грубый обрыв посередине мысли.
+
+#### 4. Ответ в строго заданном формате
+
+Задача: другой скрипт должен прочитать ответ. Текст вроде “У Маши стало 5 яблок” неудобен, нужен JSON.
+
+```bash
+aiteach ask \
+  "У Маши было 3 яблока, она купила еще 2. Верни результат." \
   --response-format json-object \
-  --format-instruction "Верни JSON object с полями title, risks, next_steps." \
-  --max-tokens 220
+  --format-instruction "Верни JSON object с полями initial, added, total." \
+  --max-tokens 120
 ```
 
-Такой режим удобен, когда результат дальше читает другой скрипт. CLI отправляет `response_format: {"type":"json_object"}` и добавляет system-инструкцию про формат.
+Ожидаемый ответ:
 
-#### 4. Остановить ответ по маркеру
+```json
+{
+  "initial": 3,
+  "added": 2,
+  "total": 5
+}
+```
+
+Зачем это нужно: если ответ читает программа, ей нужен предсказуемый формат, а не свободный текст.
+
+#### 5. Stop sequence: закончить мысль и остановиться по маркеру
+
+Проблема: если просто поставить маленький `max-tokens`, ответ может оборваться:
+
+```text
+У Маши стало 5 яб...
+```
+
+Лучше дать модели маркер завершения:
 
 ```bash
 aiteach ask \
-  "Сделай краткий план миграции проекта" \
+  "У Маши было 3 яблока, она купила еще 2. Объясни решение." \
   --stop "END_OF_ANSWER" \
-  --completion-instruction "Дай 5 пунктов максимум. После последнего пункта напиши END_OF_ANSWER."
+  --completion-instruction "Дай короткое решение. Когда закончишь мысль, напиши END_OF_ANSWER."
 ```
 
-Модель сама завершает мысль и пишет маркер, а API останавливает генерацию на `stop` sequence. Это мягче, чем просто упереться в лимит токенов.
+Ожидаемый ответ:
 
-#### 5. Интерактивный чат с управлением ответа
+```text
+3 + 2 = 5, значит у Маши стало 5 яблок.
+```
+
+Маркер `END_OF_ANSWER` не печатается, потому что API останавливает генерацию на stop sequence.
+
+Зачем это нужно: модель сама завершает мысль, а API технически останавливает поток в нужном месте.
+
+#### 6. Сравнить: без ограничений и с ограничениями
+
+Задача: увидеть разницу на одном и том же вопросе.
+
+```bash
+aiteach compare \
+  "У Маши было 3 яблока, она купила еще 2. Объясни решение." \
+  --max-tokens 60 \
+  --completion-instruction "Ответь одним предложением, без вступления."
+```
+
+CLI отправит два запроса:
+
+1. Без ограничений.
+2. С `max-tokens` и инструкцией.
+
+Зачем это нужно: вы видите, как один и тот же prompt меняется от уровня контроля. Это полезно перед тем, как встроить prompt в скрипт или продукт.
+
+#### 7. Интерактивный чат: менять правила по ходу разговора
 
 ```bash
 aiteach chat --max-tokens 180
@@ -121,75 +209,91 @@ aiteach chat --max-tokens 180
 Внутри чата:
 
 ```text
-/format json-object
-/max-tokens 120
-/completion-instruction Отвечай только списком из 3 пунктов.
+> Объясни задачу про яблоки
+/max-tokens 60
+/completion-instruction Отвечай как учитель в начальной школе, максимум 2 предложения.
+> Теперь объясни задачу про 7 груш и 4 груши
 /control
-/clear
 /exit
 ```
 
-Это удобно, когда вы настраиваете стиль ответа по ходу разговора.
+Зачем это нужно: иногда сначала нужен подробный ответ, потом краткий, потом JSON. Не надо перезапускать программу.
 
-#### 6. Сравнить один prompt без контроля и с контролем
+#### 8. Сбор сущности: анкета про яблоки
 
-```bash
-aiteach compare \
-  "Объясни async Rust" \
-  --max-tokens 160 \
-  --completion-instruction "Ответь в 3 коротких пунктах без вступления."
-```
+Задача: не просто ответить, а собрать все нужные поля для задачи. Например, нам нужны:
 
-Результат покажет два блока:
+- `item` - что считаем;
+- `initial_count` - сколько было;
+- `added_count` - сколько добавили.
 
-- `Without constraints` - обычный ответ.
-- `With constraints` - тот же prompt с ограничениями.
-
-#### 7. Собрать сущность и остановить диалог
+Команда:
 
 ```bash
 aiteach chat \
-  --required-field topic \
-  --required-field audience \
-  --required-field format \
+  --required-field item \
+  --required-field initial_count \
+  --required-field added_count \
   --goal-stop-mode combined
 ```
 
-Пользователь отвечает на уточняющие вопросы, а CLI останавливает диалог только когда:
+Пример диалога:
+
+```text
+> Составь задачу
+assistant: Какой предмет считаем?
+> яблоки
+assistant: Сколько яблок было сначала?
+> 3
+assistant: Сколько яблок добавили?
+> 2
+assistant: {"fields":{"item":"яблоки","initial_count":3,"added_count":2},"next_question":null,"done":true}
+```
+
+После этого CLI сам останавливает диалог, потому что:
 
 - все required fields заполнены;
-- модель вернула `done: true`.
+- модель вернула `done: true`;
+- выбран режим `combined`.
 
-#### 8. Сравнить способы завершения диалога
+Зачем это нужно: это уже не просто “один ответ”, а маленький агент, который собирает данные до готовности.
+
+#### 9. Сравнить способы остановки диалога
 
 ```bash
 aiteach compare-goal \
-  "Собери требования к статье про Rust ownership" \
-  --required-field topic \
-  --required-field audience \
-  --required-field format
+  "Собери данные для задачи: у Маши было 3 яблока, она купила еще 2" \
+  --required-field item \
+  --required-field initial_count \
+  --required-field added_count
 ```
 
-CLI сравнит три стратегии:
+CLI сравнит:
 
-- `state` - остановка по заполненности полей в коде.
-- `instruction` - остановка по сигналу модели `done: true`.
-- `combined` - оба условия одновременно.
+- `state` - код смотрит: все поля заполнены? Тогда стоп.
+- `instruction` - модель сказала `done: true`? Тогда стоп.
+- `combined` - и поля заполнены, и модель сказала `done: true`.
 
-#### 9. Несколько профилей
+Простой смысл:
+
+- `state` надежнее как проверка формы.
+- `instruction` гибче, но модель может ошибиться.
+- `combined` строже всего и лучше для важных сценариев.
+
+#### 10. Несколько профилей для разных провайдеров
+
+Задача: один профиль для OpenRouter, другой для DeepSeek.
 
 ```bash
 aiteach profile add
+aiteach profile add
 aiteach profile list
 aiteach profile use openrouter
-aiteach ask "Проверь, какой профиль сейчас активен"
+aiteach ask "Сколько будет 3 + 2?"
+aiteach ask --profile deepseek "Сколько будет 3 + 2?"
 ```
 
-Профиль можно выбрать явно:
-
-```bash
-aiteach ask --profile deepseek "Сделай краткое резюме"
-```
+Зачем это нужно: можно быстро сравнивать провайдеров и модели, не переписывая config и не перенося токены вручную.
 
 ### Провайдеры
 
@@ -521,57 +625,145 @@ aiteach config path
 aiteach doctor --profile work
 ```
 
-### Real Usage Examples
+### Tutorial-Style Usage Examples
 
-#### 1. First run and profile check
+This section explains not only which command to run, but why each control exists. Think of response controls like classroom instructions: you can ask “solve the problem”, or you can ask “solve it briefly, in 3 steps, return JSON, and stop after END”.
+
+#### 1. First run: no manual profile guessing
+
+Task: the user opens the CLI for the first time and does not know what profile/provider/base_url means.
 
 ```bash
 aiteach setup
+```
+
+What the CLI does:
+
+1. Shows a provider list: OpenRouter, DeepSeek, GigaChat, Kimi, OpenAI-compatible.
+2. Suggests the default model.
+3. Suggests the default `base_url`.
+4. Suggests a profile name, for example `openrouter`.
+5. Asks for the token and stores it in the OS keychain.
+
+Then check it:
+
+```bash
 aiteach profile list
 aiteach doctor
 ```
 
+Why this matters: the user does not need to remember config internals. They choose from a menu, like in an installer.
+
+#### 2. Simple apple problem without controls
+
+Task: ask a normal question.
+
+```bash
+aiteach ask "Masha had 3 apples and bought 2 more. How many apples does she have?"
+```
+
+Possible answer:
+
+```text
+Masha has 5 apples.
+```
+
+Why this matters: normal mode is fine when the format does not matter and a human will read the answer.
+
+#### 3. Same problem, but very short
+
+Problem: the model may explain too much.
+
+```bash
+aiteach ask \
+  "Masha had 3 apples and bought 2 more. How many apples does she have?" \
+  --max-tokens 40 \
+  --completion-instruction "Answer in one short sentence. Do not add an explanation."
+```
+
+Expected answer:
+
+```text
+Masha has 5 apples.
+```
+
 What happens:
 
-- `setup` helps choose a provider and model.
-- The token is stored in the OS keychain, not in config.
-- `doctor` checks config, active profile, `base_url`, and token presence without printing the secret.
+- `--max-tokens 40` sets a hard length cap.
+- `--completion-instruction` tells the model what style to use.
 
-#### 2. One short answer
+Why this matters: tokens protect against a long answer, while the instruction helps avoid cutting the thought in the middle.
 
-```bash
-aiteach ask \
-  "Explain Rust ownership in simple words" \
-  --max-tokens 140 \
-  --completion-instruction "Answer in at most 3 short bullets and complete the thought."
-```
+#### 4. Strict response format
 
-Use this for quick terminal questions where you want a concise answer. `max-tokens` sets the hard cap, while the instruction asks the model to finish cleanly.
-
-#### 3. JSON for a script or pipeline
+Task: another script needs to read the answer. Free text like “Masha has 5 apples” is inconvenient; JSON is better.
 
 ```bash
 aiteach ask \
-  "Analyze this task: build a Rust CLI chat" \
+  "Masha had 3 apples and bought 2 more. Return the result." \
   --response-format json-object \
-  --format-instruction "Return a JSON object with title, risks, next_steps." \
-  --max-tokens 220
+  --format-instruction "Return a JSON object with initial, added, total." \
+  --max-tokens 120
 ```
 
-This is useful when another script reads the result. The CLI sends `response_format: {"type":"json_object"}` and adds a system instruction for the format.
+Expected answer:
 
-#### 4. Stop an answer with a marker
+```json
+{
+  "initial": 3,
+  "added": 2,
+  "total": 5
+}
+```
+
+Why this matters: if a program reads the answer, it needs predictable structure, not natural language.
+
+#### 5. Stop sequence: finish the thought and stop at a marker
+
+Problem: if you only set a tiny `max-tokens`, the answer may be cut off:
+
+```text
+Masha has 5 app...
+```
+
+Better: ask the model to write a completion marker.
 
 ```bash
 aiteach ask \
-  "Create a short project migration plan" \
+  "Masha had 3 apples and bought 2 more. Explain the solution." \
   --stop "END_OF_ANSWER" \
-  --completion-instruction "Give at most 5 bullets. After the last bullet, write END_OF_ANSWER."
+  --completion-instruction "Give a short solution. When the thought is complete, write END_OF_ANSWER."
 ```
 
-The model finishes the thought and writes the marker, while the API stops generation at the `stop` sequence. This is cleaner than only hitting a token limit.
+Expected answer:
 
-#### 5. Interactive chat with response control
+```text
+3 + 2 = 5, so Masha has 5 apples.
+```
+
+The marker `END_OF_ANSWER` is not printed because the API stops generation at the stop sequence.
+
+Why this matters: the model finishes the sentence, and the API stops the stream at the right place.
+
+#### 6. Compare one prompt without and with controls
+
+Task: see the difference on the same question.
+
+```bash
+aiteach compare \
+  "Masha had 3 apples and bought 2 more. Explain the solution." \
+  --max-tokens 60 \
+  --completion-instruction "Answer in one sentence, without an intro."
+```
+
+The CLI sends two requests:
+
+1. Without constraints.
+2. With `max-tokens` and the instruction.
+
+Why this matters: you can see how the same prompt changes when response control is added. This is useful before putting the prompt into a script or product.
+
+#### 7. Interactive chat: change rules during the conversation
 
 ```bash
 aiteach chat --max-tokens 180
@@ -580,75 +772,91 @@ aiteach chat --max-tokens 180
 Inside chat:
 
 ```text
-/format json-object
-/max-tokens 120
-/completion-instruction Answer only as a 3-item list.
+> Explain the apple problem
+/max-tokens 60
+/completion-instruction Answer like an elementary school teacher, max 2 sentences.
+> Now explain a problem about 7 pears and 4 more pears
 /control
-/clear
 /exit
 ```
 
-Use this when you want to adjust answer style during the conversation.
+Why this matters: sometimes you first need detail, then brevity, then JSON. You do not need to restart the program.
 
-#### 6. Compare one prompt without and with controls
+#### 8. Entity collection: an apple-problem form
 
-```bash
-aiteach compare \
-  "Explain async Rust" \
-  --max-tokens 160 \
-  --completion-instruction "Answer in 3 short bullets without an intro."
-```
+Task: do not just answer; collect every field needed for a problem. For example:
 
-The result shows two blocks:
+- `item` - what is being counted;
+- `initial_count` - how many there were;
+- `added_count` - how many were added.
 
-- `Without constraints` - the regular answer.
-- `With constraints` - the same prompt with controls.
-
-#### 7. Collect an entity and stop the dialogue
+Command:
 
 ```bash
 aiteach chat \
-  --required-field topic \
-  --required-field audience \
-  --required-field format \
+  --required-field item \
+  --required-field initial_count \
+  --required-field added_count \
   --goal-stop-mode combined
 ```
 
-The user answers follow-up questions, and the CLI stops the dialogue only when:
+Example dialogue:
+
+```text
+> Create a word problem
+assistant: What item are we counting?
+> apples
+assistant: How many apples were there at first?
+> 3
+assistant: How many apples were added?
+> 2
+assistant: {"fields":{"item":"apples","initial_count":3,"added_count":2},"next_question":null,"done":true}
+```
+
+After that, the CLI stops the dialogue because:
 
 - all required fields are filled;
-- the model returned `done: true`.
+- the model returned `done: true`;
+- the selected mode is `combined`.
 
-#### 8. Compare dialogue completion strategies
+Why this matters: this is no longer just one answer. It is a small agent that collects data until the entity is complete.
+
+#### 9. Compare dialogue completion strategies
 
 ```bash
 aiteach compare-goal \
-  "Collect requirements for an article about Rust ownership" \
-  --required-field topic \
-  --required-field audience \
-  --required-field format
+  "Collect data for a problem: Masha had 3 apples and bought 2 more" \
+  --required-field item \
+  --required-field initial_count \
+  --required-field added_count
 ```
 
-The CLI compares three strategies:
+The CLI compares:
 
-- `state` - stop by field completeness in code.
-- `instruction` - stop by the model signal `done: true`.
-- `combined` - require both conditions.
+- `state` - code checks: are all fields filled? Then stop.
+- `instruction` - did the model say `done: true`? Then stop.
+- `combined` - fields are filled and the model said `done: true`.
 
-#### 9. Multiple profiles
+Simple meaning:
+
+- `state` is more reliable as a shape check.
+- `instruction` is more flexible, but the model can be wrong.
+- `combined` is the strictest and best for important flows.
+
+#### 10. Multiple profiles for different providers
+
+Task: one profile for OpenRouter, another for DeepSeek.
 
 ```bash
 aiteach profile add
+aiteach profile add
 aiteach profile list
 aiteach profile use openrouter
-aiteach ask "Check which profile is active"
+aiteach ask "What is 3 + 2?"
+aiteach ask --profile deepseek "What is 3 + 2?"
 ```
 
-You can also select a profile explicitly:
-
-```bash
-aiteach ask --profile deepseek "Create a short summary"
-```
+Why this matters: you can compare providers and models quickly without rewriting config or moving tokens manually.
 
 ### Providers
 
