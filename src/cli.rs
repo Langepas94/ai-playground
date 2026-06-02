@@ -139,7 +139,7 @@ fn profile_command(command: &ProfileCommand, secrets: &dyn SecretStore) -> Resul
             config.add_profile(
                 args.name.clone(),
                 ProfileConfig {
-                    provider: args.provider.clone(),
+                    provider: args.provider,
                     model: args
                         .model
                         .clone()

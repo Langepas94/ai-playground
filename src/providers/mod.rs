@@ -1,11 +1,8 @@
 use async_trait::async_trait;
-use reqwest::{Client, StatusCode, header::RETRY_AFTER};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    config::ProfileConfig,
-    errors::{AppError, EndpointCategory, HttpProblem, ProviderHttpError, map_http_status},
-};
+use crate::{config::ProfileConfig, errors::AppError};
 
 pub mod deepseek;
 pub mod gigachat;
@@ -13,7 +10,7 @@ pub mod kimi;
 pub mod openai_compatible;
 pub mod openrouter;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProviderKind {
     OpenAiCompatible,
@@ -52,25 +49,44 @@ impl std::fmt::Display for ProviderKind {
 }
 
 impl ProviderKind {
-    pub fn default_base_url(&self) -> &'static str {
+    pub fn spec(&self) -> ProviderSpec {
         match self {
-            Self::OpenAiCompatible => "https://api.openai.com/v1",
-            Self::OpenRouter => openrouter::BASE_URL,
-            Self::DeepSeek => deepseek::BASE_URL,
-            Self::GigaChat => gigachat::BASE_URL,
-            Self::Kimi => kimi::BASE_URL,
+            Self::OpenAiCompatible => openai_compatible::spec(),
+            Self::OpenRouter => openrouter::spec(),
+            Self::DeepSeek => deepseek::spec(),
+            Self::GigaChat => gigachat::spec(),
+            Self::Kimi => kimi::spec(),
         }
     }
 
-    pub fn default_model(&self) -> &'static str {
-        match self {
-            Self::OpenAiCompatible => "gpt-4.1-mini",
-            Self::OpenRouter => "openai/gpt-4.1-mini",
-            Self::DeepSeek => "deepseek-chat",
-            Self::GigaChat => "GigaChat",
-            Self::Kimi => "moonshot-v1-8k",
-        }
+    pub fn default_base_url(&self) -> &'static str {
+        self.spec().default_base_url
     }
+
+    pub fn default_model(&self) -> &'static str {
+        self.spec().default_model
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthScheme {
+    Bearer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StaticHeader {
+    pub name: &'static str,
+    pub value: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderSpec {
+    pub kind: ProviderKind,
+    pub display_name: &'static str,
+    pub default_base_url: &'static str,
+    pub default_model: &'static str,
+    pub auth_scheme: AuthScheme,
+    pub extra_headers: &'static [StaticHeader],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -135,7 +151,8 @@ impl ProviderClient for ReqwestProviderClient {
         profile: &ProfileConfig,
         token: &str,
     ) -> Result<Vec<String>, AppError> {
-        openai_compatible::list_models(&self.client, profile, token).await
+        let spec = profile.provider.spec();
+        openai_compatible::list_models(&self.client, spec, profile, token).await
     }
 
     async fn chat_completion(
@@ -144,7 +161,8 @@ impl ProviderClient for ReqwestProviderClient {
         token: &str,
         request: ChatRequest,
     ) -> Result<ChatResponse, AppError> {
-        openai_compatible::chat_completion(&self.client, profile, token, request).await
+        let spec = profile.provider.spec();
+        openai_compatible::chat_completion(&self.client, spec, profile, token, request).await
     }
 }
 
@@ -162,145 +180,15 @@ pub fn validate_base_url(profile_name: &str, base_url: &str) -> Result<(), AppEr
     Ok(())
 }
 
-async fn response_text_or_error(
-    response: reqwest::Response,
-    provider: &ProviderKind,
-    endpoint: EndpointCategory,
-) -> Result<String, AppError> {
-    let status = response.status();
-    let retry_after = response
-        .headers()
-        .get(RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .map(ToString::to_string);
-    let body = response.text().await.map_err(AppError::from)?;
-    if status.is_success() {
-        return Ok(body);
-    }
-    Err(AppError::ProviderHttp(map_http_status(
-        provider.to_string(),
-        endpoint,
-        status,
-        retry_after,
-        short_reason(&body),
-    )))
-}
-
-pub fn map_network_error(
-    provider: &ProviderKind,
-    endpoint: EndpointCategory,
-    error: reqwest::Error,
-) -> AppError {
-    AppError::ProviderHttp(ProviderHttpError {
-        provider: provider.to_string(),
-        endpoint,
-        status: error.status(),
-        problem: if error.is_decode() {
-            HttpProblem::UnexpectedFormat
-        } else {
-            HttpProblem::Network
-        },
-        reason: error.to_string(),
-    })
-}
-
-fn short_reason(body: &str) -> String {
-    let collapsed = body.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.chars().count() > 180 {
-        format!("{}...", collapsed.chars().take(180).collect::<String>())
-    } else if collapsed.is_empty() {
-        "empty response body".to_string()
-    } else {
-        collapsed
-    }
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-pub struct OpenAiChatPayload {
-    pub model: String,
-    pub messages: Vec<ChatMessage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiChatResponse {
-    choices: Vec<OpenAiChoice>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiChoice {
-    message: OpenAiChoiceMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiChoiceMessage {
-    content: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ModelsResponse {
-    data: Vec<ModelEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ModelEntry {
-    id: String,
-}
-
-pub fn chat_payload(request: ChatRequest) -> OpenAiChatPayload {
-    OpenAiChatPayload {
-        model: request.model,
-        messages: request.messages,
-    }
-}
-
-fn parse_chat_response(provider: &ProviderKind, raw: &str) -> Result<ChatResponse, AppError> {
-    let parsed: OpenAiChatResponse = serde_json::from_str(raw).map_err(|error| {
-        AppError::ProviderHttp(ProviderHttpError {
-            provider: provider.to_string(),
-            endpoint: EndpointCategory::Chat,
-            status: Some(StatusCode::OK),
-            problem: HttpProblem::UnexpectedFormat,
-            reason: error.to_string(),
-        })
-    })?;
-    let text = parsed
-        .choices
-        .into_iter()
-        .next()
-        .map(|choice| choice.message.content)
-        .filter(|content| !content.is_empty())
-        .ok_or_else(|| {
-            AppError::ProviderHttp(ProviderHttpError {
-                provider: provider.to_string(),
-                endpoint: EndpointCategory::Chat,
-                status: Some(StatusCode::OK),
-                problem: HttpProblem::UnexpectedFormat,
-                reason: "missing choices[0].message.content".to_string(),
-            })
-        })?;
-    Ok(ChatResponse { text })
-}
-
-fn parse_models_response(provider: &ProviderKind, raw: &str) -> Result<Vec<String>, AppError> {
-    let parsed: ModelsResponse = serde_json::from_str(raw).map_err(|error| {
-        AppError::ProviderHttp(ProviderHttpError {
-            provider: provider.to_string(),
-            endpoint: EndpointCategory::Models,
-            status: Some(StatusCode::OK),
-            problem: HttpProblem::UnexpectedFormat,
-            reason: error.to_string(),
-        })
-    })?;
-    Ok(parsed.data.into_iter().map(|model| model.id).collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::errors::{EndpointCategory, HttpProblem};
+    use reqwest::StatusCode;
 
     #[test]
     fn provider_request_mapping_matches_openai_shape() {
-        let payload = chat_payload(ChatRequest {
+        let payload = openai_compatible::chat_payload(ChatRequest {
             model: "m".to_string(),
             messages: vec![ChatMessage {
                 role: Role::User,
@@ -311,6 +199,16 @@ mod tests {
         assert_eq!(payload.model, "m");
         assert_eq!(payload.messages[0].role, Role::User);
         assert_eq!(payload.messages[0].content, "hello");
+    }
+
+    #[test]
+    fn provider_registry_keeps_provider_specific_defaults() {
+        let openrouter = ProviderKind::OpenRouter.spec();
+        let deepseek = ProviderKind::DeepSeek.spec();
+
+        assert_eq!(openrouter.kind, ProviderKind::OpenRouter);
+        assert_eq!(openrouter.default_base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(deepseek.default_model, "deepseek-chat");
     }
 
     #[test]
