@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs,
-    io::{self, Write},
+    io::{self, BufRead, Write},
     path::PathBuf,
 };
 
@@ -288,17 +288,15 @@ pub async fn interactive_chat(
         print!("> ");
         io::stdout()
             .flush()
-            .map_err(|error| AppError::Secret(error.to_string()))?;
-        let mut line = String::new();
-        let read = io::stdin()
-            .read_line(&mut line)
-            .map_err(|error| AppError::Secret(error.to_string()))?;
-        if read == 0 {
+            .map_err(|error| AppError::Terminal(error.to_string()))?;
+        let Some(line) = read_terminal_line()? else {
             break;
-        }
+        };
         let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
         match line {
-            "" => continue,
             "/exit" => break,
             "/profile" => {
                 println!("{profile_name}");
@@ -501,6 +499,28 @@ pub async fn interactive_chat(
         println!("Session used non-active profile '{profile_name}'.");
     }
     Ok(())
+}
+
+fn read_terminal_line() -> Result<Option<String>, AppError> {
+    let mut bytes = Vec::new();
+    let read = io::stdin()
+        .lock()
+        .read_until(b'\n', &mut bytes)
+        .map_err(|error| AppError::Terminal(error.to_string()))?;
+    if read == 0 {
+        return Ok(None);
+    }
+    while bytes
+        .last()
+        .is_some_and(|byte| *byte == b'\n' || *byte == b'\r')
+    {
+        bytes.pop();
+    }
+    Ok(Some(decode_terminal_line(&bytes)))
+}
+
+fn decode_terminal_line(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -748,5 +768,13 @@ mod tests {
                 .expect("completion instruction")
                 .contains("done=true")
         );
+    }
+
+    #[test]
+    fn terminal_line_decode_tolerates_invalid_utf8() {
+        let decoded = decode_terminal_line(&[0xd0, 0x97, 0xff, 0xd0, 0x90]);
+
+        assert!(decoded.contains('З'));
+        assert!(decoded.contains('А'));
     }
 }

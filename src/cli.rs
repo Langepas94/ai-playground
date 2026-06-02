@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -414,11 +414,8 @@ fn token_command(command: &TokenCommand, secrets: &dyn SecretStore) -> Result<()
             eprint!("Token for profile '{name}': ");
             io::stderr()
                 .flush()
-                .map_err(|error| AppError::Secret(error.to_string()))?;
-            let mut token = String::new();
-            io::stdin()
-                .read_line(&mut token)
-                .map_err(|error| AppError::Secret(error.to_string()))?;
+                .map_err(|error| AppError::Terminal(error.to_string()))?;
+            let token = read_stdin_line()?.unwrap_or_default();
             secrets.set_token(&profile.token_ref, token.trim())?;
             println!("Token saved for profile '{name}'.");
         }
@@ -576,12 +573,26 @@ fn prompt(label: &str) -> Result<String, AppError> {
     print!("{label}: ");
     io::stdout()
         .flush()
-        .map_err(|error| AppError::Secret(error.to_string()))?;
-    let mut value = String::new();
-    io::stdin()
-        .read_line(&mut value)
-        .map_err(|error| AppError::Secret(error.to_string()))?;
-    Ok(value.trim().to_string())
+        .map_err(|error| AppError::Terminal(error.to_string()))?;
+    Ok(read_stdin_line()?.unwrap_or_default().trim().to_string())
+}
+
+fn read_stdin_line() -> Result<Option<String>, AppError> {
+    let mut bytes = Vec::new();
+    let read = io::stdin()
+        .lock()
+        .read_until(b'\n', &mut bytes)
+        .map_err(|error| AppError::Terminal(error.to_string()))?;
+    if read == 0 {
+        return Ok(None);
+    }
+    while bytes
+        .last()
+        .is_some_and(|byte| *byte == b'\n' || *byte == b'\r')
+    {
+        bytes.pop();
+    }
+    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
 fn prompt_optional_secret(label: &str) -> Result<Option<String>, AppError> {

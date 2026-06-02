@@ -52,6 +52,8 @@ pub enum AppError {
     MissingToken { profile: String },
     #[error("Secret storage error: {0}")]
     Secret(String),
+    #[error("Terminal I/O error: {0}")]
+    Terminal(String),
     #[error("{0}")]
     ProviderHttp(ProviderHttpError),
     #[error("Provider response has an unexpected JSON format: {0}")]
