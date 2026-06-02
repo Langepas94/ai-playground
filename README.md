@@ -18,8 +18,27 @@
 
 ### Команды
 
+Первый запуск:
+
 ```bash
+aiteach setup
+```
+
+`setup` показывает список провайдеров, предлагает дефолтную модель, `base_url`, имя профиля и позволяет сразу сохранить токен в OS keychain. Токен не пишется в config.
+
+`profile add` тоже можно запускать без аргументов:
+
+```bash
+aiteach profile add
+```
+
+Тогда CLI спросит provider/model/base_url/profile name интерактивно.
+
+```bash
+aiteach setup
+
 aiteach profile add work --provider openrouter --model openai/gpt-4.1-mini
+aiteach profile add
 aiteach profile list
 aiteach profile use work
 aiteach profile remove work
@@ -329,8 +348,27 @@ cargo test
 
 ### Commands
 
+First run:
+
 ```bash
+aiteach setup
+```
+
+`setup` shows a provider menu, suggests the default model, `base_url`, profile name, and lets the user save the token directly into the OS keychain. The token is not written to config.
+
+`profile add` can also run without arguments:
+
+```bash
+aiteach profile add
+```
+
+In that mode, the CLI asks for provider/model/base_url/profile name interactively.
+
+```bash
+aiteach setup
+
 aiteach profile add work --provider openrouter --model openai/gpt-4.1-mini
+aiteach profile add
 aiteach profile list
 aiteach profile use work
 aiteach profile remove work

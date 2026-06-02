@@ -27,6 +27,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    #[command(about = "Interactive first-run setup")]
+    Setup(SetupArgs),
     Profile {
         #[command(subcommand)]
         command: ProfileCommand,
@@ -62,9 +64,21 @@ enum ProfileCommand {
 
 #[derive(Debug, Args)]
 struct ProfileAddArgs {
-    name: String,
+    name: Option<String>,
     #[arg(long)]
-    provider: ProviderKind,
+    provider: Option<ProviderKind>,
+    #[arg(long)]
+    model: Option<String>,
+    #[arg(long)]
+    base_url: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct SetupArgs {
+    #[arg(long)]
+    name: Option<String>,
+    #[arg(long)]
+    provider: Option<ProviderKind>,
     #[arg(long)]
     model: Option<String>,
     #[arg(long)]
@@ -247,6 +261,7 @@ pub async fn run() -> Result<()> {
 async fn run_with_store(cli: &Cli, secrets: &dyn SecretStore) -> Result<(), AppError> {
     let _ = cli.log_conversation;
     match &cli.command {
+        Command::Setup(args) => setup_command(args, secrets),
         Command::Profile { command } => profile_command(command, secrets),
         Command::Token { command } => token_command(command, secrets),
         Command::Models { command } => models_command(command, secrets).await,
@@ -268,25 +283,16 @@ fn profile_command(command: &ProfileCommand, secrets: &dyn SecretStore) -> Resul
     let mut config = AppConfig::load()?;
     match command {
         ProfileCommand::Add(args) => {
-            let base_url = args
-                .base_url
-                .clone()
-                .unwrap_or_else(|| args.provider.default_base_url().to_string());
-            validate_base_url(&args.name, &base_url)?;
-            config.add_profile(
+            let profile = collect_profile_input(
                 args.name.clone(),
-                ProfileConfig {
-                    provider: args.provider,
-                    model: args
-                        .model
-                        .clone()
-                        .unwrap_or_else(|| args.provider.default_model().to_string()),
-                    base_url,
-                    token_ref: String::new(),
-                },
-            );
+                args.provider,
+                args.model.clone(),
+                args.base_url.clone(),
+            )?;
+            validate_base_url(&profile.name, &profile.config.base_url)?;
+            config.add_profile(profile.name.clone(), profile.config);
             config.save()?;
-            println!("Profile '{}' added.", args.name);
+            println!("Profile '{}' added.", profile.name);
         }
         ProfileCommand::List => {
             for (name, profile) in &config.profiles {
@@ -322,6 +328,34 @@ fn profile_command(command: &ProfileCommand, secrets: &dyn SecretStore) -> Resul
     Ok(())
 }
 
+fn setup_command(args: &SetupArgs, secrets: &dyn SecretStore) -> Result<(), AppError> {
+    let mut config = AppConfig::load()?;
+    let profile = collect_profile_input(
+        args.name.clone(),
+        args.provider,
+        args.model.clone(),
+        args.base_url.clone(),
+    )?;
+    validate_base_url(&profile.name, &profile.config.base_url)?;
+    config.add_profile(profile.name.clone(), profile.config);
+    config.use_profile(&profile.name)?;
+    let token_ref = config.profiles[&profile.name].token_ref.clone();
+    config.save()?;
+
+    println!("Profile '{}' is active.", profile.name);
+    let token = prompt_optional_secret("Paste API token now, or press Enter to skip")?;
+    if let Some(token) = token {
+        secrets.set_token(&token_ref, &token)?;
+        println!("Token saved for profile '{}'.", profile.name);
+    } else {
+        println!(
+            "Token skipped. Add it later with `aiteach token set --profile {}`.",
+            profile.name
+        );
+    }
+    Ok(())
+}
+
 fn token_command(command: &TokenCommand, secrets: &dyn SecretStore) -> Result<(), AppError> {
     let config = AppConfig::load()?;
     match command {
@@ -345,6 +379,106 @@ fn token_command(command: &TokenCommand, secrets: &dyn SecretStore) -> Result<()
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct CollectedProfile {
+    name: String,
+    config: ProfileConfig,
+}
+
+fn collect_profile_input(
+    name: Option<String>,
+    provider: Option<ProviderKind>,
+    model: Option<String>,
+    base_url: Option<String>,
+) -> Result<CollectedProfile, AppError> {
+    let provider = match provider {
+        Some(provider) => provider,
+        None => prompt_provider()?,
+    };
+    let name = match name {
+        Some(name) => name,
+        None => prompt_with_default("Profile name", &provider.to_string())?,
+    };
+    let model = match model {
+        Some(model) => model,
+        None => prompt_with_default("Model", provider.default_model())?,
+    };
+    let base_url = match base_url {
+        Some(base_url) => base_url,
+        None => prompt_with_default("Base URL", provider.default_base_url())?,
+    };
+
+    Ok(CollectedProfile {
+        name,
+        config: ProfileConfig {
+            provider,
+            model,
+            base_url,
+            token_ref: String::new(),
+        },
+    })
+}
+
+fn prompt_provider() -> Result<ProviderKind, AppError> {
+    println!("Choose provider:");
+    for (index, provider) in ProviderKind::all().iter().enumerate() {
+        let spec = provider.spec();
+        println!(
+            "  {}. {} ({}) - default model: {}",
+            index + 1,
+            spec.display_name,
+            provider,
+            spec.default_model
+        );
+    }
+
+    loop {
+        let raw = prompt("Provider number or name")?;
+        if raw.trim().is_empty() {
+            return Ok(ProviderKind::OpenRouter);
+        }
+        if let Ok(index) = raw.parse::<usize>()
+            && let Some(provider) = ProviderKind::all().get(index.saturating_sub(1))
+        {
+            return Ok(*provider);
+        }
+        if let Ok(provider) = raw.parse::<ProviderKind>() {
+            return Ok(provider);
+        }
+        println!("Unknown provider. Choose a number from the list or type a provider name.");
+    }
+}
+
+fn prompt_with_default(label: &str, default: &str) -> Result<String, AppError> {
+    let raw = prompt(&format!("{label} [{default}]"))?;
+    if raw.trim().is_empty() {
+        Ok(default.to_string())
+    } else {
+        Ok(raw)
+    }
+}
+
+fn prompt(label: &str) -> Result<String, AppError> {
+    print!("{label}: ");
+    io::stdout()
+        .flush()
+        .map_err(|error| AppError::Secret(error.to_string()))?;
+    let mut value = String::new();
+    io::stdin()
+        .read_line(&mut value)
+        .map_err(|error| AppError::Secret(error.to_string()))?;
+    Ok(value.trim().to_string())
+}
+
+fn prompt_optional_secret(label: &str) -> Result<Option<String>, AppError> {
+    let value = prompt(label)?;
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(value))
+    }
 }
 
 async fn models_command(

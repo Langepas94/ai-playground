@@ -49,6 +49,16 @@ impl std::fmt::Display for ProviderKind {
 }
 
 impl ProviderKind {
+    pub fn all() -> &'static [ProviderKind] {
+        &[
+            Self::OpenAiCompatible,
+            Self::OpenRouter,
+            Self::DeepSeek,
+            Self::GigaChat,
+            Self::Kimi,
+        ]
+    }
+
     pub fn spec(&self) -> ProviderSpec {
         match self {
             Self::OpenAiCompatible => openai_compatible::spec(),
