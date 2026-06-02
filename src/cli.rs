@@ -400,6 +400,7 @@ fn setup_command(args: &SetupArgs, secrets: &dyn SecretStore) -> Result<(), AppE
     println!();
     println!("Next commands:");
     println!("  aiteach doctor");
+    println!("  aiteach models list");
     println!("  aiteach ask \"Сколько будет 3 + 2?\"");
     println!("  aiteach chat");
     Ok(())
@@ -455,10 +456,7 @@ fn collect_profile_input(
     };
     let model = match model {
         Some(model) => model,
-        None => prompt_with_default(
-            "Model. Press Enter if you do not know what to choose",
-            provider.default_model(),
-        )?,
+        None => prompt_model(provider)?,
     };
     let base_url = match base_url {
         Some(base_url) => base_url,
@@ -477,6 +475,44 @@ fn collect_profile_input(
             token_ref: String::new(),
         },
     })
+}
+
+fn prompt_model(provider: ProviderKind) -> Result<String, AppError> {
+    let spec = provider.spec();
+    println!();
+    println!("Choose model for {}.", spec.display_name);
+    println!(
+        "Press Enter for the recommended default, choose a number, or type a custom model id."
+    );
+    for (index, model) in spec.suggested_models.iter().enumerate() {
+        let recommended = if *model == spec.default_model {
+            " recommended"
+        } else {
+            ""
+        };
+        println!("  {}. {}{}", index + 1, model, recommended);
+    }
+    println!("  custom. Type another model id manually");
+
+    loop {
+        let raw = prompt("Model number or custom id [1]")?;
+        if raw.trim().is_empty() {
+            println!("Using default: {}", spec.default_model);
+            return Ok(spec.default_model.to_string());
+        }
+        if let Ok(index) = raw.parse::<usize>()
+            && let Some(model) = spec.suggested_models.get(index.saturating_sub(1))
+        {
+            return Ok((*model).to_string());
+        }
+        if raw.eq_ignore_ascii_case("custom") {
+            return prompt_required("Custom model id");
+        }
+        if !raw.trim().is_empty() {
+            return Ok(raw);
+        }
+        println!("Choose a model number, type custom, or type a model id.");
+    }
 }
 
 fn prompt_provider() -> Result<ProviderKind, AppError> {
@@ -513,6 +549,16 @@ fn prompt_provider() -> Result<ProviderKind, AppError> {
             return Ok(provider);
         }
         println!("Unknown provider. Choose a number from the list or type a provider name.");
+    }
+}
+
+fn prompt_required(label: &str) -> Result<String, AppError> {
+    loop {
+        let value = prompt(label)?;
+        if !value.trim().is_empty() {
+            return Ok(value);
+        }
+        println!("Please enter a value.");
     }
 }
 

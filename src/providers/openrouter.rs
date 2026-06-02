@@ -10,6 +10,12 @@ const EXTRA_HEADERS: &[StaticHeader] = &[
         value: "aiteach",
     },
 ];
+const SUGGESTED_MODELS: &[&str] = &[
+    "openai/gpt-4.1-mini",
+    "openai/gpt-4.1",
+    "deepseek/deepseek-chat",
+    "google/gemini-2.0-flash-001",
+];
 
 pub fn spec() -> ProviderSpec {
     ProviderSpec {
@@ -17,6 +23,7 @@ pub fn spec() -> ProviderSpec {
         display_name: "OpenRouter",
         default_base_url: "https://openrouter.ai/api/v1",
         default_model: "openai/gpt-4.1-mini",
+        suggested_models: SUGGESTED_MODELS,
         auth_scheme: AuthScheme::Bearer,
         extra_headers: EXTRA_HEADERS,
     }

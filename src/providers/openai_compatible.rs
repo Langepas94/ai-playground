@@ -12,6 +12,7 @@ use crate::{
 };
 
 const EXTRA_HEADERS: &[StaticHeader] = &[];
+const SUGGESTED_MODELS: &[&str] = &["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini", "gpt-4o"];
 
 pub fn spec() -> ProviderSpec {
     ProviderSpec {
@@ -19,6 +20,7 @@ pub fn spec() -> ProviderSpec {
         display_name: "OpenAI-compatible",
         default_base_url: "https://api.openai.com/v1",
         default_model: "gpt-4.1-mini",
+        suggested_models: SUGGESTED_MODELS,
         auth_scheme: AuthScheme::Bearer,
         extra_headers: EXTRA_HEADERS,
     }

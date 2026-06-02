@@ -31,12 +31,24 @@ aiteach setup
 ```text
 Provider number or name [2]:      # Enter выберет OpenRouter
 Profile name [openrouter]:        # Enter оставит имя openrouter
-Model [openai/gpt-4.1-mini]:      # Enter оставит модель по умолчанию
+Choose model for OpenRouter.
+  1. openai/gpt-4.1-mini recommended
+  2. openai/gpt-4.1
+  3. deepseek/deepseek-chat
+  4. google/gemini-2.0-flash-001
+  custom. Type another model id manually
+Model number or custom id [1]:    # Enter выберет рекомендованную модель
 Base URL [https://...]:           # Enter оставит адрес по умолчанию
 API token (...):                  # вставьте токен или Enter, чтобы добавить позже
 ```
 
-Если не знаете, что вводить в `Model` или `Base URL`, нажимайте Enter.
+В текущей версии `setup` показывает список моделей для выбранного провайдера. Если не знаете, какую модель выбрать, нажимайте Enter. После сохранения токена можно получить живой список моделей от провайдера:
+
+```bash
+aiteach models list
+```
+
+Если не знаете, что вводить в `Base URL`, нажимайте Enter.
 
 `profile add` тоже можно запускать без аргументов:
 
@@ -90,7 +102,7 @@ aiteach setup
 Что делает CLI:
 
 1. Показывает список провайдеров: OpenRouter, DeepSeek, GigaChat, Kimi, OpenAI-compatible.
-2. Предлагает модель по умолчанию.
+2. Показывает список моделей и предлагает модель по умолчанию.
 3. Предлагает `base_url` по умолчанию.
 4. Предлагает имя профиля, например `openrouter`.
 5. Спрашивает токен и сохраняет его в OS keychain.
@@ -662,12 +674,24 @@ In `setup`, press Enter to accept the value shown in brackets:
 ```text
 Provider number or name [2]:      # Enter selects OpenRouter
 Profile name [openrouter]:        # Enter keeps openrouter
-Model [openai/gpt-4.1-mini]:      # Enter keeps the default model
+Choose model for OpenRouter.
+  1. openai/gpt-4.1-mini recommended
+  2. openai/gpt-4.1
+  3. deepseek/deepseek-chat
+  4. google/gemini-2.0-flash-001
+  custom. Type another model id manually
+Model number or custom id [1]:    # Enter selects the recommended model
 Base URL [https://...]:           # Enter keeps the default URL
 API token (...):                  # paste token or press Enter to add it later
 ```
 
-If you do not know what to enter for `Model` or `Base URL`, press Enter.
+In the current version, `setup` shows a model list for the selected provider. If you do not know which model to choose, press Enter. After saving the token, you can fetch the live provider model list:
+
+```bash
+aiteach models list
+```
+
+If you do not know what to enter for `Base URL`, press Enter.
 
 `profile add` can also run without arguments:
 
@@ -721,7 +745,7 @@ aiteach setup
 What the CLI does:
 
 1. Shows a provider list: OpenRouter, DeepSeek, GigaChat, Kimi, OpenAI-compatible.
-2. Suggests the default model.
+2. Shows a model list and suggests the default model.
 3. Suggests the default `base_url`.
 4. Suggests a profile name, for example `openrouter`.
 5. Asks for the token and stores it in the OS keychain.
