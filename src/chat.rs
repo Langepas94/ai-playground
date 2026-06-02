@@ -10,7 +10,10 @@ use directories::ProjectDirs;
 use crate::{
     config::{AppConfig, ProfileConfig},
     errors::AppError,
-    providers::{ChatMessage, ChatRequest, ProviderClient, ResponseControl, ResponseFormat, Role},
+    providers::{
+        AnswerFormat, ChatMessage, ChatRequest, ProviderClient, ResponseControl, ResponseFormat,
+        Role,
+    },
     secrets::SecretStore,
 };
 
@@ -278,7 +281,7 @@ pub async fn interactive_chat(
         profile.model
     );
     println!(
-        "Use /exit, /profile, /model, /clear, /save, /control, /format, /max-tokens, /stop, /goal."
+        "Use /exit, /profile, /model, /clear, /save, /control, /format, /answer-format, /max-tokens, /stop, /goal."
     );
 
     loop {
@@ -339,6 +342,16 @@ pub async fn interactive_chat(
                 println!("Stop sequences cleared.");
                 continue;
             }
+            "/quote-question" => {
+                control.quote_question = true;
+                println!("Question quoting enabled.");
+                continue;
+            }
+            "/quote-question clear" => {
+                control.quote_question = false;
+                println!("Question quoting disabled.");
+                continue;
+            }
             _ => {}
         }
 
@@ -354,6 +367,35 @@ pub async fn interactive_chat(
                 }
                 _ => println!("Use /format text or /format json-object."),
             }
+            continue;
+        }
+
+        if let Some(value) = line.strip_prefix("/answer-format ") {
+            match parse_answer_format(value) {
+                Some(format) => {
+                    control.answer_format = format;
+                    println!("Answer format: {format}");
+                }
+                None => println!("Use /answer-format natural|bullets|numbered|short|steps|table."),
+            }
+            continue;
+        }
+
+        if let Some(value) = line.strip_prefix("/answer-prefix ") {
+            control.answer_prefix = Some(value.to_string());
+            println!("Answer prefix updated.");
+            continue;
+        }
+
+        if let Some(value) = line.strip_prefix("/answer-suffix ") {
+            control.answer_suffix = Some(value.to_string());
+            println!("Answer suffix updated.");
+            continue;
+        }
+
+        if let Some(value) = line.strip_prefix("/address-as ") {
+            control.address_as = Some(value.to_string());
+            println!("Addressing rule updated.");
             continue;
         }
 
@@ -523,13 +565,18 @@ pub fn describe_control(control: &ResponseControl) -> String {
         control.stop.join(", ")
     };
     format!(
-        "Response control: format={}, max_tokens={}, stop={}, format_instruction={}, completion_instruction={}",
+        "Response control: api_format={}, answer_format={}, max_tokens={}, stop={}, answer_prefix={}, answer_suffix={}, address_as={}, quote_question={}, format_instruction={}, completion_instruction={}",
         control.format,
+        control.answer_format,
         control
             .max_tokens
             .map(|value| value.to_string())
             .unwrap_or_else(|| "none".to_string()),
         stop,
+        control.answer_prefix.as_deref().unwrap_or("none"),
+        control.answer_suffix.as_deref().unwrap_or("none"),
+        control.address_as.as_deref().unwrap_or("none"),
+        control.quote_question,
         control.format_instruction.as_deref().unwrap_or("none"),
         control.completion_instruction.as_deref().unwrap_or("none")
     )
@@ -553,6 +600,18 @@ fn parse_stop_mode(value: &str) -> Option<ConversationStopMode> {
         "state" => Some(ConversationStopMode::State),
         "instruction" => Some(ConversationStopMode::Instruction),
         "combined" => Some(ConversationStopMode::Combined),
+        _ => None,
+    }
+}
+
+fn parse_answer_format(value: &str) -> Option<AnswerFormat> {
+    match value {
+        "natural" => Some(AnswerFormat::Natural),
+        "bullets" => Some(AnswerFormat::Bullets),
+        "numbered" => Some(AnswerFormat::Numbered),
+        "short" => Some(AnswerFormat::Short),
+        "steps" => Some(AnswerFormat::Steps),
+        "table" => Some(AnswerFormat::Table),
         _ => None,
     }
 }

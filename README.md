@@ -49,6 +49,7 @@ aiteach token delete --profile work
 aiteach models list --profile work
 aiteach ask --profile work "Объясни ownership в Rust"
 aiteach ask --profile work "Верни краткое резюме" --max-tokens 120
+aiteach ask --profile work "Объясни ownership" --answer-format bullets --address-as Artem
 aiteach ask --profile work "Верни объект с полями title и bullets" --response-format json-object
 aiteach compare --profile work "Сравни Rust и Go" --max-tokens 120 --stop "END"
 aiteach compare-goal --profile work \
@@ -133,7 +134,7 @@ aiteach ask \
 
 #### 4. Ответ в строго заданном формате
 
-Задача: другой скрипт должен прочитать ответ. Текст вроде “У Маши стало 5 яблок” неудобен, нужен JSON.
+Задача: другой скрипт должен прочитать ответ. Текст вроде “У Маши стало 5 яблок” неудобен, нужен JSON. Это API-level формат: provider получает специальное поле `response_format`.
 
 ```bash
 aiteach ask \
@@ -155,7 +156,39 @@ aiteach ask \
 
 Зачем это нужно: если ответ читает программа, ей нужен предсказуемый формат, а не свободный текст.
 
-#### 5. Stop sequence: закончить мысль и остановиться по маркеру
+#### 5. Формат ответа как шаблон, а не как файл
+
+Задача: ответ должен начинаться с имени, процитировать вопрос и быть списком. Это не JSON/YAML/CSV, а “форма речи”.
+
+```bash
+aiteach ask \
+  "Почему 3 + 2 = 5?" \
+  --answer-format bullets \
+  --address-as "Артем" \
+  --quote-question \
+  --answer-prefix "Коротко:" \
+  --max-tokens 120
+```
+
+Ожидаемый стиль ответа:
+
+```text
+Коротко: Артем, вопрос: "Почему 3 + 2 = 5?"
+- 3 + 2 означает добавить 2 к 3.
+- После 3 идут 4 и 5.
+- Значит, получается 5.
+```
+
+Что здесь происходит:
+
+- `--answer-format bullets` просит отвечать пунктами.
+- `--address-as "Артем"` просит обратиться по имени.
+- `--quote-question` просит сначала процитировать вопрос.
+- `--answer-prefix "Коротко:"` просит начать ответ с конкретного текста.
+
+Зачем это нужно: во многих продуктах важен не “формат файла”, а привычный шаблон ответа: приветствие, цитата вопроса, список, финальная строка, обращение по имени.
+
+#### 6. Stop sequence: закончить мысль и остановиться по маркеру
 
 Проблема: если просто поставить маленький `max-tokens`, ответ может оборваться:
 
@@ -182,7 +215,7 @@ aiteach ask \
 
 Зачем это нужно: модель сама завершает мысль, а API технически останавливает поток в нужном месте.
 
-#### 6. Сравнить: без ограничений и с ограничениями
+#### 7. Сравнить: без ограничений и с ограничениями
 
 Задача: увидеть разницу на одном и том же вопросе.
 
@@ -200,7 +233,7 @@ CLI отправит два запроса:
 
 Зачем это нужно: вы видите, как один и тот же prompt меняется от уровня контроля. Это полезно перед тем, как встроить prompt в скрипт или продукт.
 
-#### 7. Интерактивный чат: менять правила по ходу разговора
+#### 8. Интерактивный чат: менять правила по ходу разговора
 
 ```bash
 aiteach chat --max-tokens 180
@@ -211,6 +244,8 @@ aiteach chat --max-tokens 180
 ```text
 > Объясни задачу про яблоки
 /max-tokens 60
+/answer-format bullets
+/address-as Артем
 /completion-instruction Отвечай как учитель в начальной школе, максимум 2 предложения.
 > Теперь объясни задачу про 7 груш и 4 груши
 /control
@@ -219,7 +254,7 @@ aiteach chat --max-tokens 180
 
 Зачем это нужно: иногда сначала нужен подробный ответ, потом краткий, потом JSON. Не надо перезапускать программу.
 
-#### 8. Сбор сущности: анкета про яблоки
+#### 9. Сбор сущности: анкета про яблоки
 
 Задача: не просто ответить, а собрать все нужные поля для задачи. Например, нам нужны:
 
@@ -258,7 +293,7 @@ assistant: {"fields":{"item":"яблоки","initial_count":3,"added_count":2},"
 
 Зачем это нужно: это уже не просто “один ответ”, а маленький агент, который собирает данные до готовности.
 
-#### 9. Сравнить способы остановки диалога
+#### 10. Сравнить способы остановки диалога
 
 ```bash
 aiteach compare-goal \
@@ -280,7 +315,7 @@ CLI сравнит:
 - `instruction` гибче, но модель может ошибиться.
 - `combined` строже всего и лучше для важных сценариев.
 
-#### 10. Несколько профилей для разных провайдеров
+#### 11. Несколько профилей для разных провайдеров
 
 Задача: один профиль для OpenRouter, другой для DeepSeek.
 
@@ -355,6 +390,17 @@ Config хранит только несекретные поля:
 - `/control clear`
 - `/format text`
 - `/format json-object`
+- `/answer-format natural`
+- `/answer-format bullets`
+- `/answer-format numbered`
+- `/answer-format short`
+- `/answer-format steps`
+- `/answer-format table`
+- `/answer-prefix <text>`
+- `/answer-suffix <text>`
+- `/address-as <name>`
+- `/quote-question`
+- `/quote-question clear`
 - `/max-tokens <number>`
 - `/stop <sequence>`
 - `/stop clear`
@@ -374,10 +420,20 @@ Config хранит только несекретные поля:
 
 Пользователь может управлять формой и завершением ответа через `ask`, `chat` и `compare`.
 
+Есть два разных понятия:
+
+- API-level format: то, что provider может технически усилить, например JSON object через `response_format`.
+- Answer format: человеческий шаблон ответа, например “начни с имени”, “процитируй вопрос”, “ответь списком”.
+
 CLI-флаги:
 
 - `--response-format text` - обычный текст, API-поле `response_format` не отправляется.
 - `--response-format json-object` - отправляет `response_format: {"type":"json_object"}` и добавляет system-инструкцию вернуть только JSON object.
+- `--answer-format natural|bullets|numbered|short|steps|table` - задает человеческий шаблон ответа через system-инструкцию.
+- `--answer-prefix <text>` - просит начать ответ с конкретного текста.
+- `--answer-suffix <text>` - просит закончить ответ конкретным текстом.
+- `--address-as <name>` - просит обратиться к пользователю по имени или роли.
+- `--quote-question` - просит сначала процитировать вопрос пользователя.
 - `--max-tokens <number>` - отправляет `max_tokens` и ограничивает длину генерации на стороне provider.
 - `--stop <sequence>` - можно указать несколько раз; отправляет массив `stop`.
 - `--format-instruction <text>` - добавляет system-инструкцию с явным описанием формата ответа.
@@ -612,6 +668,7 @@ aiteach token delete --profile work
 aiteach models list --profile work
 aiteach ask --profile work "Explain Rust ownership"
 aiteach ask --profile work "Return a short summary" --max-tokens 120
+aiteach ask --profile work "Explain ownership" --answer-format bullets --address-as Artem
 aiteach ask --profile work "Return an object with title and bullets" --response-format json-object
 aiteach compare --profile work "Compare Rust and Go" --max-tokens 120 --stop "END"
 aiteach compare-goal --profile work \
@@ -696,7 +753,7 @@ Why this matters: tokens protect against a long answer, while the instruction he
 
 #### 4. Strict response format
 
-Task: another script needs to read the answer. Free text like “Masha has 5 apples” is inconvenient; JSON is better.
+Task: another script needs to read the answer. Free text like “Masha has 5 apples” is inconvenient; JSON is better. This is an API-level format: the provider receives the special `response_format` field.
 
 ```bash
 aiteach ask \
@@ -718,7 +775,39 @@ Expected answer:
 
 Why this matters: if a program reads the answer, it needs predictable structure, not natural language.
 
-#### 5. Stop sequence: finish the thought and stop at a marker
+#### 5. Answer format as a template, not a file type
+
+Task: the answer should start with a name, quote the question, and use a list. This is not JSON/YAML/CSV; it is the shape of the response.
+
+```bash
+aiteach ask \
+  "Why is 3 + 2 equal to 5?" \
+  --answer-format bullets \
+  --address-as "Artem" \
+  --quote-question \
+  --answer-prefix "Short answer:" \
+  --max-tokens 120
+```
+
+Expected style:
+
+```text
+Short answer: Artem, question: "Why is 3 + 2 equal to 5?"
+- 3 + 2 means adding 2 to 3.
+- After 3 come 4 and 5.
+- So the result is 5.
+```
+
+What happens:
+
+- `--answer-format bullets` asks for bullet points.
+- `--address-as "Artem"` asks the model to address the user by name.
+- `--quote-question` asks the model to quote the question first.
+- `--answer-prefix "Short answer:"` asks the model to start with exact text.
+
+Why this matters: many products care less about file formats and more about a familiar answer template: greeting, quoted question, list, final line, or addressing the user by name.
+
+#### 6. Stop sequence: finish the thought and stop at a marker
 
 Problem: if you only set a tiny `max-tokens`, the answer may be cut off:
 
@@ -745,7 +834,7 @@ The marker `END_OF_ANSWER` is not printed because the API stops generation at th
 
 Why this matters: the model finishes the sentence, and the API stops the stream at the right place.
 
-#### 6. Compare one prompt without and with controls
+#### 7. Compare one prompt without and with controls
 
 Task: see the difference on the same question.
 
@@ -763,7 +852,7 @@ The CLI sends two requests:
 
 Why this matters: you can see how the same prompt changes when response control is added. This is useful before putting the prompt into a script or product.
 
-#### 7. Interactive chat: change rules during the conversation
+#### 8. Interactive chat: change rules during the conversation
 
 ```bash
 aiteach chat --max-tokens 180
@@ -774,6 +863,8 @@ Inside chat:
 ```text
 > Explain the apple problem
 /max-tokens 60
+/answer-format bullets
+/address-as Artem
 /completion-instruction Answer like an elementary school teacher, max 2 sentences.
 > Now explain a problem about 7 pears and 4 more pears
 /control
@@ -782,7 +873,7 @@ Inside chat:
 
 Why this matters: sometimes you first need detail, then brevity, then JSON. You do not need to restart the program.
 
-#### 8. Entity collection: an apple-problem form
+#### 9. Entity collection: an apple-problem form
 
 Task: do not just answer; collect every field needed for a problem. For example:
 
@@ -821,7 +912,7 @@ After that, the CLI stops the dialogue because:
 
 Why this matters: this is no longer just one answer. It is a small agent that collects data until the entity is complete.
 
-#### 9. Compare dialogue completion strategies
+#### 10. Compare dialogue completion strategies
 
 ```bash
 aiteach compare-goal \
@@ -843,7 +934,7 @@ Simple meaning:
 - `instruction` is more flexible, but the model can be wrong.
 - `combined` is the strictest and best for important flows.
 
-#### 10. Multiple profiles for different providers
+#### 11. Multiple profiles for different providers
 
 Task: one profile for OpenRouter, another for DeepSeek.
 
@@ -918,6 +1009,17 @@ Commands only show whether a token exists. The full token value is never printed
 - `/control clear`
 - `/format text`
 - `/format json-object`
+- `/answer-format natural`
+- `/answer-format bullets`
+- `/answer-format numbered`
+- `/answer-format short`
+- `/answer-format steps`
+- `/answer-format table`
+- `/answer-prefix <text>`
+- `/answer-suffix <text>`
+- `/address-as <name>`
+- `/quote-question`
+- `/quote-question clear`
 - `/max-tokens <number>`
 - `/stop <sequence>`
 - `/stop clear`
@@ -937,10 +1039,20 @@ History is stored locally and does not contain tokens. Prompts and responses are
 
 Users can control response shape and completion behavior through `ask`, `chat`, and `compare`.
 
+There are two different concepts:
+
+- API-level format: something the provider can technically enforce, for example JSON object through `response_format`.
+- Answer format: the human-facing response template, for example “start with my name”, “quote the question”, or “answer as bullets”.
+
 CLI flags:
 
 - `--response-format text` - regular text; the API field `response_format` is not sent.
 - `--response-format json-object` - sends `response_format: {"type":"json_object"}` and adds a system instruction to return only a JSON object.
+- `--answer-format natural|bullets|numbered|short|steps|table` - sets the human-facing answer template through a system instruction.
+- `--answer-prefix <text>` - asks the model to start the answer with exact text.
+- `--answer-suffix <text>` - asks the model to end the answer with exact text.
+- `--address-as <name>` - asks the model to address the user by name or role.
+- `--quote-question` - asks the model to quote the user's question first.
 - `--max-tokens <number>` - sends `max_tokens` and bounds generation length on the provider side.
 - `--stop <sequence>` - can be provided multiple times; sends a `stop` array.
 - `--format-instruction <text>` - adds a system instruction that explicitly describes the response format.

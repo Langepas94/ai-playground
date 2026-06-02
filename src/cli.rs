@@ -8,8 +8,8 @@ use crate::{
     config::{AppConfig, ProfileConfig},
     errors::AppError,
     providers::{
-        ProviderClient, ProviderKind, ReqwestProviderClient, ResponseControl, ResponseFormat,
-        validate_base_url,
+        AnswerFormat, ProviderClient, ProviderKind, ReqwestProviderClient, ResponseControl,
+        ResponseFormat, validate_base_url,
     },
     secrets::{KeyringSecretStore, SecretStore},
 };
@@ -159,6 +159,13 @@ struct ResponseControlArgs {
     response_format: CliResponseFormat,
     #[arg(
         long,
+        value_enum,
+        default_value_t = CliAnswerFormat::Natural,
+        help = "Human-facing answer shape, such as bullets, steps, or table"
+    )]
+    answer_format: CliAnswerFormat,
+    #[arg(
+        long,
         help = "Maximum number of output tokens requested from the provider"
     )]
     max_tokens: Option<u32>,
@@ -168,6 +175,14 @@ struct ResponseControlArgs {
         help = "Stop sequence; can be provided multiple times"
     )]
     stop: Vec<String>,
+    #[arg(long, help = "Exact text the answer should start with")]
+    answer_prefix: Option<String>,
+    #[arg(long, help = "Exact text the answer should end with")]
+    answer_suffix: Option<String>,
+    #[arg(long, help = "Name or label the answer should address the user with")]
+    address_as: Option<String>,
+    #[arg(long, help = "Ask the model to quote the user's question first")]
+    quote_question: bool,
     #[arg(
         long,
         help = "System instruction that explicitly describes the response format"
@@ -205,6 +220,17 @@ enum CliResponseFormat {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
+enum CliAnswerFormat {
+    #[default]
+    Natural,
+    Bullets,
+    Numbered,
+    Short,
+    Steps,
+    Table,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
 enum CliConversationStopMode {
     #[default]
     Manual,
@@ -220,8 +246,20 @@ impl From<&ResponseControlArgs> for ResponseControl {
                 CliResponseFormat::Text => ResponseFormat::Text,
                 CliResponseFormat::JsonObject => ResponseFormat::JsonObject,
             },
+            answer_format: match args.answer_format {
+                CliAnswerFormat::Natural => AnswerFormat::Natural,
+                CliAnswerFormat::Bullets => AnswerFormat::Bullets,
+                CliAnswerFormat::Numbered => AnswerFormat::Numbered,
+                CliAnswerFormat::Short => AnswerFormat::Short,
+                CliAnswerFormat::Steps => AnswerFormat::Steps,
+                CliAnswerFormat::Table => AnswerFormat::Table,
+            },
             max_tokens: args.max_tokens,
             stop: args.stop.clone(),
+            answer_prefix: args.answer_prefix.clone(),
+            answer_suffix: args.answer_suffix.clone(),
+            address_as: args.address_as.clone(),
+            quote_question: args.quote_question,
             format_instruction: args.format_instruction.clone(),
             completion_instruction: args.completion_instruction.clone(),
         }

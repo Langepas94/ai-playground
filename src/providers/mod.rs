@@ -129,11 +129,40 @@ impl std::fmt::Display for ResponseFormat {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnswerFormat {
+    #[default]
+    Natural,
+    Bullets,
+    Numbered,
+    Short,
+    Steps,
+    Table,
+}
+
+impl std::fmt::Display for AnswerFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Natural => write!(f, "natural"),
+            Self::Bullets => write!(f, "bullets"),
+            Self::Numbered => write!(f, "numbered"),
+            Self::Short => write!(f, "short"),
+            Self::Steps => write!(f, "steps"),
+            Self::Table => write!(f, "table"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ResponseControl {
     pub format: ResponseFormat,
+    pub answer_format: AnswerFormat,
     pub max_tokens: Option<u32>,
     pub stop: Vec<String>,
+    pub answer_prefix: Option<String>,
+    pub answer_suffix: Option<String>,
+    pub address_as: Option<String>,
+    pub quote_question: bool,
     pub format_instruction: Option<String>,
     pub completion_instruction: Option<String>,
 }
@@ -145,14 +174,25 @@ impl ResponseControl {
 
     pub fn is_uncontrolled(&self) -> bool {
         self.format == ResponseFormat::Text
+            && self.answer_format == AnswerFormat::Natural
             && self.max_tokens.is_none()
             && self.stop.is_empty()
+            && self.answer_prefix.is_none()
+            && self.answer_suffix.is_none()
+            && self.address_as.is_none()
+            && !self.quote_question
             && self.format_instruction.is_none()
             && self.completion_instruction.is_none()
     }
 
     pub fn instruction_messages(&self) -> Vec<ChatMessage> {
         let mut messages = Vec::new();
+        if let Some(instruction) = self.answer_format_instruction() {
+            messages.push(ChatMessage {
+                role: Role::System,
+                content: instruction,
+            });
+        }
         match self.format {
             ResponseFormat::Text => {
                 if let Some(instruction) = &self.format_instruction {
@@ -179,6 +219,44 @@ impl ResponseControl {
             });
         }
         messages
+    }
+
+    fn answer_format_instruction(&self) -> Option<String> {
+        let mut rules = Vec::new();
+        match self.answer_format {
+            AnswerFormat::Natural => {}
+            AnswerFormat::Bullets => rules.push("Answer as concise bullet points.".to_string()),
+            AnswerFormat::Numbered => rules.push("Answer as a numbered list.".to_string()),
+            AnswerFormat::Short => rules.push("Answer in one or two short sentences.".to_string()),
+            AnswerFormat::Steps => {
+                rules.push("Answer as clear step-by-step instructions.".to_string())
+            }
+            AnswerFormat::Table => {
+                rules.push("Answer as a Markdown table when possible.".to_string())
+            }
+        }
+        if self.quote_question {
+            rules.push("Start by quoting the user's question in one short line.".to_string());
+        }
+        if let Some(name) = &self.address_as {
+            rules.push(format!(
+                "Address the user as \"{name}\" at the start of the answer."
+            ));
+        }
+        if let Some(prefix) = &self.answer_prefix {
+            rules.push(format!("Start the answer exactly with this text: {prefix}"));
+        }
+        if let Some(suffix) = &self.answer_suffix {
+            rules.push(format!("End the answer exactly with this text: {suffix}"));
+        }
+        if rules.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "Answer formatting rules:\n- {}",
+                rules.join("\n- ")
+            ))
+        }
     }
 }
 
@@ -293,8 +371,13 @@ mod tests {
             }],
             control: ResponseControl {
                 format: ResponseFormat::JsonObject,
+                answer_format: AnswerFormat::Bullets,
                 max_tokens: Some(64),
                 stop: vec!["END".to_string()],
+                answer_prefix: Some("Artem,".to_string()),
+                answer_suffix: None,
+                address_as: None,
+                quote_question: true,
                 format_instruction: None,
                 completion_instruction: Some("Stop after the summary field.".to_string()),
             },
@@ -304,8 +387,10 @@ mod tests {
         assert_eq!(payload.stop, vec!["END"]);
         assert_eq!(payload.response_format.expect("format").kind, "json_object");
         assert_eq!(payload.messages[0].role, Role::System);
-        assert!(payload.messages[0].content.contains("valid JSON object"));
-        assert_eq!(payload.messages[2].role, Role::User);
+        assert!(payload.messages[0].content.contains("bullet points"));
+        assert!(payload.messages[0].content.contains("Artem"));
+        assert!(payload.messages[1].content.contains("valid JSON object"));
+        assert_eq!(payload.messages[3].role, Role::User);
     }
 
     #[test]
