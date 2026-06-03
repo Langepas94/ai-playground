@@ -13,7 +13,7 @@ use crate::{
     },
     secrets::{
         KeyringSecretStore, SecretStore, delete_legacy_profile_token, delete_profile_token,
-        get_profile_token, set_profile_token,
+        get_config_profile_token, set_profile_token,
     },
 };
 
@@ -339,6 +339,7 @@ async fn profile_command(
                 args.model.clone(),
                 args.base_url.clone(),
                 secrets,
+                &config,
             )
             .await?;
             validate_base_url(&profile.name, &profile.config.base_url)?;
@@ -353,7 +354,8 @@ async fn profile_command(
                 } else {
                     " "
                 };
-                let has_token = get_profile_token(secrets, name, profile)?.is_some();
+                let has_token =
+                    get_config_profile_token(secrets, &config, name, profile)?.is_some();
                 let token = if has_token {
                     "token: present"
                 } else {
@@ -398,6 +400,7 @@ async fn setup_command(args: &SetupArgs, secrets: &dyn SecretStore) -> Result<()
         args.model.clone(),
         args.base_url.clone(),
         secrets,
+        &config,
     )
     .await?;
     validate_base_url(&profile.name, &profile.config.base_url)?;
@@ -460,8 +463,9 @@ async fn collect_profile_input(
     model: Option<String>,
     base_url: Option<String>,
     secrets: &dyn SecretStore,
+    config: &AppConfig,
 ) -> Result<CollectedProfile, AppError> {
-    collect_profile_input_inner(name, provider, model, base_url, secrets, false).await
+    collect_profile_input_inner(name, provider, model, base_url, secrets, config, false).await
 }
 
 async fn collect_profile_input_with_optional_setup_token(
@@ -470,8 +474,9 @@ async fn collect_profile_input_with_optional_setup_token(
     model: Option<String>,
     base_url: Option<String>,
     secrets: &dyn SecretStore,
+    config: &AppConfig,
 ) -> Result<CollectedProfile, AppError> {
-    collect_profile_input_inner(name, provider, model, base_url, secrets, true).await
+    collect_profile_input_inner(name, provider, model, base_url, secrets, config, true).await
 }
 
 async fn collect_profile_input_inner(
@@ -480,6 +485,7 @@ async fn collect_profile_input_inner(
     model: Option<String>,
     base_url: Option<String>,
     secrets: &dyn SecretStore,
+    config: &AppConfig,
     prompt_setup_token: bool,
 ) -> Result<CollectedProfile, AppError> {
     let provider = match provider {
@@ -518,7 +524,7 @@ async fn collect_profile_input_inner(
     let token_saved = setup_token.is_some();
     let model_token = match setup_token {
         Some(token) => Some(token),
-        None => get_profile_token(secrets, &name, &token_profile)?,
+        None => get_config_profile_token(secrets, config, &name, &token_profile)?,
     };
     let model = match model {
         Some(model) => model,
@@ -719,10 +725,11 @@ async fn models_command(
     let config = AppConfig::load()?;
     let ModelsCommand::List(args) = command;
     let (name, profile) = config.selected_profile(args.profile.as_deref())?;
-    let token =
-        get_profile_token(secrets, &name, profile)?.ok_or_else(|| AppError::MissingToken {
+    let token = get_config_profile_token(secrets, &config, &name, profile)?.ok_or_else(|| {
+        AppError::MissingToken {
             profile: name.to_string(),
-        })?;
+        }
+    })?;
     eprintln!("Waiting for provider model list...");
     let client = ReqwestProviderClient::new()?;
     for model in client.list_models(profile, &token).await? {
@@ -739,6 +746,7 @@ async fn ask_command(args: &AskArgs, secrets: &dyn SecretStore) -> Result<(), Ap
     let text = chat::ask_once(
         &client,
         secrets,
+        &config,
         &name,
         profile,
         args.prompt.clone(),
@@ -774,6 +782,7 @@ async fn compare_command(args: &CompareArgs, secrets: &dyn SecretStore) -> Resul
     let (unrestricted, controlled) = chat::compare_response_control(
         &client,
         secrets,
+        &config,
         &name,
         profile,
         args.prompt.clone(),
@@ -801,6 +810,7 @@ async fn compare_goal_command(
     let comparison = chat::compare_goal_stop(
         &client,
         secrets,
+        &config,
         &name,
         profile,
         args.prompt.clone(),
@@ -830,7 +840,7 @@ fn doctor_command(args: &ProfileArg, secrets: &dyn SecretStore) -> Result<(), Ap
     println!("Provider: {}", profile.provider);
     println!("Model: {}", profile.model);
     println!("Base URL: valid");
-    let token_present = get_profile_token(secrets, &name, profile)?.is_some();
+    let token_present = get_config_profile_token(secrets, &config, &name, profile)?.is_some();
     println!(
         "Token: {}",
         if token_present { "present" } else { "missing" }
