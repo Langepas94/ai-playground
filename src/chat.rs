@@ -14,7 +14,7 @@ use crate::{
         AnswerFormat, ChatMessage, ChatRequest, ProviderClient, ResponseControl, ResponseFormat,
         Role,
     },
-    secrets::{SecretStore, get_profile_token},
+    secrets::{SecretStore, get_config_profile_token},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -146,16 +146,18 @@ impl GoalState {
 pub async fn ask_once(
     client: &dyn ProviderClient,
     secrets: &dyn SecretStore,
+    config: &AppConfig,
     profile_name: &str,
     profile: &ProfileConfig,
     prompt: String,
     control: ResponseControl,
 ) -> Result<String, AppError> {
-    let token = get_profile_token(secrets, profile_name, profile)?.ok_or_else(|| {
-        AppError::MissingToken {
-            profile: profile_name.to_string(),
-        }
-    })?;
+    let token =
+        get_config_profile_token(secrets, config, profile_name, profile)?.ok_or_else(|| {
+            AppError::MissingToken {
+                profile: profile_name.to_string(),
+            }
+        })?;
     let response = client
         .chat_completion(
             profile,
@@ -176,16 +178,18 @@ pub async fn ask_once(
 pub async fn compare_response_control(
     client: &dyn ProviderClient,
     secrets: &dyn SecretStore,
+    config: &AppConfig,
     profile_name: &str,
     profile: &ProfileConfig,
     prompt: String,
     controlled: ResponseControl,
 ) -> Result<(String, String), AppError> {
-    let token = get_profile_token(secrets, profile_name, profile)?.ok_or_else(|| {
-        AppError::MissingToken {
-            profile: profile_name.to_string(),
-        }
-    })?;
+    let token =
+        get_config_profile_token(secrets, config, profile_name, profile)?.ok_or_else(|| {
+            AppError::MissingToken {
+                profile: profile_name.to_string(),
+            }
+        })?;
     let base_request = ChatRequest {
         model: profile.model.clone(),
         messages: vec![ChatMessage {
@@ -216,16 +220,18 @@ pub async fn compare_response_control(
 pub async fn compare_goal_stop(
     client: &dyn ProviderClient,
     secrets: &dyn SecretStore,
+    config: &AppConfig,
     profile_name: &str,
     profile: &ProfileConfig,
     prompt: String,
     required_fields: Vec<String>,
 ) -> Result<GoalComparison, AppError> {
-    let token = get_profile_token(secrets, profile_name, profile)?.ok_or_else(|| {
-        AppError::MissingToken {
-            profile: profile_name.to_string(),
-        }
-    })?;
+    let token =
+        get_config_profile_token(secrets, config, profile_name, profile)?.ok_or_else(|| {
+            AppError::MissingToken {
+                profile: profile_name.to_string(),
+            }
+        })?;
     let state = run_goal_once(
         client,
         profile,
@@ -269,11 +275,12 @@ pub async fn interactive_chat(
     mut control: ResponseControl,
     mut goal: ConversationGoal,
 ) -> Result<(), AppError> {
-    let token = get_profile_token(secrets, profile_name, profile)?.ok_or_else(|| {
-        AppError::MissingToken {
-            profile: profile_name.to_string(),
-        }
-    })?;
+    let token =
+        get_config_profile_token(secrets, config, profile_name, profile)?.ok_or_else(|| {
+            AppError::MissingToken {
+                profile: profile_name.to_string(),
+            }
+        })?;
     let mut messages = Vec::<ChatMessage>::new();
     let mut goal_state = GoalState::new(goal.required_fields.clone());
     println!(

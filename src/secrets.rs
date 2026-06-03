@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Mutex};
 use keyring::Entry;
 
 use crate::{
-    config::{ProfileConfig, legacy_token_ref, token_ref},
+    config::{AppConfig, ProfileConfig, legacy_token_ref, token_ref},
     errors::AppError,
 };
 
@@ -111,6 +111,29 @@ pub fn get_profile_token(
     Ok(None)
 }
 
+pub fn get_config_profile_token(
+    secrets: &dyn SecretStore,
+    config: &AppConfig,
+    profile_name: &str,
+    profile: &ProfileConfig,
+) -> Result<Option<String>, AppError> {
+    if let Some(token) = get_profile_token(secrets, profile_name, profile)? {
+        return Ok(Some(token));
+    }
+
+    for (candidate_name, candidate_profile) in &config.profiles {
+        if candidate_name == profile_name || candidate_profile.provider != profile.provider {
+            continue;
+        }
+        if let Some(token) = get_profile_token(secrets, candidate_name, candidate_profile)? {
+            set_profile_token(secrets, profile, &token)?;
+            return Ok(Some(token));
+        }
+    }
+
+    Ok(None)
+}
+
 pub fn set_profile_token(
     secrets: &dyn SecretStore,
     profile: &ProfileConfig,
@@ -171,6 +194,43 @@ mod tests {
         assert_eq!(
             get_profile_token(&secrets, "work", &profile).expect("get provider"),
             Some("provider-token".to_string())
+        );
+    }
+
+    #[test]
+    fn provider_tokens_fallback_to_legacy_token_from_another_profile() {
+        let secrets = MemorySecretStore::default();
+        let mut config = AppConfig::default();
+        config.profiles.insert(
+            "Deepseek".to_string(),
+            ProfileConfig {
+                provider: crate::providers::ProviderKind::DeepSeek,
+                model: "deepseek-chat".to_string(),
+                base_url: "https://api.deepseek.com/v1".to_string(),
+                token_ref: "deepseek:Deepseek".to_string(),
+            },
+        );
+        let pro_profile = ProfileConfig {
+            provider: crate::providers::ProviderKind::DeepSeek,
+            model: "deepseek-v4-pro".to_string(),
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            token_ref: "deepseek:ВуDeepSeek pro".to_string(),
+        };
+        config
+            .profiles
+            .insert("ВуDeepSeek pro".to_string(), pro_profile.clone());
+
+        secrets
+            .set_token("deepseek:Deepseek", "legacy-token")
+            .expect("set legacy token");
+        assert_eq!(
+            get_config_profile_token(&secrets, &config, "ВуDeepSeek pro", &pro_profile)
+                .expect("get shared provider token"),
+            Some("legacy-token".to_string())
+        );
+        assert_eq!(
+            secrets.get_token("deepseek").expect("get migrated token"),
+            Some("legacy-token".to_string())
         );
     }
 }
