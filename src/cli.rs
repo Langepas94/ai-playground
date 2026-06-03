@@ -308,8 +308,8 @@ pub async fn run() -> Result<()> {
 async fn run_with_store(cli: &Cli, secrets: &dyn SecretStore) -> Result<(), AppError> {
     let _ = cli.log_conversation;
     match &cli.command {
-        Command::Setup(args) => setup_command(args, secrets),
-        Command::Profile { command } => profile_command(command, secrets),
+        Command::Setup(args) => setup_command(args, secrets).await,
+        Command::Profile { command } => profile_command(command, secrets).await,
         Command::Token { command } => token_command(command, secrets),
         Command::Models { command } => models_command(command, secrets).await,
         Command::Ask(args) => ask_command(args, secrets).await,
@@ -326,7 +326,10 @@ async fn run_with_store(cli: &Cli, secrets: &dyn SecretStore) -> Result<(), AppE
     }
 }
 
-fn profile_command(command: &ProfileCommand, secrets: &dyn SecretStore) -> Result<(), AppError> {
+async fn profile_command(
+    command: &ProfileCommand,
+    secrets: &dyn SecretStore,
+) -> Result<(), AppError> {
     let mut config = AppConfig::load()?;
     match command {
         ProfileCommand::Add(args) => {
@@ -335,7 +338,9 @@ fn profile_command(command: &ProfileCommand, secrets: &dyn SecretStore) -> Resul
                 args.provider,
                 args.model.clone(),
                 args.base_url.clone(),
-            )?;
+                secrets,
+            )
+            .await?;
             validate_base_url(&profile.name, &profile.config.base_url)?;
             config.add_profile(profile.name.clone(), profile.config);
             config.save()?;
@@ -381,31 +386,30 @@ fn profile_name_from_parts(parts: &[String]) -> String {
     parts.join(" ")
 }
 
-fn setup_command(args: &SetupArgs, secrets: &dyn SecretStore) -> Result<(), AppError> {
+async fn setup_command(args: &SetupArgs, secrets: &dyn SecretStore) -> Result<(), AppError> {
     println!("aiteach setup");
     println!("Press Enter to accept the value shown in brackets.");
     println!();
 
     let mut config = AppConfig::load()?;
-    let profile = collect_profile_input(
+    let profile = collect_profile_input_with_optional_setup_token(
         args.name.clone(),
         args.provider,
         args.model.clone(),
         args.base_url.clone(),
-    )?;
+        secrets,
+    )
+    .await?;
     validate_base_url(&profile.name, &profile.config.base_url)?;
+    let provider = profile.config.provider;
     config.add_profile(profile.name.clone(), profile.config);
     config.use_profile(&profile.name)?;
-    let saved_profile = config.profiles[&profile.name].clone();
     config.save()?;
 
     println!();
     println!("Profile '{}' is active.", profile.name);
-    println!("The token will be stored in the OS keychain, not in config.");
-    let token = prompt_optional_secret("API token (paste it, or press Enter to skip)")?;
-    if let Some(token) = token {
-        set_profile_token(secrets, &saved_profile, &token)?;
-        println!("Token saved for provider '{}'.", saved_profile.provider);
+    if profile.token_saved {
+        println!("Token saved for provider '{provider}'.");
     } else {
         println!(
             "Token skipped. Add it later with `aiteach token set --profile {}`.",
@@ -447,13 +451,36 @@ fn token_command(command: &TokenCommand, secrets: &dyn SecretStore) -> Result<()
 struct CollectedProfile {
     name: String,
     config: ProfileConfig,
+    token_saved: bool,
 }
 
-fn collect_profile_input(
+async fn collect_profile_input(
     name: Option<String>,
     provider: Option<ProviderKind>,
     model: Option<String>,
     base_url: Option<String>,
+    secrets: &dyn SecretStore,
+) -> Result<CollectedProfile, AppError> {
+    collect_profile_input_inner(name, provider, model, base_url, secrets, false).await
+}
+
+async fn collect_profile_input_with_optional_setup_token(
+    name: Option<String>,
+    provider: Option<ProviderKind>,
+    model: Option<String>,
+    base_url: Option<String>,
+    secrets: &dyn SecretStore,
+) -> Result<CollectedProfile, AppError> {
+    collect_profile_input_inner(name, provider, model, base_url, secrets, true).await
+}
+
+async fn collect_profile_input_inner(
+    name: Option<String>,
+    provider: Option<ProviderKind>,
+    model: Option<String>,
+    base_url: Option<String>,
+    secrets: &dyn SecretStore,
+    prompt_setup_token: bool,
 ) -> Result<CollectedProfile, AppError> {
     let provider = match provider {
         Some(provider) => provider,
@@ -466,16 +493,36 @@ fn collect_profile_input(
             &provider.to_string(),
         )?,
     };
-    let model = match model {
-        Some(model) => model,
-        None => prompt_model(provider)?,
-    };
     let base_url = match base_url {
         Some(base_url) => base_url,
         None => prompt_with_default(
             "Base URL. Press Enter unless you use a custom compatible endpoint",
             provider.default_base_url(),
         )?,
+    };
+    let token_profile = ProfileConfig {
+        provider,
+        model: provider.default_model().to_string(),
+        base_url: base_url.clone(),
+        token_ref: crate::config::token_ref(&provider),
+    };
+    let setup_token = if prompt_setup_token {
+        println!("The token will be stored in the OS keychain, not in config.");
+        prompt_optional_secret("API token (paste it, or press Enter to skip)")?
+    } else {
+        None
+    };
+    if let Some(token) = setup_token.as_deref() {
+        set_profile_token(secrets, &token_profile, token)?;
+    }
+    let token_saved = setup_token.is_some();
+    let model_token = match setup_token {
+        Some(token) => Some(token),
+        None => get_profile_token(secrets, &name, &token_profile)?,
+    };
+    let model = match model {
+        Some(model) => model,
+        None => prompt_model(provider, &base_url, model_token.as_deref()).await?,
     };
 
     Ok(CollectedProfile {
@@ -486,36 +533,60 @@ fn collect_profile_input(
             base_url,
             token_ref: String::new(),
         },
+        token_saved,
     })
 }
 
-fn prompt_model(provider: ProviderKind) -> Result<String, AppError> {
+async fn prompt_model(
+    provider: ProviderKind,
+    base_url: &str,
+    token: Option<&str>,
+) -> Result<String, AppError> {
     let spec = provider.spec();
     println!();
     println!("Choose model for {}.", spec.display_name);
-    println!(
-        "Press Enter for the recommended default, choose a number, or type a custom model id."
-    );
-    for (index, model) in spec.suggested_models.iter().enumerate() {
-        let recommended = if *model == spec.default_model {
-            " recommended"
+    let models = match token {
+        Some(token) => fetch_provider_models(provider, base_url, token).await?,
+        None => Vec::new(),
+    };
+    if models.is_empty() {
+        if token.is_none() {
+            println!("No token is available yet, so the live model list cannot be loaded.");
         } else {
-            ""
-        };
-        println!("  {}. {}{}", index + 1, model, recommended);
+            println!("The live model list is empty; type a model id manually if needed.");
+        }
+        println!(
+            "Press Enter for the provider default, or type a model id. Default: {}",
+            spec.default_model
+        );
+    } else {
+        println!("Loaded {} models from the provider.", models.len());
+        println!(
+            "Press Enter for the provider default, choose a number, or type a custom model id."
+        );
+        for (index, model) in models.iter().enumerate() {
+            let recommended = if model == spec.default_model {
+                " default"
+            } else {
+                ""
+            };
+            println!("  {}. {}{}", index + 1, model, recommended);
+        }
+        println!("  custom. Type another model id manually");
     }
-    println!("  custom. Type another model id manually");
 
     loop {
-        let raw = prompt("Model number or custom id [1]")?;
+        let raw = prompt(&format!(
+            "Model number or custom id [{}]",
+            spec.default_model
+        ))?;
         if raw.trim().is_empty() {
-            println!("Using default: {}", spec.default_model);
             return Ok(spec.default_model.to_string());
         }
         if let Ok(index) = raw.parse::<usize>()
-            && let Some(model) = spec.suggested_models.get(index.saturating_sub(1))
+            && let Some(model) = models.get(index.saturating_sub(1))
         {
-            return Ok((*model).to_string());
+            return Ok(model.to_string());
         }
         if raw.eq_ignore_ascii_case("custom") {
             return prompt_required("Custom model id");
@@ -523,7 +594,29 @@ fn prompt_model(provider: ProviderKind) -> Result<String, AppError> {
         if !raw.trim().is_empty() {
             return Ok(raw);
         }
-        println!("Choose a model number, type custom, or type a model id.");
+        println!("Choose a model number, type custom, press Enter, or type a model id.");
+    }
+}
+
+async fn fetch_provider_models(
+    provider: ProviderKind,
+    base_url: &str,
+    token: &str,
+) -> Result<Vec<String>, AppError> {
+    validate_base_url(&provider.to_string(), base_url)?;
+    let client = ReqwestProviderClient::new()?;
+    let profile = ProfileConfig {
+        provider,
+        model: provider.default_model().to_string(),
+        base_url: base_url.to_string(),
+        token_ref: String::new(),
+    };
+    match client.list_models(&profile, token).await {
+        Ok(models) => Ok(models),
+        Err(error) => {
+            eprintln!("Could not load live model list: {error}");
+            Ok(Vec::new())
+        }
     }
 }
 

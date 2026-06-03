@@ -102,7 +102,6 @@ pub struct ProviderSpec {
     pub display_name: &'static str,
     pub default_base_url: &'static str,
     pub default_model: &'static str,
-    pub suggested_models: &'static [&'static str],
     pub auth_scheme: AuthScheme,
     pub extra_headers: &'static [StaticHeader],
 }

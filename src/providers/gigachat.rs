@@ -13,7 +13,6 @@ use crate::{
 };
 
 const EXTRA_HEADERS: &[StaticHeader] = &[];
-const SUGGESTED_MODELS: &[&str] = &["GigaChat", "GigaChat-Pro", "GigaChat-Max"];
 const OAUTH_URL: &str = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth";
 const DEFAULT_SCOPE: &str = "GIGACHAT_API_PERS";
 
@@ -23,7 +22,6 @@ pub fn spec() -> ProviderSpec {
         display_name: "GigaChat",
         default_base_url: "https://gigachat.devices.sberbank.ru/api/v1",
         default_model: "GigaChat",
-        suggested_models: SUGGESTED_MODELS,
         auth_scheme: AuthScheme::Bearer,
         extra_headers: EXTRA_HEADERS,
     }
