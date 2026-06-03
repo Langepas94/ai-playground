@@ -14,7 +14,7 @@ use crate::{
         AnswerFormat, ChatMessage, ChatRequest, ProviderClient, ResponseControl, ResponseFormat,
         Role,
     },
-    secrets::SecretStore,
+    secrets::{SecretStore, get_profile_token},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -151,11 +151,11 @@ pub async fn ask_once(
     prompt: String,
     control: ResponseControl,
 ) -> Result<String, AppError> {
-    let token = secrets
-        .get_token(&profile.token_ref)?
-        .ok_or_else(|| AppError::MissingToken {
+    let token = get_profile_token(secrets, profile_name, profile)?.ok_or_else(|| {
+        AppError::MissingToken {
             profile: profile_name.to_string(),
-        })?;
+        }
+    })?;
     let response = client
         .chat_completion(
             profile,
@@ -181,11 +181,11 @@ pub async fn compare_response_control(
     prompt: String,
     controlled: ResponseControl,
 ) -> Result<(String, String), AppError> {
-    let token = secrets
-        .get_token(&profile.token_ref)?
-        .ok_or_else(|| AppError::MissingToken {
+    let token = get_profile_token(secrets, profile_name, profile)?.ok_or_else(|| {
+        AppError::MissingToken {
             profile: profile_name.to_string(),
-        })?;
+        }
+    })?;
     let base_request = ChatRequest {
         model: profile.model.clone(),
         messages: vec![ChatMessage {
@@ -221,11 +221,11 @@ pub async fn compare_goal_stop(
     prompt: String,
     required_fields: Vec<String>,
 ) -> Result<GoalComparison, AppError> {
-    let token = secrets
-        .get_token(&profile.token_ref)?
-        .ok_or_else(|| AppError::MissingToken {
+    let token = get_profile_token(secrets, profile_name, profile)?.ok_or_else(|| {
+        AppError::MissingToken {
             profile: profile_name.to_string(),
-        })?;
+        }
+    })?;
     let state = run_goal_once(
         client,
         profile,
@@ -269,11 +269,11 @@ pub async fn interactive_chat(
     mut control: ResponseControl,
     mut goal: ConversationGoal,
 ) -> Result<(), AppError> {
-    let token = secrets
-        .get_token(&profile.token_ref)?
-        .ok_or_else(|| AppError::MissingToken {
+    let token = get_profile_token(secrets, profile_name, profile)?.ok_or_else(|| {
+        AppError::MissingToken {
             profile: profile_name.to_string(),
-        })?;
+        }
+    })?;
     let mut messages = Vec::<ChatMessage>::new();
     let mut goal_state = GoalState::new(goal.required_fields.clone());
     println!(
