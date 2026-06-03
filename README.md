@@ -585,9 +585,11 @@ Docs: [DeepSeek JSON Output](https://api-docs.deepseek.com/guides/json_mode/), [
 
 - Endpoint: `POST https://gigachat.devices.sberbank.ru/api/v1/chat/completions`.
 - GigaChat Chat Completions использует OpenAI-like request shape с `messages`, `model` и `max_tokens`.
+- Токен в keychain может быть authorization key из кабинета GigaChat: CLI обменяет его на access token через OAuth. Для B2B/CORP scope задайте `AITEACH_GIGACHAT_SCOPE`, по умолчанию используется `GIGACHAT_API_PERS`.
 - CLI отправляет `max_tokens`, `stop` и `response_format` в том же body. Если конкретная GigaChat-модель или тариф не поддерживает поле, provider вернет HTTP/API error, который CLI покажет без раскрытия токена.
 - Явное описание формата и условие завершения всегда доступны через `system` messages.
 - Для dialogue stop CLI не полагается на provider-specific session state: состояние required fields хранится локально.
+- Если GigaChat падает с TLS ошибкой `self signed certificate in certificate chain`, скачайте сертификаты из документации Sber, объедините root/sub CA в PEM bundle и запустите CLI с `AITEACH_CA_BUNDLE=/path/to/chain_pem.txt`.
 
 Docs: [GigaChat model selection example](https://developers.sber.ru/docs/ru/gigachat/guides/selecting-a-model), [GigaChat streaming example](https://developers.sber.ru/docs/ru/gigachat/guides/response-token-streaming).
 
@@ -1228,9 +1230,11 @@ Docs: [DeepSeek JSON Output](https://api-docs.deepseek.com/guides/json_mode/), [
 
 - Endpoint: `POST https://gigachat.devices.sberbank.ru/api/v1/chat/completions`.
 - GigaChat Chat Completions uses an OpenAI-like request shape with `messages`, `model`, and `max_tokens`.
+- The token stored in keychain can be a GigaChat authorization key: the CLI exchanges it for an access token through OAuth. For B2B/CORP scopes, set `AITEACH_GIGACHAT_SCOPE`; the default is `GIGACHAT_API_PERS`.
 - The CLI sends `max_tokens`, `stop`, and `response_format` in the same body. If a concrete GigaChat model or plan does not support a field, the provider returns an HTTP/API error and the CLI reports it without exposing the token.
 - Explicit format and completion conditions remain available through `system` messages.
 - For dialogue stop, the CLI does not rely on provider-specific session state: required field state is stored locally.
+- If GigaChat fails with TLS error `self signed certificate in certificate chain`, download certificates from Sber docs, combine root/sub CA into a PEM bundle, and run the CLI with `AITEACH_CA_BUNDLE=/path/to/chain_pem.txt`.
 
 Docs: [GigaChat model selection example](https://developers.sber.ru/docs/ru/gigachat/guides/selecting-a-model), [GigaChat streaming example](https://developers.sber.ru/docs/ru/gigachat/guides/response-token-streaming).
 
