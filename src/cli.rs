@@ -58,8 +58,14 @@ enum Command {
 enum ProfileCommand {
     Add(ProfileAddArgs),
     List,
-    Use { name: String },
-    Remove { name: String },
+    Use {
+        #[arg(required = true, num_args = 1..)]
+        name: Vec<String>,
+    },
+    Remove {
+        #[arg(required = true, num_args = 1..)]
+        name: Vec<String>,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -352,18 +358,24 @@ fn profile_command(command: &ProfileCommand, secrets: &dyn SecretStore) -> Resul
             }
         }
         ProfileCommand::Use { name } => {
-            config.use_profile(name)?;
+            let name = profile_name_from_parts(name);
+            config.use_profile(&name)?;
             config.save()?;
             println!("Active profile: {name}");
         }
         ProfileCommand::Remove { name } => {
-            let removed = config.remove_profile(name)?;
+            let name = profile_name_from_parts(name);
+            let removed = config.remove_profile(&name)?;
             secrets.delete_token(&removed.token_ref)?;
             config.save()?;
             println!("Profile '{name}' removed.");
         }
     }
     Ok(())
+}
+
+fn profile_name_from_parts(parts: &[String]) -> String {
+    parts.join(" ")
 }
 
 fn setup_command(args: &SetupArgs, secrets: &dyn SecretStore) -> Result<(), AppError> {
@@ -729,4 +741,39 @@ fn doctor_command(args: &ProfileArg, secrets: &dyn SecretStore) -> Result<(), Ap
         if token_present { "present" } else { "missing" }
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_use_accepts_unquoted_names_with_spaces() {
+        let cli = Cli::try_parse_from(["aiteach", "profile", "use", "ВуDeepSeek", "pro"])
+            .expect("parse profile use");
+
+        let Command::Profile { command } = cli.command else {
+            panic!("expected profile command");
+        };
+        let ProfileCommand::Use { name } = command else {
+            panic!("expected profile use command");
+        };
+
+        assert_eq!(profile_name_from_parts(&name), "ВуDeepSeek pro");
+    }
+
+    #[test]
+    fn profile_remove_accepts_unquoted_names_with_spaces() {
+        let cli = Cli::try_parse_from(["aiteach", "profile", "remove", "ВуDeepSeek", "pro"])
+            .expect("parse profile remove");
+
+        let Command::Profile { command } = cli.command else {
+            panic!("expected profile command");
+        };
+        let ProfileCommand::Remove { name } = command else {
+            panic!("expected profile remove command");
+        };
+
+        assert_eq!(profile_name_from_parts(&name), "ВуDeepSeek pro");
+    }
 }
