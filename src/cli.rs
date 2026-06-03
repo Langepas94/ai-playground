@@ -1,4 +1,5 @@
 use std::io::{self, BufRead, Write};
+use std::net::SocketAddr;
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -46,6 +47,8 @@ enum Command {
     },
     Ask(AskArgs),
     Chat(ChatArgs),
+    #[command(about = "Start the local web UI")]
+    Web(WebArgs),
     #[command(about = "Run the same prompt once without controls and once with response controls")]
     Compare(CompareArgs),
     #[command(about = "Compare state-based, instruction-based, and combined dialogue stopping")]
@@ -147,6 +150,12 @@ struct ChatArgs {
 }
 
 #[derive(Debug, Args)]
+struct WebArgs {
+    #[arg(long, default_value = "127.0.0.1:8787")]
+    listen: SocketAddr,
+}
+
+#[derive(Debug, Args)]
 struct ProfileArg {
     #[arg(long)]
     profile: Option<String>,
@@ -178,6 +187,22 @@ struct ResponseControlArgs {
         help = "Maximum number of output tokens requested from the provider"
     )]
     max_tokens: Option<u32>,
+    #[arg(long, help = "Sampling temperature requested from the provider")]
+    temperature: Option<f32>,
+    #[arg(
+        long,
+        help = "Nucleus sampling probability requested from the provider"
+    )]
+    top_p: Option<f32>,
+    #[arg(long, help = "Presence penalty requested from the provider")]
+    presence_penalty: Option<f32>,
+    #[arg(long, help = "Frequency penalty requested from the provider")]
+    frequency_penalty: Option<f32>,
+    #[arg(
+        long,
+        help = "Deterministic sampling seed, when supported by the provider"
+    )]
+    seed: Option<i64>,
     #[arg(
         long,
         action = clap::ArgAction::Append,
@@ -264,6 +289,11 @@ impl From<&ResponseControlArgs> for ResponseControl {
                 CliAnswerFormat::Table => AnswerFormat::Table,
             },
             max_tokens: args.max_tokens,
+            temperature: args.temperature,
+            top_p: args.top_p,
+            presence_penalty: args.presence_penalty,
+            frequency_penalty: args.frequency_penalty,
+            seed: args.seed,
             stop: args.stop.clone(),
             answer_prefix: args.answer_prefix.clone(),
             answer_suffix: args.answer_suffix.clone(),
@@ -314,6 +344,7 @@ async fn run_with_store(cli: &Cli, secrets: &dyn SecretStore) -> Result<(), AppE
         Command::Models { command } => models_command(command, secrets).await,
         Command::Ask(args) => ask_command(args, secrets).await,
         Command::Chat(args) => chat_command(args, secrets).await,
+        Command::Web(args) => crate::web::serve(args.listen).await,
         Command::Compare(args) => compare_command(args, secrets).await,
         Command::CompareGoal(args) => compare_goal_command(args, secrets).await,
         Command::Config { command } => match command {

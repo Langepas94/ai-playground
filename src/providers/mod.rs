@@ -160,11 +160,16 @@ impl std::fmt::Display for AnswerFormat {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ResponseControl {
     pub format: ResponseFormat,
     pub answer_format: AnswerFormat,
     pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
+    pub presence_penalty: Option<f32>,
+    pub frequency_penalty: Option<f32>,
+    pub seed: Option<i64>,
     pub stop: Vec<String>,
     pub answer_prefix: Option<String>,
     pub answer_suffix: Option<String>,
@@ -183,6 +188,11 @@ impl ResponseControl {
         self.format == ResponseFormat::Text
             && self.answer_format == AnswerFormat::Natural
             && self.max_tokens.is_none()
+            && self.temperature.is_none()
+            && self.top_p.is_none()
+            && self.presence_penalty.is_none()
+            && self.frequency_penalty.is_none()
+            && self.seed.is_none()
             && self.stop.is_empty()
             && self.answer_prefix.is_none()
             && self.answer_suffix.is_none()
@@ -267,7 +277,7 @@ impl ResponseControl {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
@@ -424,6 +434,11 @@ mod tests {
                 format: ResponseFormat::JsonObject,
                 answer_format: AnswerFormat::Bullets,
                 max_tokens: Some(64),
+                temperature: Some(0.3),
+                top_p: Some(0.9),
+                presence_penalty: Some(0.1),
+                frequency_penalty: Some(0.2),
+                seed: Some(42),
                 stop: vec!["END".to_string()],
                 answer_prefix: Some("Artem,".to_string()),
                 answer_suffix: None,
@@ -435,6 +450,11 @@ mod tests {
         });
 
         assert_eq!(payload.max_tokens, Some(64));
+        assert_eq!(payload.temperature, Some(0.3));
+        assert_eq!(payload.top_p, Some(0.9));
+        assert_eq!(payload.presence_penalty, Some(0.1));
+        assert_eq!(payload.frequency_penalty, Some(0.2));
+        assert_eq!(payload.seed, Some(42));
         assert_eq!(payload.stop, vec!["END"]);
         assert_eq!(payload.response_format.expect("format").kind, "json_object");
         assert_eq!(payload.messages[0].role, Role::System);

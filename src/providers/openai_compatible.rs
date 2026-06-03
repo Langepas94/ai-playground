@@ -128,7 +128,7 @@ fn short_reason(body: &str) -> String {
     }
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, PartialEq)]
 pub struct OpenAiChatPayload {
     pub model: String,
     pub messages: Vec<ChatMessage>,
@@ -136,6 +136,16 @@ pub struct OpenAiChatPayload {
     pub response_format: Option<OpenAiResponseFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stop: Vec<String>,
 }
@@ -174,12 +184,18 @@ struct ModelEntry {
 
 pub fn chat_payload(request: ChatRequest) -> OpenAiChatPayload {
     let response_format = api_response_format(request.control.format);
+    let control = request.control;
     OpenAiChatPayload {
         model: request.model,
-        messages: controlled_messages(request.messages, &request.control),
+        messages: controlled_messages(request.messages, &control),
         response_format,
-        max_tokens: request.control.max_tokens,
-        stop: request.control.stop,
+        max_tokens: control.max_tokens,
+        temperature: control.temperature,
+        top_p: control.top_p,
+        presence_penalty: control.presence_penalty,
+        frequency_penalty: control.frequency_penalty,
+        seed: control.seed,
+        stop: control.stop,
     }
 }
 

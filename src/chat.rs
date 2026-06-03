@@ -288,7 +288,7 @@ pub async fn interactive_chat(
         profile.model
     );
     println!(
-        "Use /exit, /profile, /model, /clear, /save, /control, /format, /answer-format, /max-tokens, /stop, /goal."
+        "Use /exit, /profile, /model, /clear, /save, /control, /format, /answer-format, /max-tokens, /temperature, /top-p, /presence-penalty, /frequency-penalty, /seed, /stop, /goal."
     );
 
     loop {
@@ -411,6 +411,61 @@ pub async fn interactive_chat(
                     println!("Max tokens: {max_tokens}");
                 }
                 Err(_) => println!("Use /max-tokens <number>."),
+            }
+            continue;
+        }
+
+        if let Some(value) = line.strip_prefix("/temperature ") {
+            match value.parse::<f32>() {
+                Ok(temperature) => {
+                    control.temperature = Some(temperature);
+                    println!("Temperature: {temperature}");
+                }
+                Err(_) => println!("Use /temperature <number>."),
+            }
+            continue;
+        }
+
+        if let Some(value) = line.strip_prefix("/top-p ") {
+            match value.parse::<f32>() {
+                Ok(top_p) => {
+                    control.top_p = Some(top_p);
+                    println!("Top-p: {top_p}");
+                }
+                Err(_) => println!("Use /top-p <number>."),
+            }
+            continue;
+        }
+
+        if let Some(value) = line.strip_prefix("/presence-penalty ") {
+            match value.parse::<f32>() {
+                Ok(presence_penalty) => {
+                    control.presence_penalty = Some(presence_penalty);
+                    println!("Presence penalty: {presence_penalty}");
+                }
+                Err(_) => println!("Use /presence-penalty <number>."),
+            }
+            continue;
+        }
+
+        if let Some(value) = line.strip_prefix("/frequency-penalty ") {
+            match value.parse::<f32>() {
+                Ok(frequency_penalty) => {
+                    control.frequency_penalty = Some(frequency_penalty);
+                    println!("Frequency penalty: {frequency_penalty}");
+                }
+                Err(_) => println!("Use /frequency-penalty <number>."),
+            }
+            continue;
+        }
+
+        if let Some(value) = line.strip_prefix("/seed ") {
+            match value.parse::<i64>() {
+                Ok(seed) => {
+                    control.seed = Some(seed);
+                    println!("Seed: {seed}");
+                }
+                Err(_) => println!("Use /seed <integer>."),
             }
             continue;
         }
@@ -592,11 +647,31 @@ pub fn describe_control(control: &ResponseControl) -> String {
         control.stop.join(", ")
     };
     format!(
-        "Response control: api_format={}, answer_format={}, max_tokens={}, stop={}, answer_prefix={}, answer_suffix={}, address_as={}, quote_question={}, format_instruction={}, completion_instruction={}",
+        "Response control: api_format={}, answer_format={}, max_tokens={}, temperature={}, top_p={}, presence_penalty={}, frequency_penalty={}, seed={}, stop={}, answer_prefix={}, answer_suffix={}, address_as={}, quote_question={}, format_instruction={}, completion_instruction={}",
         control.format,
         control.answer_format,
         control
             .max_tokens
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        control
+            .temperature
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        control
+            .top_p
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        control
+            .presence_penalty
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        control
+            .frequency_penalty
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        control
+            .seed
             .map(|value| value.to_string())
             .unwrap_or_else(|| "none".to_string()),
         stop,
