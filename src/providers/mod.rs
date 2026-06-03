@@ -1,14 +1,21 @@
+use std::{env, fs, path::PathBuf};
+
 use async_trait::async_trait;
-use reqwest::Client;
+use reqwest::{Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
 
-use crate::{config::ProfileConfig, errors::AppError};
+use crate::{
+    config::{AppConfig, ProfileConfig},
+    errors::AppError,
+};
 
 pub mod deepseek;
 pub mod gigachat;
 pub mod kimi;
 pub mod openai_compatible;
 pub mod openrouter;
+
+const DEFAULT_CA_BUNDLE_FILE: &str = "russian_trusted_root_ca_pem.crt";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "kebab-case")]
@@ -296,12 +303,45 @@ pub struct ReqwestProviderClient {
 
 impl ReqwestProviderClient {
     pub fn new() -> Result<Self, AppError> {
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
+        let builder = Client::builder().timeout(std::time::Duration::from_secs(60));
+        let client = add_extra_root_certificates(builder)?
             .build()
             .map_err(AppError::from)?;
         Ok(Self { client })
     }
+}
+
+fn add_extra_root_certificates(mut builder: ClientBuilder) -> Result<ClientBuilder, AppError> {
+    let Some(path) = extra_ca_bundle_path()? else {
+        return Ok(builder);
+    };
+
+    let pem = fs::read(&path).map_err(|error| AppError::Config {
+        path: path.clone(),
+        message: format!("could not read CA bundle: {error}"),
+    })?;
+    let certificates =
+        reqwest::Certificate::from_pem_bundle(&pem).map_err(|error| AppError::Config {
+            path: path.clone(),
+            message: format!("could not parse PEM certificates from CA bundle: {error}"),
+        })?;
+
+    for certificate in certificates {
+        builder = builder.add_root_certificate(certificate);
+    }
+    Ok(builder)
+}
+
+fn extra_ca_bundle_path() -> Result<Option<PathBuf>, AppError> {
+    if let Some(path) = env::var_os("AITEACH_CA_BUNDLE") {
+        return Ok(Some(PathBuf::from(path)));
+    }
+
+    let Some(config_dir) = AppConfig::config_path()?.parent().map(ToOwned::to_owned) else {
+        return Ok(None);
+    };
+    let path = config_dir.join(DEFAULT_CA_BUNDLE_FILE);
+    Ok(path.exists().then_some(path))
 }
 
 #[async_trait]
@@ -312,7 +352,8 @@ impl ProviderClient for ReqwestProviderClient {
         token: &str,
     ) -> Result<Vec<String>, AppError> {
         let spec = profile.provider.spec();
-        openai_compatible::list_models(&self.client, spec, profile, token).await
+        let token = self.bearer_token(profile, token).await?;
+        openai_compatible::list_models(&self.client, spec, profile, &token).await
     }
 
     async fn chat_completion(
@@ -322,7 +363,17 @@ impl ProviderClient for ReqwestProviderClient {
         request: ChatRequest,
     ) -> Result<ChatResponse, AppError> {
         let spec = profile.provider.spec();
-        openai_compatible::chat_completion(&self.client, spec, profile, token, request).await
+        let token = self.bearer_token(profile, token).await?;
+        openai_compatible::chat_completion(&self.client, spec, profile, &token, request).await
+    }
+}
+
+impl ReqwestProviderClient {
+    async fn bearer_token(&self, profile: &ProfileConfig, token: &str) -> Result<String, AppError> {
+        match profile.provider {
+            ProviderKind::GigaChat => gigachat::bearer_token(&self.client, token).await,
+            _ => Ok(token.to_string()),
+        }
     }
 }
 
