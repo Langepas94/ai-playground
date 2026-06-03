@@ -11,7 +11,10 @@ use crate::{
         AnswerFormat, ProviderClient, ProviderKind, ReqwestProviderClient, ResponseControl,
         ResponseFormat, validate_base_url,
     },
-    secrets::{KeyringSecretStore, SecretStore},
+    secrets::{
+        KeyringSecretStore, SecretStore, delete_legacy_profile_token, delete_profile_token,
+        get_profile_token, set_profile_token,
+    },
 };
 
 #[derive(Debug, Parser)]
@@ -345,7 +348,7 @@ fn profile_command(command: &ProfileCommand, secrets: &dyn SecretStore) -> Resul
                 } else {
                     " "
                 };
-                let has_token = secrets.get_token(&profile.token_ref)?.is_some();
+                let has_token = get_profile_token(secrets, name, profile)?.is_some();
                 let token = if has_token {
                     "token: present"
                 } else {
@@ -366,7 +369,7 @@ fn profile_command(command: &ProfileCommand, secrets: &dyn SecretStore) -> Resul
         ProfileCommand::Remove { name } => {
             let name = profile_name_from_parts(name);
             let removed = config.remove_profile(&name)?;
-            secrets.delete_token(&removed.token_ref)?;
+            delete_legacy_profile_token(secrets, &name, &removed)?;
             config.save()?;
             println!("Profile '{name}' removed.");
         }
@@ -393,7 +396,7 @@ fn setup_command(args: &SetupArgs, secrets: &dyn SecretStore) -> Result<(), AppE
     validate_base_url(&profile.name, &profile.config.base_url)?;
     config.add_profile(profile.name.clone(), profile.config);
     config.use_profile(&profile.name)?;
-    let token_ref = config.profiles[&profile.name].token_ref.clone();
+    let saved_profile = config.profiles[&profile.name].clone();
     config.save()?;
 
     println!();
@@ -401,8 +404,8 @@ fn setup_command(args: &SetupArgs, secrets: &dyn SecretStore) -> Result<(), AppE
     println!("The token will be stored in the OS keychain, not in config.");
     let token = prompt_optional_secret("API token (paste it, or press Enter to skip)")?;
     if let Some(token) = token {
-        secrets.set_token(&token_ref, &token)?;
-        println!("Token saved for profile '{}'.", profile.name);
+        set_profile_token(secrets, &saved_profile, &token)?;
+        println!("Token saved for provider '{}'.", saved_profile.provider);
     } else {
         println!(
             "Token skipped. Add it later with `aiteach token set --profile {}`.",
@@ -428,13 +431,13 @@ fn token_command(command: &TokenCommand, secrets: &dyn SecretStore) -> Result<()
                 .flush()
                 .map_err(|error| AppError::Terminal(error.to_string()))?;
             let token = read_stdin_line()?.unwrap_or_default();
-            secrets.set_token(&profile.token_ref, token.trim())?;
-            println!("Token saved for profile '{name}'.");
+            set_profile_token(secrets, profile, token.trim())?;
+            println!("Token saved for provider '{}'.", profile.provider);
         }
         TokenCommand::Delete(args) => {
             let (name, profile) = config.selected_profile(args.profile.as_deref())?;
-            secrets.delete_token(&profile.token_ref)?;
-            println!("Token deleted for profile '{name}'.");
+            delete_profile_token(secrets, &name, profile)?;
+            println!("Token deleted for provider '{}'.", profile.provider);
         }
     }
     Ok(())
@@ -623,9 +626,8 @@ async fn models_command(
     let config = AppConfig::load()?;
     let ModelsCommand::List(args) = command;
     let (name, profile) = config.selected_profile(args.profile.as_deref())?;
-    let token = secrets
-        .get_token(&profile.token_ref)?
-        .ok_or_else(|| AppError::MissingToken {
+    let token =
+        get_profile_token(secrets, &name, profile)?.ok_or_else(|| AppError::MissingToken {
             profile: name.to_string(),
         })?;
     eprintln!("Waiting for provider model list...");
@@ -735,7 +737,7 @@ fn doctor_command(args: &ProfileArg, secrets: &dyn SecretStore) -> Result<(), Ap
     println!("Provider: {}", profile.provider);
     println!("Model: {}", profile.model);
     println!("Base URL: valid");
-    let token_present = secrets.get_token(&profile.token_ref)?.is_some();
+    let token_present = get_profile_token(secrets, &name, profile)?.is_some();
     println!(
         "Token: {}",
         if token_present { "present" } else { "missing" }

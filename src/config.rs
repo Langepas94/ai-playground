@@ -69,7 +69,7 @@ impl AppConfig {
     }
 
     pub fn add_profile(&mut self, name: String, mut profile: ProfileConfig) {
-        profile.token_ref = token_ref(&profile.provider, &name);
+        profile.token_ref = token_ref(&profile.provider);
         self.profiles.insert(name.clone(), profile);
         if self.active_profile.is_none() {
             self.active_profile = Some(name);
@@ -114,7 +114,11 @@ impl AppConfig {
     }
 }
 
-pub fn token_ref(provider: &ProviderKind, profile_name: &str) -> String {
+pub fn token_ref(provider: &ProviderKind) -> String {
+    provider.to_string()
+}
+
+pub fn legacy_token_ref(provider: &ProviderKind, profile_name: &str) -> String {
     format!("{provider}:{profile_name}")
 }
 
@@ -141,9 +145,14 @@ mod tests {
         let loaded = AppConfig::load_from_path(path).expect("load");
 
         assert_eq!(loaded, config);
+        assert_eq!(loaded.profiles["work"].token_ref, "openrouter".to_string());
+    }
+
+    #[test]
+    fn legacy_token_refs_keep_profile_name_for_migration() {
         assert_eq!(
-            loaded.profiles["work"].token_ref,
-            "openrouter:work".to_string()
+            legacy_token_ref(&ProviderKind::DeepSeek, "work"),
+            "deepseek:work"
         );
     }
 
