@@ -4,6 +4,19 @@
 
 Поддерживаются OpenRouter, DeepSeek, GigaChat, Kimi и произвольный OpenAI-compatible endpoint.
 
+## Стек
+
+- Rust stable, edition 2024 - основной язык и сборка через Cargo.
+- `clap` - парсинг CLI-команд и аргументов.
+- `tokio` - async runtime для HTTP и локального web-сервера.
+- `reqwest` - HTTP-клиент для LLM-провайдеров и загрузки списка моделей.
+- `axum` - локальный web UI backend и JSON API.
+- `serde`, `serde_json`, `toml` - сериализация request/response, config и provider-specific параметров.
+- `directories` - OS-specific пути для config и локальной истории.
+- `keyring` - хранение токенов в системном keychain.
+- `thiserror` - доменные ошибки, `anyhow` - верхний CLI-уровень.
+- `wiremock`, `tempfile` - тесты HTTP-клиента и config-сценариев.
+
 ## Быстрый старт
 
 ```bash
