@@ -285,7 +285,8 @@ struct OpenAiChoice {
 
 #[derive(Debug, Deserialize)]
 struct OpenAiChoiceMessage {
-    content: String,
+    content: Option<String>,
+    reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -385,17 +386,14 @@ fn parse_chat_response(spec: ProviderSpec, raw: &str) -> Result<ChatResponse, Ap
             reason: "missing choices[0].message.content".to_string(),
         })
     })?;
-    if choice.message.content.is_empty() {
-        return Err(AppError::ProviderHttp(ProviderHttpError {
-            provider: spec.kind.to_string(),
-            endpoint: EndpointCategory::Chat,
-            status: Some(StatusCode::OK),
-            problem: HttpProblem::UnexpectedFormat,
-            reason: "empty choices[0].message.content".to_string(),
-        }));
-    }
+    let content = choice
+        .message
+        .content
+        .filter(|content| !content.is_empty())
+        .or(choice.message.reasoning_content)
+        .unwrap_or_default();
     Ok(ChatResponse {
-        text: choice.message.content,
+        text: content,
         finish_reason: choice.finish_reason,
     })
 }

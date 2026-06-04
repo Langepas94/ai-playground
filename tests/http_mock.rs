@@ -97,6 +97,50 @@ async fn chat_completion_debug_redacts_auth_and_keeps_json_bodies() {
 }
 
 #[tokio::test]
+async fn chat_completion_falls_back_to_reasoning_content_when_content_is_empty() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(bearer_token("secret"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "message": {
+                    "content": "",
+                    "reasoning_content": "reasoning fallback"
+                },
+                "finish_reason": "stop"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let profile = ProfileConfig {
+        provider: ProviderKind::DeepSeek,
+        model: "deepseek-chat".to_string(),
+        base_url: server.uri(),
+        token_ref: "deepseek:test".to_string(),
+    };
+    let client = ReqwestProviderClient::new().expect("client");
+    let response = client
+        .chat_completion(
+            &profile,
+            "secret",
+            ChatRequest {
+                model: "deepseek-chat".to_string(),
+                messages: vec![ChatMessage {
+                    role: Role::User,
+                    content: "hello".to_string(),
+                }],
+                control: ResponseControl::uncontrolled(),
+            },
+        )
+        .await
+        .expect("chat");
+
+    assert_eq!(response.text, "reasoning fallback");
+}
+
+#[tokio::test]
 async fn missing_token_behavior_is_clear() {
     let error = AppError::MissingToken {
         profile: "work".to_string(),
