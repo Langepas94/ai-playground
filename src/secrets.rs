@@ -7,7 +7,8 @@ use crate::{
     errors::AppError,
 };
 
-const SERVICE: &str = "aiteach";
+const SERVICE: &str = "ai-playground";
+const LEGACY_SERVICE: &str = "aiteach";
 
 pub trait SecretStore: Send + Sync {
     fn set_token(&self, token_ref: &str, token: &str) -> Result<(), AppError>;
@@ -32,13 +33,30 @@ impl SecretStore for KeyringSecretStore {
             .get_password()
         {
             Ok(token) => Ok(Some(token)),
-            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(keyring::Error::NoEntry) => match Entry::new(LEGACY_SERVICE, token_ref)
+                .map_err(|error| AppError::Secret(error.to_string()))?
+                .get_password()
+            {
+                Ok(token) => {
+                    self.set_token(token_ref, &token)?;
+                    Ok(Some(token))
+                }
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(error) => Err(AppError::Secret(error.to_string())),
+            },
             Err(error) => Err(AppError::Secret(error.to_string())),
         }
     }
 
     fn delete_token(&self, token_ref: &str) -> Result<(), AppError> {
         match Entry::new(SERVICE, token_ref)
+            .map_err(|error| AppError::Secret(error.to_string()))?
+            .delete_credential()
+        {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(AppError::Secret(error.to_string())),
+        }?;
+        match Entry::new(LEGACY_SERVICE, token_ref)
             .map_err(|error| AppError::Secret(error.to_string()))?
             .delete_credential()
         {

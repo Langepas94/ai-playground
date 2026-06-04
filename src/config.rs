@@ -21,16 +21,27 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn config_path() -> Result<PathBuf, AppError> {
-        let dirs =
-            ProjectDirs::from("dev", "aiteach", "aiteach").ok_or_else(|| AppError::Config {
-                path: PathBuf::from("<unknown>"),
-                message: "Could not resolve OS config directory".to_string(),
-            })?;
-        Ok(dirs.config_dir().join("config.toml"))
+        project_config_path("ai-playground", "ai-playground")
+    }
+
+    fn legacy_config_path() -> Result<PathBuf, AppError> {
+        project_config_path("aiteach", "aiteach")
+    }
+
+    pub fn existing_config_path() -> Result<PathBuf, AppError> {
+        let path = Self::config_path()?;
+        if path.exists() {
+            return Ok(path);
+        }
+        let legacy_path = Self::legacy_config_path()?;
+        if legacy_path.exists() {
+            return Ok(legacy_path);
+        }
+        Ok(path)
     }
 
     pub fn load() -> Result<Self, AppError> {
-        Self::load_from_path(Self::config_path()?)
+        Self::load_from_path(Self::existing_config_path()?)
     }
 
     pub fn load_from_path(path: PathBuf) -> Result<Self, AppError> {
@@ -112,6 +123,15 @@ impl AppConfig {
             .ok_or_else(|| AppError::ProfileMissing(name.clone()))?;
         Ok((name, profile))
     }
+}
+
+fn project_config_path(qualifier: &str, application: &str) -> Result<PathBuf, AppError> {
+    let dirs =
+        ProjectDirs::from("dev", qualifier, application).ok_or_else(|| AppError::Config {
+            path: PathBuf::from("<unknown>"),
+            message: "Could not resolve OS config directory".to_string(),
+        })?;
+    Ok(dirs.config_dir().join("config.toml"))
 }
 
 pub fn token_ref(provider: &ProviderKind) -> String {

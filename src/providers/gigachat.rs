@@ -32,7 +32,9 @@ pub async fn bearer_token(client: &Client, stored_token: &str) -> Result<String,
         return Ok(stored_token.to_string());
     }
 
-    let scope = env::var("AITEACH_GIGACHAT_SCOPE").unwrap_or_else(|_| DEFAULT_SCOPE.to_string());
+    let scope = env::var("AI_PLAYGROUND_GIGACHAT_SCOPE")
+        .or_else(|_| env::var("AITEACH_GIGACHAT_SCOPE"))
+        .unwrap_or_else(|_| DEFAULT_SCOPE.to_string());
     let response = client
         .post(OAUTH_URL)
         .header(AUTHORIZATION, format!("Basic {stored_token}"))

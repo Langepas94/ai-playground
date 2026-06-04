@@ -374,7 +374,9 @@ fn add_extra_root_certificates(mut builder: ClientBuilder) -> Result<ClientBuild
 }
 
 fn extra_ca_bundle_path() -> Result<Option<PathBuf>, AppError> {
-    if let Some(path) = env::var_os("AITEACH_CA_BUNDLE") {
+    if let Some(path) =
+        env::var_os("AI_PLAYGROUND_CA_BUNDLE").or_else(|| env::var_os("AITEACH_CA_BUNDLE"))
+    {
         return Ok(Some(PathBuf::from(path)));
     }
 

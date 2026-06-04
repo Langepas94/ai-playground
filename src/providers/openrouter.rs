@@ -3,11 +3,11 @@ use crate::providers::{AuthScheme, ProviderKind, ProviderSpec, StaticHeader};
 const EXTRA_HEADERS: &[StaticHeader] = &[
     StaticHeader {
         name: "HTTP-Referer",
-        value: "https://aiteach.local",
+        value: "https://ai-playground.local",
     },
     StaticHeader {
         name: "X-Title",
-        value: "aiteach",
+        value: "ai-playground",
     },
 ];
 pub fn spec() -> ProviderSpec {

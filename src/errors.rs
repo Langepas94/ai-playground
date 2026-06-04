@@ -44,10 +44,10 @@ pub enum AppError {
     Config { path: PathBuf, message: String },
     #[error("Profile '{0}' was not found")]
     ProfileMissing(String),
-    #[error("No active profile. Run `aiteach profile use <name>` first")]
+    #[error("No active profile. Run `ai-playground profile use <name>` first")]
     NoActiveProfile,
     #[error(
-        "Token is missing for profile '{profile}'. Run `aiteach token set --profile {profile}`"
+        "Token is missing for profile '{profile}'. Run `ai-playground token set --profile {profile}`"
     )]
     MissingToken { profile: String },
     #[error("Secret storage error: {0}")]
