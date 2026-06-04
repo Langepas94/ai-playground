@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -11,27 +11,30 @@ use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 
 use crate::{
-    config::ProfileConfig,
+    config::{AppConfig, ProfileConfig, token_ref},
     errors::AppError,
     providers::{
         AnswerFormat, ChatMessage, ChatRequest, ProviderClient, ProviderKind,
         ReqwestProviderClient, ResponseControl, ResponseFormat, Role, validate_base_url,
     },
+    secrets::{KeyringSecretStore, SecretStore, get_config_profile_token, set_profile_token},
 };
 
 #[derive(Clone)]
 struct AppState {
     client: ReqwestProviderClient,
+    secrets: Arc<dyn SecretStore>,
 }
 
 pub async fn serve(addr: SocketAddr) -> Result<(), AppError> {
     let client = ReqwestProviderClient::new()?;
+    let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
     let app = Router::new()
         .route("/", get(index))
         .route("/api/providers", get(providers))
         .route("/api/models", post(models))
         .route("/api/chat", post(chat))
-        .with_state(AppState { client });
+        .with_state(AppState { client, secrets });
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|error| AppError::Terminal(error.to_string()))?;
@@ -73,7 +76,8 @@ async fn models(
 ) -> Result<Json<ModelsResponse>, WebError> {
     let profile = request.profile()?;
     validate_base_url(&profile.provider.to_string(), &profile.base_url)?;
-    let mut models = state.client.list_models(&profile, &request.token).await?;
+    let token = resolve_web_token(state.secrets.as_ref(), &profile, &request.token)?;
+    let mut models = state.client.list_models(&profile, &token).await?;
     models.sort();
     Ok(Json(ModelsResponse { models }))
 }
@@ -87,11 +91,12 @@ async fn chat(
     if request.prompt.trim().is_empty() {
         return Err(AppError::InvalidInput("Prompt is required".to_string()).into());
     }
+    let token = resolve_web_token(state.secrets.as_ref(), &profile, &request.token)?;
     let response = state
         .client
         .chat_completion(
             &profile,
-            &request.token,
+            &token,
             ChatRequest {
                 model: profile.model.clone(),
                 messages: vec![ChatMessage {
@@ -130,7 +135,6 @@ struct ModelsRequest {
 
 impl ModelsRequest {
     fn profile(&self) -> Result<ProfileConfig, AppError> {
-        ensure_token(&self.token)?;
         let provider = parse_provider(&self.provider)?;
         Ok(ProfileConfig {
             provider,
@@ -158,7 +162,6 @@ struct ChatWebRequest {
 
 impl ChatWebRequest {
     fn profile(&self) -> Result<ProfileConfig, AppError> {
-        ensure_token(&self.token)?;
         let provider = parse_provider(&self.provider)?;
         if self.model.trim().is_empty() {
             return Err(AppError::InvalidInput("Model is required".to_string()));
@@ -261,12 +264,34 @@ struct ChatWebResponse {
     finish_reason: Option<String>,
 }
 
-fn ensure_token(token: &str) -> Result<(), AppError> {
-    if token.trim().is_empty() {
-        Err(AppError::InvalidInput("API token is required".to_string()))
-    } else {
-        Ok(())
+fn resolve_web_token(
+    secrets: &dyn SecretStore,
+    profile: &ProfileConfig,
+    token_override: &str,
+) -> Result<String, AppError> {
+    let token_override = token_override.trim();
+    if !token_override.is_empty() {
+        set_profile_token(secrets, profile, token_override)?;
+        return Ok(token_override.to_string());
     }
+
+    if let Some(token) = secrets.get_token(&token_ref(&profile.provider))? {
+        return Ok(token);
+    }
+
+    let config = AppConfig::load()?;
+    for (name, candidate) in &config.profiles {
+        if candidate.provider != profile.provider {
+            continue;
+        }
+        if let Some(token) = get_config_profile_token(secrets, &config, name, candidate)? {
+            return Ok(token);
+        }
+    }
+
+    Err(AppError::InvalidInput(
+        "API token is required. Save it with `aiteach token set --profile <name>` or paste it once in the web UI.".to_string(),
+    ))
 }
 
 fn parse_provider(value: &str) -> Result<ProviderKind, AppError> {
@@ -495,7 +520,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <div class="group">
           <h2>Провайдер</h2>
           <label>Provider<select id="provider"></select></label>
-          <label>API token<input id="token" type="password" autocomplete="off" spellcheck="false"></label>
+          <label>API token override<input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="Пусто = взять из keychain"></label>
           <label>Base URL<input id="baseUrl" spellcheck="false"></label>
           <label>Model<select id="model"></select></label>
           <label>Custom model id<input id="customModel" spellcheck="false" placeholder="Если нужной модели нет в списке"></label>
@@ -788,3 +813,45 @@ const INDEX_HTML: &str = r#"<!doctype html>
 </body>
 </html>
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::secrets::MemorySecretStore;
+
+    fn web_profile(provider: ProviderKind) -> ProfileConfig {
+        ProfileConfig {
+            provider,
+            model: provider.default_model().to_string(),
+            base_url: provider.default_base_url().to_string(),
+            token_ref: String::new(),
+        }
+    }
+
+    #[test]
+    fn web_token_uses_provider_keyring_when_form_is_empty() {
+        let secrets = MemorySecretStore::default();
+        let profile = web_profile(ProviderKind::OpenRouter);
+        secrets
+            .set_token("openrouter", "stored-token")
+            .expect("set token");
+
+        let token = resolve_web_token(&secrets, &profile, "").expect("resolve token");
+
+        assert_eq!(token, "stored-token");
+    }
+
+    #[test]
+    fn web_token_override_is_saved_like_cli_token() {
+        let secrets = MemorySecretStore::default();
+        let profile = web_profile(ProviderKind::DeepSeek);
+
+        let token = resolve_web_token(&secrets, &profile, " fresh-token ").expect("resolve token");
+
+        assert_eq!(token, "fresh-token");
+        assert_eq!(
+            secrets.get_token("deepseek").expect("get token"),
+            Some("fresh-token".to_string())
+        );
+    }
+}
