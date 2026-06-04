@@ -97,10 +97,7 @@ async fn chat(
     let control = request.control.clone().into_control();
     let chat_request = ChatRequest {
         model: profile.model.clone(),
-        messages: vec![ChatMessage {
-            role: Role::User,
-            content: request.prompt.clone(),
-        }],
+        messages: request.chat_messages(),
         control,
     };
     let backend_request = request.debug_value(&chat_request);
@@ -361,6 +358,7 @@ struct ChatWebRequest {
     base_url: String,
     token: String,
     model: String,
+    system_prompt: Option<String>,
     prompt: String,
     control: WebResponseControl,
 }
@@ -385,9 +383,25 @@ impl ChatWebRequest {
             "base_url": self.base_url,
             "token": redacted_token_value(&self.token),
             "model": self.model,
+            "system_prompt": self.system_prompt,
             "prompt": self.prompt,
             "provider_chat_request": chat_request,
         })
+    }
+
+    fn chat_messages(&self) -> Vec<ChatMessage> {
+        let mut messages = Vec::new();
+        if let Some(system_prompt) = blank_to_none(self.system_prompt.clone()) {
+            messages.push(ChatMessage {
+                role: Role::System,
+                content: system_prompt,
+            });
+        }
+        messages.push(ChatMessage {
+            role: Role::User,
+            content: self.prompt.clone(),
+        });
+        messages
     }
 }
 
@@ -889,6 +903,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       <section class="prompt">
         <div class="group">
           <h2>Промпт</h2>
+          <label>system_prompt<textarea id="systemPrompt" placeholder="Необязательная системная инструкция для модели"></textarea></label>
           <label><textarea id="prompt" placeholder="Введите запрос к модели"></textarea></label>
           <div class="actions">
             <button id="send" type="button">Отправить</button>
@@ -1056,6 +1071,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       return {
         ...providerPayload(),
         model: selectedModel(),
+        system_prompt: textValue('systemPrompt'),
         prompt: $('prompt').value,
         control: {
           response_format: $('responseFormat').value,
@@ -1254,5 +1270,26 @@ mod tests {
             secrets.get_token("deepseek").expect("get token"),
             Some("fresh-token".to_string())
         );
+    }
+
+    #[test]
+    fn web_chat_messages_put_system_prompt_before_user_prompt() {
+        let request = ChatWebRequest {
+            provider: "deepseek".to_string(),
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            token: String::new(),
+            model: "deepseek-chat".to_string(),
+            system_prompt: Some("Ты отвечаешь кратко.".to_string()),
+            prompt: "Привет".to_string(),
+            control: WebResponseControl::default(),
+        };
+
+        let messages = request.chat_messages();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, Role::System);
+        assert_eq!(messages[0].content, "Ты отвечаешь кратко.");
+        assert_eq!(messages[1].role, Role::User);
+        assert_eq!(messages[1].content, "Привет");
     }
 }
