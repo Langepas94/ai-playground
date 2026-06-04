@@ -100,7 +100,6 @@ async fn chat(
         messages: request.chat_messages(),
         control,
     };
-    let backend_request = request.debug_value(&chat_request);
     let (response, provider_debug) = state
         .client
         .chat_completion_with_debug(&profile, &token, chat_request)
@@ -118,7 +117,6 @@ async fn chat(
             .as_str()
             .map(ToString::to_string),
         debug: ChatDebugView {
-            backend_request,
             provider_request: provider_debug.request,
             provider_response: provider_debug.response,
             backend_response,
@@ -377,18 +375,6 @@ impl ChatWebRequest {
         })
     }
 
-    fn debug_value(&self, chat_request: &ChatRequest) -> serde_json::Value {
-        serde_json::json!({
-            "provider": self.provider,
-            "base_url": self.base_url,
-            "token": redacted_token_value(&self.token),
-            "model": self.model,
-            "system_prompt": self.system_prompt,
-            "prompt": self.prompt,
-            "provider_chat_request": chat_request,
-        })
-    }
-
     fn chat_messages(&self) -> Vec<ChatMessage> {
         let mut messages = Vec::new();
         if let Some(system_prompt) = blank_to_none(self.system_prompt.clone()) {
@@ -497,7 +483,6 @@ struct ChatWebResponse {
 
 #[derive(Debug, Serialize)]
 struct ChatDebugView {
-    backend_request: serde_json::Value,
     provider_request: HttpDebugRequest,
     provider_response: HttpDebugResponse,
     backend_response: serde_json::Value,
@@ -535,14 +520,6 @@ fn resolve_web_token(
 
 fn parse_provider(value: &str) -> Result<ProviderKind, AppError> {
     value.parse()
-}
-
-fn redacted_token_value(token: &str) -> serde_json::Value {
-    if token.trim().is_empty() {
-        serde_json::Value::Null
-    } else {
-        serde_json::Value::String("[redacted]".to_string())
-    }
 }
 
 fn blank_to_none(value: Option<String>) -> Option<String> {
@@ -958,10 +935,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <summary>JSON отладка</summary>
           <div class="debug-grid">
             <div class="debug-item">
-              <h3>Запрос в backend</h3>
-              <pre id="backendRequest">{}</pre>
-            </div>
-            <div class="debug-item">
               <h3>Запрос к provider API</h3>
               <pre id="providerRequest">{}</pre>
             </div>
@@ -1157,7 +1130,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
 
     function setDebug(debug) {
-      $('backendRequest').textContent = prettyJson(debug?.backend_request);
       $('providerRequest').textContent = prettyJson(debug?.provider_request);
       $('providerResponse').textContent = prettyJson(debug?.provider_response);
       $('backendResponse').textContent = prettyJson(debug?.backend_response);
