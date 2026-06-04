@@ -290,7 +290,7 @@ fn resolve_web_token(
     }
 
     Err(AppError::InvalidInput(
-        "API token is required. Save it with `ai-playground token set --profile <name>` or paste it once in the web UI.".to_string(),
+        "API token is required. Save it with `ai token set --profile <name>` or paste it once in the web UI.".to_string(),
     ))
 }
 
@@ -722,7 +722,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           body: body ? JSON.stringify(body) : undefined
         });
       } catch {
-        throw new Error('Локальный сервер недоступен. Запустите `ai-playground web` и обновите страницу.');
+        throw new Error('Локальный сервер недоступен. Запустите `ai web` и обновите страницу.');
       }
       const raw = await response.text();
       let data = {};

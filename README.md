@@ -1,6 +1,6 @@
 # ai playground
 
-Локальный Rust CLI и web UI для общения с LLM-провайдерами через OpenAI-compatible Chat Completions. Команда бинарника: `ai-playground`.
+Локальный Rust CLI и web UI для общения с LLM-провайдерами через OpenAI-compatible Chat Completions. Основная команда: `ai`.
 
 Поддерживаются OpenRouter, DeepSeek, GigaChat, Kimi и произвольный OpenAI-compatible endpoint.
 
@@ -28,18 +28,19 @@ cargo run -- chat
 После установки бинарника команды выглядят так:
 
 ```bash
-ai-playground setup
-ai-playground ask "Объясни ownership в Rust"
-ai-playground chat
+ai setup
+ai ask "Объясни ownership в Rust"
+ai chat
 ```
 
-Для старых IDE/run configurations оставлен совместимый Cargo package:
+Для совместимости оставлены длинный бинарник и старый Cargo package:
 
 ```bash
+cargo run --bin ai-playground -- --help
 cargo run -p aiteach -- --help
 ```
 
-Новый основной package остается `ai-playground`; `aiteach` только вызывает тот же CLI.
+Package/repo slug остается `ai-playground`; ежедневная команда - короткая `ai`.
 
 `setup` интерактивно спросит provider, base_url, модель, имя профиля и токен. Enter принимает значение по умолчанию. Токен сохраняется в системный keychain, а не в config.
 
@@ -48,22 +49,22 @@ cargo run -p aiteach -- --help
 Профиль хранит provider, model и base_url. Активный профиль используется командами без `--profile`.
 
 ```bash
-ai-playground profile add
-ai-playground profile list
-ai-playground profile use
-ai-playground use
-ai-playground use work
-ai-playground profile remove work
+ai profile add
+ai profile list
+ai profile use
+ai use
+ai use work
+ai profile remove work
 ```
 
-`ai-playground profile use` и `ai-playground use` без имени показывают список уже созданных профилей и позволяют выбрать номером.
+`ai profile use` и `ai use` без имени показывают список уже созданных профилей и позволяют выбрать номером.
 
 Профиль можно указать явно:
 
 ```bash
-ai-playground ask --profile work "Коротко сравни Rust и Go"
-ai-playground models list --profile work
-ai-playground doctor --profile work
+ai ask --profile work "Коротко сравни Rust и Go"
+ai models list --profile work
+ai doctor --profile work
 ```
 
 ## Токены
@@ -71,8 +72,8 @@ ai-playground doctor --profile work
 Токены хранятся в keychain на уровне provider. Если у вас несколько профилей OpenRouter с разными моделями, токен будет общий.
 
 ```bash
-ai-playground token set --profile work
-ai-playground token delete --profile work
+ai token set --profile work
+ai token delete --profile work
 ```
 
 Старые profile-scoped токены подхватываются как fallback и мигрируют в provider-scoped хранение при первом использовании.
@@ -80,7 +81,7 @@ ai-playground token delete --profile work
 ## Web UI
 
 ```bash
-ai-playground web
+ai web
 ```
 
 Адрес по умолчанию:
@@ -92,7 +93,7 @@ http://127.0.0.1:8787
 Другой адрес:
 
 ```bash
-ai-playground web --listen 127.0.0.1:9000
+ai web --listen 127.0.0.1:9000
 ```
 
 Web UI использует те же provider-клиенты и тот же keychain, что CLI. Поле `API token override` можно оставить пустым: backend возьмет сохраненный токен выбранного provider. Если вставить токен в web-форму, он сохранится в keychain так же, как через CLI.
@@ -104,9 +105,9 @@ Web UI использует те же provider-клиенты и тот же key
 Основные опции:
 
 ```bash
-ai-playground ask "Верни краткое резюме" --max-tokens 120
-ai-playground ask "Ответь списком" --answer-format bullets
-ai-playground ask "Верни JSON объект" --response-format json-object
+ai ask "Верни краткое резюме" --max-tokens 120
+ai ask "Ответь списком" --answer-format bullets
+ai ask "Верни JSON объект" --response-format json-object
 ```
 
 Полезные ручки:
@@ -124,13 +125,13 @@ ai-playground ask "Верни JSON объект" --response-format json-object
 Для сравнения обычного и управляемого ответа:
 
 ```bash
-ai-playground compare "Сравни Rust и Go" --max-tokens 120 --stop "END"
+ai compare "Сравни Rust и Go" --max-tokens 120 --stop "END"
 ```
 
 Для проверки диалоговой цели:
 
 ```bash
-ai-playground compare-goal \
+ai compare-goal \
   "Собери требования к статье" \
   --required-field topic \
   --required-field audience \
@@ -140,7 +141,7 @@ ai-playground compare-goal \
 ## Chat
 
 ```bash
-ai-playground chat --max-tokens 180
+ai chat --max-tokens 180
 ```
 
 Команды внутри чата:
@@ -164,9 +165,9 @@ ai-playground chat --max-tokens 180
 ## Config и диагностика
 
 ```bash
-ai-playground config path
-ai-playground doctor
-ai-playground models list
+ai config path
+ai doctor
+ai models list
 ```
 
 `doctor` проверяет активный профиль, base_url и наличие токена, но не печатает сам токен.

@@ -57,11 +57,7 @@ async fn missing_token_behavior_is_clear() {
         profile: "work".to_string(),
     };
 
-    assert!(
-        error
-            .to_string()
-            .contains("ai-playground token set --profile work")
-    );
+    assert!(error.to_string().contains("ai token set --profile work"));
 }
 
 #[tokio::test]
