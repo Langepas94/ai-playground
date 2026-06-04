@@ -82,10 +82,102 @@ aiteach compare-goal --profile work \
   --required-field audience \
   --required-field format
 aiteach chat --profile work
+aiteach web
 
 aiteach config path
 aiteach doctor --profile work
 ```
+
+### Веб-интерфейс
+
+Локальный сайт запускается из того же бинарника и использует тот же слой провайдеров, что и CLI:
+
+```bash
+aiteach web
+```
+
+По умолчанию он открывает сервер на:
+
+```text
+http://127.0.0.1:8787
+```
+
+Пока открыта вкладка, процесс `aiteach web` должен продолжать работать. Если сервер остановлен, браузер покажет сетевую ошибку вроде `Failed to fetch`; запустите `aiteach web` снова и обновите страницу.
+
+Можно выбрать другой адрес:
+
+```bash
+aiteach web --listen 127.0.0.1:9000
+```
+
+В форме доступны provider, token, base_url, live-загрузка списка моделей, model, custom model id, prompt и параметры запроса.
+
+Порядок работы:
+
+1. Вставьте токен провайдера.
+2. Выберите provider. `base_url` и дефолтная model подставятся автоматически.
+3. Нажмите `Загрузить модели`.
+4. Выберите модель в выпадающем списке `Model`.
+5. Если нужной модели нет в списке, впишите ее вручную в `Custom model id`; при отправке запроса это поле имеет приоритет над выпадающим списком.
+6. Введите prompt, настройте параметры и нажмите `Отправить`.
+
+Веб-форма показывает дефолтные значения для основных ручек:
+
+- `max_tokens`: `1024`
+- `temperature`: `1`
+- `top_p`: `1`
+- `presence_penalty`: `0`
+- `frequency_penalty`: `0`
+- `reasoning_effort`: `medium`
+- `verbosity`: `medium`
+- `n`: `1`
+- `parallel_tool_calls`: `true`
+
+Параметры запроса:
+
+- `response_format`
+- `answer_format`
+- `max_tokens`
+- `max_completion_tokens`
+- `temperature`
+- `top_p`
+- `top_k`
+- `min_p`
+- `top_a`
+- `presence_penalty`
+- `frequency_penalty`
+- `repetition_penalty`
+- `seed`
+- `reasoning_effort`
+- `include_reasoning`
+- `verbosity`
+- `logprobs`
+- `top_logprobs`
+- `n`
+- `store`
+- `parallel_tool_calls`
+- `user`
+- `service_tier`
+- `stop`
+- `answer_prefix`
+- `answer_suffix`
+- `address_as`
+- `quote_question`
+- `format_instruction`
+- `completion_instruction`
+
+Для редких или новых provider-specific параметров используйте поле `extra API parameters`. Оно принимает JSON object и добавляет его поля в тело запроса к провайдеру:
+
+```json
+{
+  "web_search_options": {},
+  "metadata": {
+    "source": "aiteach"
+  }
+}
+```
+
+Токен в веб-форме отправляется только в локальный backend для конкретного запроса и не сохраняется в config/keychain.
 
 ### Учебные Примеры Использования
 

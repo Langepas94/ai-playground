@@ -49,7 +49,7 @@ pub async fn chat_completion(
 ) -> Result<ChatResponse, AppError> {
     let url = endpoint(&profile.base_url, "chat/completions");
     let request = authorized(client.post(url), spec, token)
-        .json(&chat_payload(request))
+        .json(&chat_payload_for_provider(spec.kind, request))
         .send();
     let response = request
         .await
@@ -128,7 +128,7 @@ fn short_reason(body: &str) -> String {
     }
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, PartialEq)]
 pub struct OpenAiChatPayload {
     pub model: String,
     pub messages: Vec<ChatMessage>,
@@ -136,14 +136,63 @@ pub struct OpenAiChatPayload {
     pub response_format: Option<OpenAiResponseFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_a: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repetition_penalty: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<OpenAiReasoning>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_reasoning: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verbosity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_logprobs: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub n: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stop: Vec<String>,
+    #[serde(flatten)]
+    pub extra_params: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct OpenAiResponseFormat {
     #[serde(rename = "type")]
     pub kind: &'static str,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct OpenAiReasoning {
+    pub effort: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -173,13 +222,55 @@ struct ModelEntry {
 }
 
 pub fn chat_payload(request: ChatRequest) -> OpenAiChatPayload {
+    chat_payload_for_provider(ProviderKind::OpenAiCompatible, request)
+}
+
+pub fn chat_payload_for_provider(
+    provider: ProviderKind,
+    request: ChatRequest,
+) -> OpenAiChatPayload {
     let response_format = api_response_format(request.control.format);
+    let control = request.control;
+    let openrouter_reasoning = matches!(provider, ProviderKind::OpenRouter)
+        .then(|| {
+            control
+                .reasoning_effort
+                .as_ref()
+                .map(|effort| OpenAiReasoning {
+                    effort: effort.clone(),
+                })
+        })
+        .flatten();
     OpenAiChatPayload {
         model: request.model,
-        messages: controlled_messages(request.messages, &request.control),
+        messages: controlled_messages(request.messages, &control),
         response_format,
-        max_tokens: request.control.max_tokens,
-        stop: request.control.stop,
+        max_tokens: control.max_tokens,
+        max_completion_tokens: control.max_completion_tokens,
+        temperature: control.temperature,
+        top_p: control.top_p,
+        top_k: control.top_k,
+        min_p: control.min_p,
+        top_a: control.top_a,
+        presence_penalty: control.presence_penalty,
+        frequency_penalty: control.frequency_penalty,
+        repetition_penalty: control.repetition_penalty,
+        seed: control.seed,
+        reasoning_effort: control.reasoning_effort.clone(),
+        reasoning: openrouter_reasoning,
+        include_reasoning: matches!(provider, ProviderKind::OpenRouter)
+            .then_some(control.include_reasoning)
+            .flatten(),
+        verbosity: control.verbosity,
+        logprobs: control.logprobs,
+        top_logprobs: control.top_logprobs,
+        n: control.n,
+        store: control.store,
+        parallel_tool_calls: control.parallel_tool_calls,
+        user: control.user,
+        service_tier: control.service_tier,
+        stop: control.stop,
+        extra_params: control.extra_params,
     }
 }
 

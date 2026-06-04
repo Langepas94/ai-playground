@@ -4,3 +4,4 @@ pub mod config;
 pub mod errors;
 pub mod providers;
 pub mod secrets;
+pub mod web;

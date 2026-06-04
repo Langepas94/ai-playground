@@ -160,11 +160,32 @@ impl std::fmt::Display for AnswerFormat {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ResponseControl {
     pub format: ResponseFormat,
     pub answer_format: AnswerFormat,
     pub max_tokens: Option<u32>,
+    pub max_completion_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
+    pub top_k: Option<u32>,
+    pub min_p: Option<f32>,
+    pub top_a: Option<f32>,
+    pub presence_penalty: Option<f32>,
+    pub frequency_penalty: Option<f32>,
+    pub repetition_penalty: Option<f32>,
+    pub seed: Option<i64>,
+    pub reasoning_effort: Option<String>,
+    pub include_reasoning: Option<bool>,
+    pub verbosity: Option<String>,
+    pub logprobs: Option<bool>,
+    pub top_logprobs: Option<u32>,
+    pub n: Option<u32>,
+    pub store: Option<bool>,
+    pub parallel_tool_calls: Option<bool>,
+    pub user: Option<String>,
+    pub service_tier: Option<String>,
+    pub extra_params: serde_json::Map<String, serde_json::Value>,
     pub stop: Vec<String>,
     pub answer_prefix: Option<String>,
     pub answer_suffix: Option<String>,
@@ -183,6 +204,27 @@ impl ResponseControl {
         self.format == ResponseFormat::Text
             && self.answer_format == AnswerFormat::Natural
             && self.max_tokens.is_none()
+            && self.max_completion_tokens.is_none()
+            && self.temperature.is_none()
+            && self.top_p.is_none()
+            && self.top_k.is_none()
+            && self.min_p.is_none()
+            && self.top_a.is_none()
+            && self.presence_penalty.is_none()
+            && self.frequency_penalty.is_none()
+            && self.repetition_penalty.is_none()
+            && self.seed.is_none()
+            && self.reasoning_effort.is_none()
+            && self.include_reasoning.is_none()
+            && self.verbosity.is_none()
+            && self.logprobs.is_none()
+            && self.top_logprobs.is_none()
+            && self.n.is_none()
+            && self.store.is_none()
+            && self.parallel_tool_calls.is_none()
+            && self.user.is_none()
+            && self.service_tier.is_none()
+            && self.extra_params.is_empty()
             && self.stop.is_empty()
             && self.answer_prefix.is_none()
             && self.answer_suffix.is_none()
@@ -267,7 +309,7 @@ impl ResponseControl {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
@@ -424,6 +466,30 @@ mod tests {
                 format: ResponseFormat::JsonObject,
                 answer_format: AnswerFormat::Bullets,
                 max_tokens: Some(64),
+                max_completion_tokens: Some(128),
+                temperature: Some(0.3),
+                top_p: Some(0.9),
+                top_k: Some(40),
+                min_p: Some(0.05),
+                top_a: Some(0.2),
+                presence_penalty: Some(0.1),
+                frequency_penalty: Some(0.2),
+                repetition_penalty: Some(1.1),
+                seed: Some(42),
+                reasoning_effort: Some("high".to_string()),
+                include_reasoning: Some(true),
+                verbosity: Some("low".to_string()),
+                logprobs: Some(true),
+                top_logprobs: Some(3),
+                n: Some(1),
+                store: Some(false),
+                parallel_tool_calls: Some(true),
+                user: Some("test-user".to_string()),
+                service_tier: Some("auto".to_string()),
+                extra_params: serde_json::Map::from_iter([(
+                    "custom_provider_flag".to_string(),
+                    serde_json::Value::Bool(true),
+                )]),
                 stop: vec!["END".to_string()],
                 answer_prefix: Some("Artem,".to_string()),
                 answer_suffix: None,
@@ -435,6 +501,31 @@ mod tests {
         });
 
         assert_eq!(payload.max_tokens, Some(64));
+        assert_eq!(payload.max_completion_tokens, Some(128));
+        assert_eq!(payload.temperature, Some(0.3));
+        assert_eq!(payload.top_p, Some(0.9));
+        assert_eq!(payload.top_k, Some(40));
+        assert_eq!(payload.min_p, Some(0.05));
+        assert_eq!(payload.top_a, Some(0.2));
+        assert_eq!(payload.presence_penalty, Some(0.1));
+        assert_eq!(payload.frequency_penalty, Some(0.2));
+        assert_eq!(payload.repetition_penalty, Some(1.1));
+        assert_eq!(payload.seed, Some(42));
+        assert_eq!(payload.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(payload.reasoning, None);
+        assert_eq!(payload.include_reasoning, None);
+        assert_eq!(payload.verbosity.as_deref(), Some("low"));
+        assert_eq!(payload.logprobs, Some(true));
+        assert_eq!(payload.top_logprobs, Some(3));
+        assert_eq!(payload.n, Some(1));
+        assert_eq!(payload.store, Some(false));
+        assert_eq!(payload.parallel_tool_calls, Some(true));
+        assert_eq!(payload.user.as_deref(), Some("test-user"));
+        assert_eq!(payload.service_tier.as_deref(), Some("auto"));
+        assert_eq!(
+            payload.extra_params.get("custom_provider_flag"),
+            Some(&serde_json::Value::Bool(true))
+        );
         assert_eq!(payload.stop, vec!["END"]);
         assert_eq!(payload.response_format.expect("format").kind, "json_object");
         assert_eq!(payload.messages[0].role, Role::System);
@@ -442,6 +533,34 @@ mod tests {
         assert!(payload.messages[0].content.contains("Artem"));
         assert!(payload.messages[1].content.contains("valid JSON object"));
         assert_eq!(payload.messages[3].role, Role::User);
+    }
+
+    #[test]
+    fn openrouter_payload_includes_reasoning_object() {
+        let payload = openai_compatible::chat_payload_for_provider(
+            ProviderKind::OpenRouter,
+            ChatRequest {
+                model: "m".to_string(),
+                messages: vec![ChatMessage {
+                    role: Role::User,
+                    content: "think".to_string(),
+                }],
+                control: ResponseControl {
+                    reasoning_effort: Some("high".to_string()),
+                    include_reasoning: Some(true),
+                    ..ResponseControl::uncontrolled()
+                },
+            },
+        );
+
+        assert_eq!(
+            payload
+                .reasoning
+                .as_ref()
+                .map(|reasoning| reasoning.effort.as_str()),
+            Some("high")
+        );
+        assert_eq!(payload.include_reasoning, Some(true));
     }
 
     #[test]
