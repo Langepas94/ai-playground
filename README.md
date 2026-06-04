@@ -33,6 +33,14 @@ ai-playground ask "Объясни ownership в Rust"
 ai-playground chat
 ```
 
+Для старых IDE/run configurations оставлен совместимый Cargo package:
+
+```bash
+cargo run -p aiteach -- --help
+```
+
+Новый основной package остается `ai-playground`; `aiteach` только вызывает тот же CLI.
+
 `setup` интерактивно спросит provider, base_url, модель, имя профиля и токен. Enter принимает значение по умолчанию. Токен сохраняется в системный keychain, а не в config.
 
 ## Профили

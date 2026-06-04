@@ -3,6 +3,9 @@ name = "ai-playground"
 version = "0.2.1"
 edition = "2024"
 
+[workspace]
+members = [".", "crates/aiteach-compat"]
+
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
