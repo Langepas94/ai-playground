@@ -613,12 +613,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <label>answer_format<select id="answerFormat"><option value="natural">natural</option><option value="bullets">bullets</option><option value="numbered">numbered</option><option value="short">short</option><option value="steps">steps</option><option value="table">table</option></select></label>
           </div>
           <div class="row">
-            <label>max_tokens<input id="maxTokens" type="number" min="1" step="1" value="1024" data-default="1024"></label>
+            <label>max_tokens<input id="maxTokens" type="number" min="1" step="1" value="1024"></label>
             <label>max_completion_tokens<input id="maxCompletionTokens" type="number" min="1" step="1"></label>
           </div>
           <div class="row">
-            <label>temperature<input id="temperature" type="number" min="0" max="2" step="0.1" value="1" data-default="1"></label>
-            <label>top_p<input id="topP" type="number" min="0" max="1" step="0.05" value="1" data-default="1"></label>
+            <label>temperature<input id="temperature" type="number" min="0" max="2" step="0.1" value="1"></label>
+            <label>top_p<input id="topP" type="number" min="0" max="1" step="0.05" value="1"></label>
           </div>
           <div class="row">
             <label>top_k<input id="topK" type="number" min="0" step="1"></label>
@@ -629,8 +629,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <label>seed<input id="seed" type="number" step="1"></label>
           </div>
           <div class="row">
-            <label>presence_penalty<input id="presencePenalty" type="number" min="-2" max="2" step="0.1" value="0" data-default="0"></label>
-            <label>frequency_penalty<input id="frequencyPenalty" type="number" min="-2" max="2" step="0.1" value="0" data-default="0"></label>
+            <label>presence_penalty<input id="presencePenalty" type="number" min="-2" max="2" step="0.1" value="0"></label>
+            <label>frequency_penalty<input id="frequencyPenalty" type="number" min="-2" max="2" step="0.1" value="0"></label>
           </div>
           <label>repetition_penalty<input id="repetitionPenalty" type="number" min="0" step="0.05"></label>
           <label>stop sequences<textarea id="stop" placeholder="Одна stop sequence на строку"></textarea></label>
@@ -643,17 +643,17 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <label>verbosity<select id="verbosity"><option value="" selected>provider default</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></label>
           </div>
           <div class="row">
-            <label>n<input id="n" type="number" min="1" step="1" value="1" data-default="1"></label>
+            <label>n<input id="n" type="number" min="1" step="1" value="1"></label>
             <label>top_logprobs<input id="topLogprobs" type="number" min="0" max="20" step="1"></label>
           </div>
           <div class="row">
             <label>service_tier<select id="serviceTier"><option value="">provider default</option><option value="auto">auto</option><option value="default">default</option><option value="flex">flex</option><option value="priority">priority</option></select></label>
             <label>user<input id="user" spellcheck="false"></label>
           </div>
-          <label class="inline"><input id="includeReasoning" type="checkbox" data-default="false"> include_reasoning</label>
-          <label class="inline"><input id="logprobs" type="checkbox" data-default="false"> logprobs</label>
-          <label class="inline"><input id="store" type="checkbox" data-default="false"> store</label>
-          <label class="inline"><input id="parallelToolCalls" type="checkbox" checked data-default="true"> parallel_tool_calls</label>
+          <label class="inline"><input id="includeReasoning" type="checkbox"> include_reasoning</label>
+          <label class="inline"><input id="logprobs" type="checkbox"> logprobs</label>
+          <label class="inline"><input id="store" type="checkbox"> store</label>
+          <label class="inline"><input id="parallelToolCalls" type="checkbox" checked> parallel_tool_calls</label>
         </div>
 
         <div class="group">
@@ -729,9 +729,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     function controlledNumberValue(id) {
       const element = $(id);
       const value = element.value.trim();
-      if (value === '') return null;
-      if (element.dataset.default !== undefined && value === element.dataset.default) return null;
-      return Number(value);
+      return value === '' ? null : Number(value);
     }
 
     function textValue(id) {
@@ -740,12 +738,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
 
     function boolValue(id) {
-      const element = $(id);
-      const checked = element.checked;
-      if (element.dataset.default !== undefined && String(checked) === element.dataset.default) {
-        return null;
-      }
-      return checked;
+      return $(id).checked;
     }
 
     function extraParamsValue() {
