@@ -635,7 +635,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
     .layout {
       display: grid;
-      grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
+      grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
       gap: 16px;
       align-items: start;
     }
@@ -685,12 +685,15 @@ const INDEX_HTML: &str = r#"<!doctype html>
       min-height: 42px;
     }
     textarea {
-      min-height: 156px;
+      min-height: 104px;
       resize: vertical;
       line-height: 1.45;
     }
-    .prompt textarea {
-      min-height: 260px;
+    #prompt {
+      min-height: 340px;
+    }
+    #systemPrompt {
+      min-height: 92px;
     }
     .row {
       display: grid;
@@ -712,6 +715,35 @@ const INDEX_HTML: &str = r#"<!doctype html>
       display: flex;
       gap: 10px;
       flex-wrap: wrap;
+    }
+    details.panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+    }
+    details.panel summary {
+      cursor: pointer;
+      padding: 11px 12px;
+      color: var(--text);
+      font-weight: 650;
+      list-style-position: inside;
+    }
+    details.panel .panel-body {
+      display: grid;
+      gap: 10px;
+      padding: 0 12px 12px;
+    }
+    .compact-row {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .send-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
     }
     button {
       border: 1px solid transparent;
@@ -822,90 +854,101 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <div class="group">
           <h2>Провайдер</h2>
           <label>Provider<select id="provider"></select></label>
-          <label>API token override<input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="Пусто = взять из keychain"></label>
-          <label>Base URL<input id="baseUrl" spellcheck="false"></label>
           <label>Model<select id="model"></select></label>
-          <label>Custom model id<input id="customModel" spellcheck="false" placeholder="Если нужной модели нет в списке"></label>
           <div class="actions">
             <button id="loadModels" class="secondary" type="button">Загрузить модели</button>
           </div>
+          <details class="panel">
+            <summary>Подключение</summary>
+            <div class="panel-body">
+              <label>API token override<input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="Пусто = взять из keychain"></label>
+              <label>Base URL<input id="baseUrl" spellcheck="false"></label>
+              <label>Custom model id<input id="customModel" spellcheck="false" placeholder="Если нужной модели нет в списке"></label>
+            </div>
+          </details>
         </div>
 
         <div class="group">
-          <h2>API параметры</h2>
+          <h2>Основные параметры</h2>
           <div id="parameterWarnings" class="warnings"></div>
           <div class="row">
-            <label>response_format<select id="responseFormat"><option value="text">text</option><option value="json-object">json_object</option></select></label>
+            <label>max_tokens<input id="maxTokens" type="number" min="1" step="1" value="1024"></label>
+            <label>temperature<input id="temperature" type="number" min="0" max="2" step="0.1" value="1"></label>
+          </div>
+          <div class="row">
+            <label>top_p<input id="topP" type="number" min="0" max="1" step="0.05" value="1"></label>
             <label>answer_format<select id="answerFormat"><option value="natural">natural</option><option value="bullets">bullets</option><option value="numbered">numbered</option><option value="short">short</option><option value="steps">steps</option><option value="table">table</option></select></label>
           </div>
-          <div class="row">
-            <label>max_tokens<input id="maxTokens" type="number" min="1" step="1" value="1024"></label>
-            <label>max_completion_tokens<input id="maxCompletionTokens" type="number" min="1" step="1"></label>
-          </div>
-          <div class="row">
-            <label>temperature<input id="temperature" type="number" min="0" max="2" step="0.1" value="1"></label>
-            <label>top_p<input id="topP" type="number" min="0" max="1" step="0.05" value="1"></label>
-          </div>
-          <div class="row">
-            <label>top_k<input id="topK" type="number" min="0" step="1"></label>
-            <label>min_p<input id="minP" type="number" min="0" max="1" step="0.01"></label>
-          </div>
-          <div class="row">
-            <label>top_a<input id="topA" type="number" min="0" max="1" step="0.01"></label>
-            <label>seed<input id="seed" type="number" step="1"></label>
-          </div>
-          <div class="row">
-            <label>presence_penalty<input id="presencePenalty" type="number" min="-2" max="2" step="0.1" value="0"></label>
-            <label>frequency_penalty<input id="frequencyPenalty" type="number" min="-2" max="2" step="0.1" value="0"></label>
-          </div>
-          <label>repetition_penalty<input id="repetitionPenalty" type="number" min="0" step="0.05"></label>
-          <label>stop sequences<textarea id="stop" placeholder="Одна stop sequence на строку"></textarea></label>
+          <details class="panel">
+            <summary>Расширенные параметры</summary>
+            <div class="panel-body">
+              <div class="row">
+                <label>response_format<select id="responseFormat"><option value="text">text</option><option value="json-object">json_object</option></select></label>
+                <label>max_completion_tokens<input id="maxCompletionTokens" type="number" min="1" step="1"></label>
+              </div>
+              <div class="row">
+                <label>top_k<input id="topK" type="number" min="0" step="1"></label>
+                <label>min_p<input id="minP" type="number" min="0" max="1" step="0.01"></label>
+              </div>
+              <div class="row">
+                <label>top_a<input id="topA" type="number" min="0" max="1" step="0.01"></label>
+                <label>seed<input id="seed" type="number" step="1"></label>
+              </div>
+              <div class="row">
+                <label>presence_penalty<input id="presencePenalty" type="number" min="-2" max="2" step="0.1" value="0"></label>
+                <label>frequency_penalty<input id="frequencyPenalty" type="number" min="-2" max="2" step="0.1" value="0"></label>
+              </div>
+              <label>repetition_penalty<input id="repetitionPenalty" type="number" min="0" step="0.05"></label>
+              <label>stop sequences<textarea id="stop" placeholder="Одна stop sequence на строку"></textarea></label>
+              <div class="row">
+                <label>reasoning_effort<select id="reasoningEffort"><option value="" selected>provider default</option><option value="none">none</option><option value="minimal">minimal</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select></label>
+                <label>verbosity<select id="verbosity"><option value="" selected>provider default</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></label>
+              </div>
+              <div class="row">
+                <label>n<input id="n" type="number" min="1" step="1" value="1"></label>
+                <label>top_logprobs<input id="topLogprobs" type="number" min="0" max="20" step="1"></label>
+              </div>
+              <div class="row">
+                <label>service_tier<select id="serviceTier"><option value="">provider default</option><option value="auto">auto</option><option value="default">default</option><option value="flex">flex</option><option value="priority">priority</option></select></label>
+                <label>user<input id="user" spellcheck="false"></label>
+              </div>
+              <label class="inline"><input id="includeReasoning" type="checkbox"> include_reasoning</label>
+              <label class="inline"><input id="logprobs" type="checkbox"> logprobs</label>
+              <label class="inline"><input id="store" type="checkbox"> store</label>
+              <label class="inline"><input id="parallelToolCalls" type="checkbox"> parallel_tool_calls</label>
+            </div>
+          </details>
         </div>
 
         <div class="group">
-          <h2>Reasoning и вывод</h2>
-          <div class="row">
-            <label>reasoning_effort<select id="reasoningEffort"><option value="" selected>provider default</option><option value="none">none</option><option value="minimal">minimal</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select></label>
-            <label>verbosity<select id="verbosity"><option value="" selected>provider default</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></label>
-          </div>
-          <div class="row">
-            <label>n<input id="n" type="number" min="1" step="1" value="1"></label>
-            <label>top_logprobs<input id="topLogprobs" type="number" min="0" max="20" step="1"></label>
-          </div>
-          <div class="row">
-            <label>service_tier<select id="serviceTier"><option value="">provider default</option><option value="auto">auto</option><option value="default">default</option><option value="flex">flex</option><option value="priority">priority</option></select></label>
-            <label>user<input id="user" spellcheck="false"></label>
-          </div>
-          <label class="inline"><input id="includeReasoning" type="checkbox"> include_reasoning</label>
-          <label class="inline"><input id="logprobs" type="checkbox"> logprobs</label>
-          <label class="inline"><input id="store" type="checkbox"> store</label>
-          <label class="inline"><input id="parallelToolCalls" type="checkbox"> parallel_tool_calls</label>
-        </div>
-
-        <div class="group">
-          <h2>Формат ответа</h2>
-          <div class="row">
-            <label>answer_prefix<input id="answerPrefix"></label>
-            <label>answer_suffix<input id="answerSuffix"></label>
-          </div>
-          <label>address_as<input id="addressAs"></label>
-          <label class="inline"><input id="quoteQuestion" type="checkbox"> quote_question</label>
-          <label>format_instruction<textarea id="formatInstruction"></textarea></label>
-          <label>completion_instruction<textarea id="completionInstruction"></textarea></label>
-        </div>
-
-        <div class="group">
-          <h2>Дополнительный JSON</h2>
-          <label>extra API parameters<textarea id="extraParams" placeholder='{"web_search_options": {}, "metadata": {"source": "ai-playground"}}'></textarea></label>
+          <details class="panel">
+            <summary>Формат и JSON</summary>
+            <div class="panel-body">
+              <div class="row">
+                <label>answer_prefix<input id="answerPrefix"></label>
+                <label>answer_suffix<input id="answerSuffix"></label>
+              </div>
+              <label>address_as<input id="addressAs"></label>
+              <label class="inline"><input id="quoteQuestion" type="checkbox"> quote_question</label>
+              <label>format_instruction<textarea id="formatInstruction"></textarea></label>
+              <label>completion_instruction<textarea id="completionInstruction"></textarea></label>
+              <label>extra API parameters<textarea id="extraParams" placeholder='{"web_search_options": {}, "metadata": {"source": "ai-playground"}}'></textarea></label>
+            </div>
+          </details>
         </div>
       </section>
 
       <section class="prompt">
         <div class="group">
           <h2>Промпт</h2>
-          <label>system_prompt<textarea id="systemPrompt" placeholder="Необязательная системная инструкция для модели"></textarea></label>
+          <details class="panel">
+            <summary>System prompt</summary>
+            <div class="panel-body">
+              <label>system_prompt<textarea id="systemPrompt" placeholder="Необязательная системная инструкция для модели"></textarea></label>
+            </div>
+          </details>
           <label><textarea id="prompt" placeholder="Введите запрос к модели"></textarea></label>
-          <div class="actions">
+          <div class="send-row">
             <button id="send" type="button">Отправить</button>
             <button id="clear" class="secondary" type="button">Очистить ответ</button>
           </div>
