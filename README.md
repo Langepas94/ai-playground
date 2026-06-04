@@ -6,7 +6,7 @@
 
 ## Стек
 
-- Rust stable, edition 2024 - основной язык и сборка через Cargo.
+- Rust stable с `edition = "2024"` в `Cargo.toml` - основной язык и сборка через Cargo.
 - `clap` - парсинг CLI-команд и аргументов.
 - `tokio` - async runtime для HTTP и локального web-сервера.
 - `reqwest` - HTTP-клиент для LLM-провайдеров и загрузки списка моделей.

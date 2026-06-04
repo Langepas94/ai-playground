@@ -4,7 +4,7 @@
 
 ## Стек и роли
 
-- Rust 2024 - единая кодовая база для CLI, web backend и provider-клиентов.
+- Rust stable с `edition = "2024"` в `Cargo.toml` - единая кодовая база для CLI, web backend и provider-клиентов.
 - `clap` - декларативное описание команд: `setup`, `profile`, `ask`, `chat`, `web`.
 - `tokio` - async runtime; нужен для `reqwest`, `axum` и интерактивных LLM-запросов.
 - `reqwest` - HTTP transport к OpenRouter, DeepSeek, GigaChat, Kimi и custom OpenAI-compatible endpoint.
