@@ -1,6 +1,6 @@
-# aiteach
+# ai playground
 
-Локальный Rust CLI и web UI для общения с LLM-провайдерами через OpenAI-compatible Chat Completions.
+Локальный Rust CLI и web UI для общения с LLM-провайдерами через OpenAI-compatible Chat Completions. Команда бинарника: `ai-playground`.
 
 Поддерживаются OpenRouter, DeepSeek, GigaChat, Kimi и произвольный OpenAI-compatible endpoint.
 
@@ -15,9 +15,9 @@ cargo run -- chat
 После установки бинарника команды выглядят так:
 
 ```bash
-aiteach setup
-aiteach ask "Объясни ownership в Rust"
-aiteach chat
+ai-playground setup
+ai-playground ask "Объясни ownership в Rust"
+ai-playground chat
 ```
 
 `setup` интерактивно спросит provider, base_url, модель, имя профиля и токен. Enter принимает значение по умолчанию. Токен сохраняется в системный keychain, а не в config.
@@ -27,22 +27,22 @@ aiteach chat
 Профиль хранит provider, model и base_url. Активный профиль используется командами без `--profile`.
 
 ```bash
-aiteach profile add
-aiteach profile list
-aiteach profile use
-aiteach use
-aiteach use work
-aiteach profile remove work
+ai-playground profile add
+ai-playground profile list
+ai-playground profile use
+ai-playground use
+ai-playground use work
+ai-playground profile remove work
 ```
 
-`aiteach profile use` и `aiteach use` без имени показывают список уже созданных профилей и позволяют выбрать номером.
+`ai-playground profile use` и `ai-playground use` без имени показывают список уже созданных профилей и позволяют выбрать номером.
 
 Профиль можно указать явно:
 
 ```bash
-aiteach ask --profile work "Коротко сравни Rust и Go"
-aiteach models list --profile work
-aiteach doctor --profile work
+ai-playground ask --profile work "Коротко сравни Rust и Go"
+ai-playground models list --profile work
+ai-playground doctor --profile work
 ```
 
 ## Токены
@@ -50,8 +50,8 @@ aiteach doctor --profile work
 Токены хранятся в keychain на уровне provider. Если у вас несколько профилей OpenRouter с разными моделями, токен будет общий.
 
 ```bash
-aiteach token set --profile work
-aiteach token delete --profile work
+ai-playground token set --profile work
+ai-playground token delete --profile work
 ```
 
 Старые profile-scoped токены подхватываются как fallback и мигрируют в provider-scoped хранение при первом использовании.
@@ -59,7 +59,7 @@ aiteach token delete --profile work
 ## Web UI
 
 ```bash
-aiteach web
+ai-playground web
 ```
 
 Адрес по умолчанию:
@@ -71,7 +71,7 @@ http://127.0.0.1:8787
 Другой адрес:
 
 ```bash
-aiteach web --listen 127.0.0.1:9000
+ai-playground web --listen 127.0.0.1:9000
 ```
 
 Web UI использует те же provider-клиенты и тот же keychain, что CLI. Поле `API token override` можно оставить пустым: backend возьмет сохраненный токен выбранного provider. Если вставить токен в web-форму, он сохранится в keychain так же, как через CLI.
@@ -83,9 +83,9 @@ Web UI использует те же provider-клиенты и тот же key
 Основные опции:
 
 ```bash
-aiteach ask "Верни краткое резюме" --max-tokens 120
-aiteach ask "Ответь списком" --answer-format bullets
-aiteach ask "Верни JSON объект" --response-format json-object
+ai-playground ask "Верни краткое резюме" --max-tokens 120
+ai-playground ask "Ответь списком" --answer-format bullets
+ai-playground ask "Верни JSON объект" --response-format json-object
 ```
 
 Полезные ручки:
@@ -103,13 +103,13 @@ aiteach ask "Верни JSON объект" --response-format json-object
 Для сравнения обычного и управляемого ответа:
 
 ```bash
-aiteach compare "Сравни Rust и Go" --max-tokens 120 --stop "END"
+ai-playground compare "Сравни Rust и Go" --max-tokens 120 --stop "END"
 ```
 
 Для проверки диалоговой цели:
 
 ```bash
-aiteach compare-goal \
+ai-playground compare-goal \
   "Собери требования к статье" \
   --required-field topic \
   --required-field audience \
@@ -119,7 +119,7 @@ aiteach compare-goal \
 ## Chat
 
 ```bash
-aiteach chat --max-tokens 180
+ai-playground chat --max-tokens 180
 ```
 
 Команды внутри чата:
@@ -143,9 +143,9 @@ aiteach chat --max-tokens 180
 ## Config и диагностика
 
 ```bash
-aiteach config path
-aiteach doctor
-aiteach models list
+ai-playground config path
+ai-playground doctor
+ai-playground models list
 ```
 
 `doctor` проверяет активный профиль, base_url и наличие токена, но не печатает сам токен.
@@ -158,4 +158,3 @@ rtk cargo test
 ```
 
 Короткие заметки для будущих правок лежат в `AGENTS.md` и `docs/`.
-

@@ -290,7 +290,7 @@ fn resolve_web_token(
     }
 
     Err(AppError::InvalidInput(
-        "API token is required. Save it with `aiteach token set --profile <name>` or paste it once in the web UI.".to_string(),
+        "API token is required. Save it with `ai-playground token set --profile <name>` or paste it once in the web UI.".to_string(),
     ))
 }
 
@@ -341,7 +341,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>aiteach web</title>
+  <title>ai playground web</title>
   <style>
     :root {
       color-scheme: light;
@@ -511,7 +511,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 <body>
   <main>
     <header>
-      <h1>aiteach</h1>
+      <h1>ai playground</h1>
       <div id="status" class="status">Готово</div>
     </header>
 
@@ -593,7 +593,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
         <div class="group">
           <h2>Дополнительный JSON</h2>
-          <label>extra API parameters<textarea id="extraParams" placeholder='{"web_search_options": {}, "metadata": {"source": "aiteach"}}'></textarea></label>
+          <label>extra API parameters<textarea id="extraParams" placeholder='{"web_search_options": {}, "metadata": {"source": "ai-playground"}}'></textarea></label>
         </div>
       </section>
 
@@ -722,7 +722,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           body: body ? JSON.stringify(body) : undefined
         });
       } catch {
-        throw new Error('Локальный сервер недоступен. Запустите `aiteach web` и обновите страницу.');
+        throw new Error('Локальный сервер недоступен. Запустите `ai-playground web` и обновите страницу.');
       }
       const raw = await response.text();
       let data = {};

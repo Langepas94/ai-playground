@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "aiteach"
+name = "ai-playground"
 version = "0.2.1"
 dependencies = [
  "anyhow",

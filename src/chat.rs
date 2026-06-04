@@ -754,9 +754,11 @@ fn is_filled(value: &serde_json::Value) -> bool {
 }
 
 pub fn save_history(profile_name: &str, messages: &[ChatMessage]) -> Result<PathBuf, AppError> {
-    let dirs = ProjectDirs::from("dev", "aiteach", "aiteach").ok_or_else(|| AppError::Config {
-        path: PathBuf::from("<unknown>"),
-        message: "Could not resolve data directory".to_string(),
+    let dirs = ProjectDirs::from("dev", "ai-playground", "ai-playground").ok_or_else(|| {
+        AppError::Config {
+            path: PathBuf::from("<unknown>"),
+            message: "Could not resolve data directory".to_string(),
+        }
     })?;
     let dir = dirs.data_local_dir().join("history");
     fs::create_dir_all(&dir).map_err(|error| AppError::Config {

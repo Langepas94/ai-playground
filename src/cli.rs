@@ -19,7 +19,7 @@ use crate::{
 };
 
 #[derive(Debug, Parser)]
-#[command(name = "aiteach", version, about = "Rust CLI for LLM chat")]
+#[command(name = "ai-playground", version, about = "Rust CLI for LLM chat")]
 pub struct Cli {
     #[arg(long, global = true)]
     verbose: bool,
@@ -495,7 +495,8 @@ fn select_profile_name(config: &AppConfig, parts: &[String]) -> Result<String, A
     }
     if config.profiles.is_empty() {
         return Err(AppError::InvalidInput(
-            "No profiles found. Run `aiteach setup` or `aiteach profile add` first.".to_string(),
+            "No profiles found. Run `ai-playground setup` or `ai-playground profile add` first."
+                .to_string(),
         ));
     }
 
@@ -540,7 +541,7 @@ fn select_profile_name(config: &AppConfig, parts: &[String]) -> Result<String, A
 }
 
 async fn setup_command(args: &SetupArgs, secrets: &dyn SecretStore) -> Result<(), AppError> {
-    println!("aiteach setup");
+    println!("ai-playground setup");
     println!("Press Enter to accept the value shown in brackets.");
     println!();
 
@@ -566,16 +567,16 @@ async fn setup_command(args: &SetupArgs, secrets: &dyn SecretStore) -> Result<()
         println!("Token saved for provider '{provider}'.");
     } else {
         println!(
-            "Token skipped. Add it later with `aiteach token set --profile {}`.",
+            "Token skipped. Add it later with `ai-playground token set --profile {}`.",
             profile.name
         );
     }
     println!();
     println!("Next commands:");
-    println!("  aiteach doctor");
-    println!("  aiteach models list");
-    println!("  aiteach ask \"Сколько будет 3 + 2?\"");
-    println!("  aiteach chat");
+    println!("  ai-playground doctor");
+    println!("  ai-playground models list");
+    println!("  ai-playground ask \"Сколько будет 3 + 2?\"");
+    println!("  ai-playground chat");
     Ok(())
 }
 
@@ -1005,7 +1006,7 @@ mod tests {
 
     #[test]
     fn profile_use_accepts_unquoted_names_with_spaces() {
-        let cli = Cli::try_parse_from(["aiteach", "profile", "use", "ВуDeepSeek", "pro"])
+        let cli = Cli::try_parse_from(["ai-playground", "profile", "use", "ВуDeepSeek", "pro"])
             .expect("parse profile use");
 
         let Command::Profile { command } = cli.command else {
@@ -1020,7 +1021,8 @@ mod tests {
 
     #[test]
     fn profile_use_can_open_interactive_menu_without_name() {
-        let cli = Cli::try_parse_from(["aiteach", "profile", "use"]).expect("parse profile use");
+        let cli =
+            Cli::try_parse_from(["ai-playground", "profile", "use"]).expect("parse profile use");
 
         let Command::Profile { command } = cli.command else {
             panic!("expected profile command");
@@ -1034,7 +1036,8 @@ mod tests {
 
     #[test]
     fn top_level_use_accepts_profile_name() {
-        let cli = Cli::try_parse_from(["aiteach", "use", "ВуDeepSeek", "pro"]).expect("parse use");
+        let cli =
+            Cli::try_parse_from(["ai-playground", "use", "ВуDeepSeek", "pro"]).expect("parse use");
 
         let Command::Use(args) = cli.command else {
             panic!("expected use command");
@@ -1045,7 +1048,7 @@ mod tests {
 
     #[test]
     fn profile_remove_accepts_unquoted_names_with_spaces() {
-        let cli = Cli::try_parse_from(["aiteach", "profile", "remove", "ВуDeepSeek", "pro"])
+        let cli = Cli::try_parse_from(["ai-playground", "profile", "remove", "ВуDeepSeek", "pro"])
             .expect("parse profile remove");
 
         let Command::Profile { command } = cli.command else {

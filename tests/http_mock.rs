@@ -1,4 +1,4 @@
-use aiteach::{
+use ai_playground::{
     config::ProfileConfig,
     errors::{AppError, HttpProblem},
     providers::{
@@ -60,7 +60,7 @@ async fn missing_token_behavior_is_clear() {
     assert!(
         error
             .to_string()
-            .contains("aiteach token set --profile work")
+            .contains("ai-playground token set --profile work")
     );
 }
 
