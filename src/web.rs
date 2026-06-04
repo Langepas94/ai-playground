@@ -276,7 +276,14 @@ fn openrouter_like_constraints() -> Vec<ParameterConstraintView> {
         constraint("includeReasoning", true, None, None, None, "boolean"),
         constraint("logprobs", true, None, None, None, "boolean"),
         constraint("store", true, None, None, None, "boolean"),
-        constraint("parallelToolCalls", true, None, None, None, "boolean"),
+        constraint(
+            "parallelToolCalls",
+            true,
+            None,
+            None,
+            None,
+            "Only send when tools are specified; OpenAI-compatible APIs reject it without tools.",
+        ),
     ]
 }
 
@@ -858,7 +865,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <label class="inline"><input id="includeReasoning" type="checkbox"> include_reasoning</label>
           <label class="inline"><input id="logprobs" type="checkbox"> logprobs</label>
           <label class="inline"><input id="store" type="checkbox"> store</label>
-          <label class="inline"><input id="parallelToolCalls" type="checkbox" checked> parallel_tool_calls</label>
+          <label class="inline"><input id="parallelToolCalls" type="checkbox"> parallel_tool_calls</label>
         </div>
 
         <div class="group">
@@ -951,6 +958,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
       return $(id).checked;
     }
 
+    function optionalBoolValue(id) {
+      const constraint = currentConstraints.get(id);
+      if (constraint && !constraint.supported) return null;
+      return $(id).checked ? true : null;
+    }
+
     function applyProviderConstraints(selected) {
       currentConstraints = new Map((selected.parameter_constraints || []).map((item) => [item.id, item]));
       for (const [id, constraint] of currentConstraints) {
@@ -981,6 +994,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
             label?.classList.add('field-warning');
           }
           continue;
+        }
+        if (id === 'parallelToolCalls' && element.checked) {
+          messages.push(`${labelText(label)}: ${constraint.note}`);
+          label?.classList.add('field-warning');
         }
         if (element.type === 'number' && element.value.trim() !== '') {
           const value = Number(element.value);
@@ -1052,7 +1069,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           top_logprobs: controlledNumberValue('topLogprobs'),
           n: controlledNumberValue('n'),
           store: boolValue('store'),
-          parallel_tool_calls: boolValue('parallelToolCalls'),
+          parallel_tool_calls: optionalBoolValue('parallelToolCalls'),
           user: textValue('user'),
           service_tier: textValue('serviceTier'),
           extra_params: extraParamsValue(),
