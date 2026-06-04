@@ -14,8 +14,9 @@ use crate::{
     config::{AppConfig, ProfileConfig, token_ref},
     errors::AppError,
     providers::{
-        AnswerFormat, ChatMessage, ChatRequest, ProviderClient, ProviderKind,
-        ReqwestProviderClient, ResponseControl, ResponseFormat, Role, validate_base_url,
+        AnswerFormat, ChatMessage, ChatRequest, HttpDebugRequest, HttpDebugResponse,
+        ProviderClient, ProviderKind, ReqwestProviderClient, ResponseControl, ResponseFormat, Role,
+        validate_base_url,
     },
     secrets::{KeyringSecretStore, SecretStore, get_config_profile_token, set_profile_token},
 };
@@ -92,24 +93,38 @@ async fn chat(
         return Err(AppError::InvalidInput("Prompt is required".to_string()).into());
     }
     let token = resolve_web_token(state.secrets.as_ref(), &profile, &request.token)?;
-    let response = state
+    let control = request.control.clone().into_control();
+    let chat_request = ChatRequest {
+        model: profile.model.clone(),
+        messages: vec![ChatMessage {
+            role: Role::User,
+            content: request.prompt.clone(),
+        }],
+        control,
+    };
+    let backend_request = request.debug_value(&chat_request);
+    let (response, provider_debug) = state
         .client
-        .chat_completion(
-            &profile,
-            &token,
-            ChatRequest {
-                model: profile.model.clone(),
-                messages: vec![ChatMessage {
-                    role: Role::User,
-                    content: request.prompt,
-                }],
-                control: request.control.into_control(),
-            },
-        )
+        .chat_completion_with_debug(&profile, &token, chat_request)
         .await?;
+    let backend_response = serde_json::json!({
+        "text": response.text,
+        "finish_reason": response.finish_reason,
+    });
     Ok(Json(ChatWebResponse {
-        text: response.text,
-        finish_reason: response.finish_reason,
+        text: backend_response["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        finish_reason: backend_response["finish_reason"]
+            .as_str()
+            .map(ToString::to_string),
+        debug: ChatDebugView {
+            backend_request,
+            provider_request: provider_debug.request,
+            provider_response: provider_debug.response,
+            backend_response,
+        },
     }))
 }
 
@@ -173,9 +188,20 @@ impl ChatWebRequest {
             token_ref: String::new(),
         })
     }
+
+    fn debug_value(&self, chat_request: &ChatRequest) -> serde_json::Value {
+        serde_json::json!({
+            "provider": self.provider,
+            "base_url": self.base_url,
+            "token": redacted_token_value(&self.token),
+            "model": self.model,
+            "prompt": self.prompt,
+            "provider_chat_request": chat_request,
+        })
+    }
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 struct WebResponseControl {
     response_format: Option<String>,
     answer_format: Option<String>,
@@ -262,6 +288,15 @@ impl WebResponseControl {
 struct ChatWebResponse {
     text: String,
     finish_reason: Option<String>,
+    debug: ChatDebugView,
+}
+
+#[derive(Debug, Serialize)]
+struct ChatDebugView {
+    backend_request: serde_json::Value,
+    provider_request: HttpDebugRequest,
+    provider_response: HttpDebugResponse,
+    backend_response: serde_json::Value,
 }
 
 fn resolve_web_token(
@@ -296,6 +331,14 @@ fn resolve_web_token(
 
 fn parse_provider(value: &str) -> Result<ProviderKind, AppError> {
     value.parse()
+}
+
+fn redacted_token_value(token: &str) -> serde_json::Value {
+    if token.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::String("[redacted]".to_string())
+    }
 }
 
 fn blank_to_none(value: Option<String>) -> Option<String> {
@@ -498,6 +541,40 @@ const INDEX_HTML: &str = r#"<!doctype html>
       line-height: 1.5;
       font-size: 14px;
     }
+    details.debug {
+      margin-top: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+    }
+    details.debug summary {
+      cursor: pointer;
+      padding: 12px 14px;
+      color: var(--text);
+      font-weight: 650;
+    }
+    .debug-grid {
+      display: grid;
+      gap: 10px;
+      padding: 0 12px 12px;
+    }
+    .debug-item {
+      display: grid;
+      gap: 6px;
+    }
+    .debug-item h3 {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.25;
+      letter-spacing: 0;
+    }
+    .debug-item pre {
+      min-height: 120px;
+      max-height: 300px;
+      border-radius: 6px;
+      font-size: 12px;
+    }
     .error { color: var(--danger); }
     @media (max-width: 900px) {
       main { width: min(100vw - 20px, 720px); padding-top: 14px; }
@@ -607,6 +684,27 @@ const INDEX_HTML: &str = r#"<!doctype html>
           </div>
         </div>
         <pre id="output">Ответ появится здесь.</pre>
+        <details id="debugDetails" class="debug">
+          <summary>JSON отладка</summary>
+          <div class="debug-grid">
+            <div class="debug-item">
+              <h3>Запрос в backend</h3>
+              <pre id="backendRequest">{}</pre>
+            </div>
+            <div class="debug-item">
+              <h3>Запрос к provider API</h3>
+              <pre id="providerRequest">{}</pre>
+            </div>
+            <div class="debug-item">
+              <h3>Ответ provider API</h3>
+              <pre id="providerResponse">{}</pre>
+            </div>
+            <div class="debug-item">
+              <h3>Ответ backend</h3>
+              <pre id="backendResponse">{}</pre>
+            </div>
+          </div>
+        </details>
       </section>
     </div>
   </main>
@@ -713,6 +811,17 @@ const INDEX_HTML: &str = r#"<!doctype html>
       };
     }
 
+    function prettyJson(value) {
+      return JSON.stringify(value ?? {}, null, 2);
+    }
+
+    function setDebug(debug) {
+      $('backendRequest').textContent = prettyJson(debug?.backend_request);
+      $('providerRequest').textContent = prettyJson(debug?.provider_request);
+      $('providerResponse').textContent = prettyJson(debug?.provider_response);
+      $('backendResponse').textContent = prettyJson(debug?.backend_response);
+    }
+
     async function requestJson(url, body) {
       let response;
       try {
@@ -791,10 +900,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
       $('send').disabled = true;
       setStatus('Жду ответ модели...');
       $('output').textContent = '';
+      setDebug(null);
       try {
         const payload = chatPayload();
         const data = await requestJson('/api/chat', payload);
         $('output').textContent = data.text;
+        setDebug(data.debug);
         setStatus(data.finish_reason ? `Готово: ${data.finish_reason}` : 'Готово');
       } catch (error) {
         $('output').textContent = error.message;
@@ -807,7 +918,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
     providerSelect.addEventListener('change', applyProviderDefaults);
     $('loadModels').addEventListener('click', loadModels);
     $('send').addEventListener('click', sendPrompt);
-    $('clear').addEventListener('click', () => { $('output').textContent = 'Ответ появится здесь.'; });
+    $('clear').addEventListener('click', () => {
+      $('output').textContent = 'Ответ появится здесь.';
+      setDebug(null);
+    });
     init().catch((error) => setStatus(error.message, true));
   </script>
 </body>

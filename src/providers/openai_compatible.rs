@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use reqwest::Client;
 use reqwest::{StatusCode, header::RETRY_AFTER};
 use serde::{Deserialize, Serialize};
@@ -6,8 +8,9 @@ use crate::{
     config::ProfileConfig,
     errors::{AppError, EndpointCategory, HttpProblem, ProviderHttpError, map_http_status},
     providers::{
-        AuthScheme, ChatMessage, ChatRequest, ChatResponse, ProviderKind, ProviderSpec,
-        ResponseControl, ResponseFormat, StaticHeader,
+        AuthScheme, ChatMessage, ChatRequest, ChatResponse, HttpDebugRequest, HttpDebugResponse,
+        ProviderExchangeDebug, ProviderKind, ProviderSpec, ResponseControl, ResponseFormat,
+        StaticHeader,
     },
 };
 
@@ -58,6 +61,54 @@ pub async fn chat_completion(
     parse_chat_response(spec, &raw)
 }
 
+pub async fn chat_completion_with_debug(
+    client: &Client,
+    spec: ProviderSpec,
+    profile: &ProfileConfig,
+    token: &str,
+    request: ChatRequest,
+) -> Result<(ChatResponse, ProviderExchangeDebug), AppError> {
+    let url = endpoint(&profile.base_url, "chat/completions");
+    let body = serde_json::to_value(chat_payload_for_provider(spec.kind, request))
+        .map_err(|error| AppError::Json(error.to_string()))?;
+    let provider_request = HttpDebugRequest {
+        method: "POST".to_string(),
+        url: url.clone(),
+        headers: debug_request_headers(spec),
+        body: body.clone(),
+    };
+    let response = authorized(client.post(url), spec, token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| map_network_error(spec, EndpointCategory::Chat, error))?;
+    let status = response.status();
+    let headers = debug_response_headers(response.headers());
+    let raw = response.text().await.map_err(AppError::from)?;
+    if !status.is_success() {
+        return Err(AppError::ProviderHttp(map_http_status(
+            spec.kind.to_string(),
+            EndpointCategory::Chat,
+            status,
+            headers.get("retry-after").cloned(),
+            short_reason(&raw),
+        )));
+    }
+    let parsed = parse_chat_response(spec, &raw)?;
+    let provider_response = HttpDebugResponse {
+        status: status.as_u16(),
+        headers,
+        body: parse_json_or_raw(&raw),
+    };
+    Ok((
+        parsed,
+        ProviderExchangeDebug {
+            request: provider_request,
+            response: provider_response,
+        },
+    ))
+}
+
 fn endpoint(base_url: &str, path: &str) -> String {
     format!("{}/{}", base_url.trim_end_matches('/'), path)
 }
@@ -73,6 +124,32 @@ fn authorized(
     spec.extra_headers.iter().fold(request, |request, header| {
         request.header(header.name, header.value)
     })
+}
+
+fn debug_request_headers(spec: ProviderSpec) -> BTreeMap<String, String> {
+    let mut headers = BTreeMap::new();
+    headers.insert("authorization".to_string(), "Bearer [redacted]".to_string());
+    headers.insert("content-type".to_string(), "application/json".to_string());
+    for header in spec.extra_headers {
+        headers.insert(header.name.to_ascii_lowercase(), header.value.to_string());
+    }
+    headers
+}
+
+fn debug_response_headers(headers: &reqwest::header::HeaderMap) -> BTreeMap<String, String> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_ascii_lowercase(), value.to_string()))
+        })
+        .collect()
+}
+
+fn parse_json_or_raw(raw: &str) -> serde_json::Value {
+    serde_json::from_str(raw).unwrap_or_else(|_| serde_json::json!({ "raw": raw }))
 }
 
 async fn response_text_or_error(
