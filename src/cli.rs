@@ -47,6 +47,8 @@ enum Command {
     },
     Ask(AskArgs),
     Chat(ChatArgs),
+    #[command(about = "Select active profile from a menu or by name")]
+    Use(ProfileUseArgs),
     #[command(about = "Start the local web UI")]
     Web(WebArgs),
     #[command(about = "Run the same prompt once without controls and once with response controls")]
@@ -64,10 +66,7 @@ enum Command {
 enum ProfileCommand {
     Add(ProfileAddArgs),
     List,
-    Use {
-        #[arg(required = true, num_args = 1..)]
-        name: Vec<String>,
-    },
+    Use(ProfileUseArgs),
     Remove {
         #[arg(required = true, num_args = 1..)]
         name: Vec<String>,
@@ -83,6 +82,12 @@ struct ProfileAddArgs {
     model: Option<String>,
     #[arg(long)]
     base_url: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct ProfileUseArgs {
+    #[arg(num_args = 0..)]
+    name: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -399,6 +404,7 @@ async fn run_with_store(cli: &Cli, secrets: &dyn SecretStore) -> Result<(), AppE
         Command::Models { command } => models_command(command, secrets).await,
         Command::Ask(args) => ask_command(args, secrets).await,
         Command::Chat(args) => chat_command(args, secrets).await,
+        Command::Use(args) => use_profile_command(args),
         Command::Web(args) => crate::web::serve(args.listen).await,
         Command::Compare(args) => compare_command(args, secrets).await,
         Command::CompareGoal(args) => compare_goal_command(args, secrets).await,
@@ -453,8 +459,8 @@ async fn profile_command(
                 );
             }
         }
-        ProfileCommand::Use { name } => {
-            let name = profile_name_from_parts(name);
+        ProfileCommand::Use(args) => {
+            let name = select_profile_name(&config, &args.name)?;
             config.use_profile(&name)?;
             config.save()?;
             println!("Active profile: {name}");
@@ -472,6 +478,65 @@ async fn profile_command(
 
 fn profile_name_from_parts(parts: &[String]) -> String {
     parts.join(" ")
+}
+
+fn use_profile_command(args: &ProfileUseArgs) -> Result<(), AppError> {
+    let mut config = AppConfig::load()?;
+    let name = select_profile_name(&config, &args.name)?;
+    config.use_profile(&name)?;
+    config.save()?;
+    println!("Active profile: {name}");
+    Ok(())
+}
+
+fn select_profile_name(config: &AppConfig, parts: &[String]) -> Result<String, AppError> {
+    if !parts.is_empty() {
+        return Ok(profile_name_from_parts(parts));
+    }
+    if config.profiles.is_empty() {
+        return Err(AppError::InvalidInput(
+            "No profiles found. Run `aiteach setup` or `aiteach profile add` first.".to_string(),
+        ));
+    }
+
+    println!("Choose active profile.");
+    for (index, (name, profile)) in config.profiles.iter().enumerate() {
+        let active = if config.active_profile.as_deref() == Some(name) {
+            " active"
+        } else {
+            ""
+        };
+        println!(
+            "  {}. {} [{}] {}{}",
+            index + 1,
+            name,
+            profile.provider,
+            profile.model,
+            active
+        );
+    }
+
+    loop {
+        let label = match config.active_profile.as_deref() {
+            Some(active) => format!("Profile number or name [{active}]"),
+            None => "Profile number or name".to_string(),
+        };
+        let raw = prompt(&label)?;
+        if raw.trim().is_empty()
+            && let Some(active) = config.active_profile.as_deref()
+        {
+            return Ok(active.to_string());
+        }
+        if let Ok(index) = raw.parse::<usize>()
+            && let Some(name) = config.profiles.keys().nth(index.saturating_sub(1))
+        {
+            return Ok(name.to_string());
+        }
+        if config.profiles.contains_key(raw.trim()) {
+            return Ok(raw.trim().to_string());
+        }
+        println!("Choose a number from the list or type an existing profile name.");
+    }
 }
 
 async fn setup_command(args: &SetupArgs, secrets: &dyn SecretStore) -> Result<(), AppError> {
@@ -946,11 +1011,36 @@ mod tests {
         let Command::Profile { command } = cli.command else {
             panic!("expected profile command");
         };
-        let ProfileCommand::Use { name } = command else {
+        let ProfileCommand::Use(args) = command else {
             panic!("expected profile use command");
         };
 
-        assert_eq!(profile_name_from_parts(&name), "ВуDeepSeek pro");
+        assert_eq!(profile_name_from_parts(&args.name), "ВуDeepSeek pro");
+    }
+
+    #[test]
+    fn profile_use_can_open_interactive_menu_without_name() {
+        let cli = Cli::try_parse_from(["aiteach", "profile", "use"]).expect("parse profile use");
+
+        let Command::Profile { command } = cli.command else {
+            panic!("expected profile command");
+        };
+        let ProfileCommand::Use(args) = command else {
+            panic!("expected profile use command");
+        };
+
+        assert!(args.name.is_empty());
+    }
+
+    #[test]
+    fn top_level_use_accepts_profile_name() {
+        let cli = Cli::try_parse_from(["aiteach", "use", "ВуDeepSeek", "pro"]).expect("parse use");
+
+        let Command::Use(args) = cli.command else {
+            panic!("expected use command");
+        };
+
+        assert_eq!(profile_name_from_parts(&args.name), "ВуDeepSeek pro");
     }
 
     #[test]
