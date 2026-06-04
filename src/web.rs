@@ -969,6 +969,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       for (const [id, constraint] of currentConstraints) {
         const element = $(id);
         if (!element) continue;
+        element.disabled = !constraint.supported;
         element.closest('label')?.classList.toggle('unsupported', !constraint.supported);
         if (constraint.min === null || constraint.min === undefined) element.removeAttribute('min');
         else element.min = String(constraint.min);
@@ -987,9 +988,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
         if (!element) continue;
         const label = element.closest('label');
         label?.classList.remove('field-warning');
-        const hasValue = element.type === 'checkbox' ? element.checked : element.value.trim() !== '';
         if (!constraint.supported) {
-          if (hasValue) {
+          if (hasUserEditedUnsupportedValue(element)) {
             messages.push(`${labelText(label)}: ${constraint.note}`);
             label?.classList.add('field-warning');
           }
@@ -1019,6 +1019,15 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
     function labelText(label) {
       return (label?.textContent || 'parameter').trim().split(/\s+/)[0];
+    }
+
+    function hasUserEditedUnsupportedValue(element) {
+      if (element.type === 'checkbox') {
+        return element.checked !== element.defaultChecked;
+      }
+      const value = element.value.trim();
+      const defaultValue = element.defaultValue.trim();
+      return value !== '' && value !== defaultValue;
     }
 
     function extraParamsValue() {
