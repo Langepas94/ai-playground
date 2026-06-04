@@ -65,6 +65,7 @@ async fn providers() -> Json<ProvidersResponse> {
                     name: spec.display_name.to_string(),
                     default_base_url: spec.default_base_url.to_string(),
                     default_model: spec.default_model.to_string(),
+                    parameter_constraints: parameter_constraints(*provider),
                 }
             })
             .collect(),
@@ -139,6 +140,188 @@ struct ProviderView {
     name: String,
     default_base_url: String,
     default_model: String,
+    parameter_constraints: Vec<ParameterConstraintView>,
+}
+
+#[derive(Debug, Serialize)]
+struct ParameterConstraintView {
+    id: &'static str,
+    supported: bool,
+    min: Option<f32>,
+    max: Option<f32>,
+    step: Option<f32>,
+    note: &'static str,
+}
+
+fn parameter_constraints(provider: ProviderKind) -> Vec<ParameterConstraintView> {
+    let mut constraints = openrouter_like_constraints();
+    match provider {
+        ProviderKind::OpenRouter | ProviderKind::OpenAiCompatible => constraints,
+        ProviderKind::DeepSeek => {
+            mark_unsupported(
+                &mut constraints,
+                &[
+                    "maxCompletionTokens",
+                    "topK",
+                    "minP",
+                    "topA",
+                    "presencePenalty",
+                    "frequencyPenalty",
+                    "repetitionPenalty",
+                    "n",
+                    "store",
+                    "parallelToolCalls",
+                ],
+                "DeepSeek docs: unsupported/deprecated; the API will ignore this parameter.",
+            );
+            constraints
+        }
+        ProviderKind::Kimi => {
+            mark_unsupported(
+                &mut constraints,
+                &[
+                    "maxTokens",
+                    "temperature",
+                    "topP",
+                    "topK",
+                    "minP",
+                    "topA",
+                    "presencePenalty",
+                    "frequencyPenalty",
+                    "repetitionPenalty",
+                    "n",
+                    "store",
+                    "parallelToolCalls",
+                ],
+                "Kimi current docs do not list this parameter for Chat Completion.",
+            );
+            constraints
+        }
+        ProviderKind::GigaChat => {
+            mark_unsupported(
+                &mut constraints,
+                &[
+                    "maxCompletionTokens",
+                    "topK",
+                    "minP",
+                    "topA",
+                    "presencePenalty",
+                    "frequencyPenalty",
+                    "store",
+                    "parallelToolCalls",
+                ],
+                "GigaChat docs do not list this parameter for Chat Completion.",
+            );
+            set_constraint(
+                &mut constraints,
+                "temperature",
+                Some(0.01),
+                None,
+                "GigaChat docs: temperature must be > 0; values above 2 can be too random.",
+            );
+            constraints
+        }
+    }
+}
+
+fn openrouter_like_constraints() -> Vec<ParameterConstraintView> {
+    vec![
+        constraint("maxTokens", true, Some(1.0), None, Some(1.0), ">= 1"),
+        constraint(
+            "maxCompletionTokens",
+            true,
+            Some(1.0),
+            None,
+            Some(1.0),
+            ">= 1",
+        ),
+        constraint("temperature", true, Some(0.0), Some(2.0), Some(0.1), "0..2"),
+        constraint("topP", true, Some(0.0), Some(1.0), Some(0.05), "0..1"),
+        constraint("topK", true, Some(0.0), None, Some(1.0), ">= 0"),
+        constraint("minP", true, Some(0.0), Some(1.0), Some(0.01), "0..1"),
+        constraint("topA", true, Some(0.0), Some(1.0), Some(0.01), "0..1"),
+        constraint(
+            "presencePenalty",
+            true,
+            Some(-2.0),
+            Some(2.0),
+            Some(0.1),
+            "-2..2",
+        ),
+        constraint(
+            "frequencyPenalty",
+            true,
+            Some(-2.0),
+            Some(2.0),
+            Some(0.1),
+            "-2..2",
+        ),
+        constraint(
+            "repetitionPenalty",
+            true,
+            Some(0.0),
+            Some(2.0),
+            Some(0.05),
+            "0..2",
+        ),
+        constraint(
+            "topLogprobs",
+            true,
+            Some(0.0),
+            Some(20.0),
+            Some(1.0),
+            "0..20",
+        ),
+        constraint("n", true, Some(1.0), None, Some(1.0), ">= 1"),
+        constraint("includeReasoning", true, None, None, None, "boolean"),
+        constraint("logprobs", true, None, None, None, "boolean"),
+        constraint("store", true, None, None, None, "boolean"),
+        constraint("parallelToolCalls", true, None, None, None, "boolean"),
+    ]
+}
+
+fn constraint(
+    id: &'static str,
+    supported: bool,
+    min: Option<f32>,
+    max: Option<f32>,
+    step: Option<f32>,
+    note: &'static str,
+) -> ParameterConstraintView {
+    ParameterConstraintView {
+        id,
+        supported,
+        min,
+        max,
+        step,
+        note,
+    }
+}
+
+fn mark_unsupported(constraints: &mut [ParameterConstraintView], ids: &[&str], note: &'static str) {
+    for constraint in constraints {
+        if ids.contains(&constraint.id) {
+            constraint.supported = false;
+            constraint.note = note;
+        }
+    }
+}
+
+fn set_constraint(
+    constraints: &mut [ParameterConstraintView],
+    id: &str,
+    min: Option<f32>,
+    max: Option<f32>,
+    note: &'static str,
+) {
+    if let Some(constraint) = constraints
+        .iter_mut()
+        .find(|constraint| constraint.id == id)
+    {
+        constraint.min = min;
+        constraint.max = max;
+        constraint.note = note;
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -575,6 +758,27 @@ const INDEX_HTML: &str = r#"<!doctype html>
       border-radius: 6px;
       font-size: 12px;
     }
+    .warnings {
+      display: none;
+      margin: 0;
+      padding: 10px 12px;
+      border: 1px solid #e5bf59;
+      border-radius: 6px;
+      background: #fff8db;
+      color: #65460b;
+      font-size: 13px;
+      line-height: 1.35;
+    }
+    .warnings.visible { display: block; }
+    .field-warning input,
+    .field-warning select,
+    .field-warning textarea {
+      border-color: #c7861a;
+      box-shadow: 0 0 0 2px rgba(199, 134, 26, .12);
+    }
+    .unsupported {
+      opacity: .58;
+    }
     .error { color: var(--danger); }
     @media (max-width: 900px) {
       main { width: min(100vw - 20px, 720px); padding-top: 14px; }
@@ -608,6 +812,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
         <div class="group">
           <h2>API параметры</h2>
+          <div id="parameterWarnings" class="warnings"></div>
           <div class="row">
             <label>response_format<select id="responseFormat"><option value="text">text</option><option value="json-object">json_object</option></select></label>
             <label>answer_format<select id="answerFormat"><option value="natural">natural</option><option value="bullets">bullets</option><option value="numbered">numbered</option><option value="short">short</option><option value="steps">steps</option><option value="table">table</option></select></label>
@@ -714,6 +919,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     const status = $('status');
     const providerSelect = $('provider');
     let providers = [];
+    let currentConstraints = new Map();
 
     function setStatus(text, isError = false) {
       status.textContent = text;
@@ -727,6 +933,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
 
     function controlledNumberValue(id) {
+      const constraint = currentConstraints.get(id);
+      if (constraint && !constraint.supported) return null;
       const element = $(id);
       const value = element.value.trim();
       return value === '' ? null : Number(value);
@@ -738,7 +946,62 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
 
     function boolValue(id) {
+      const constraint = currentConstraints.get(id);
+      if (constraint && !constraint.supported) return null;
       return $(id).checked;
+    }
+
+    function applyProviderConstraints(selected) {
+      currentConstraints = new Map((selected.parameter_constraints || []).map((item) => [item.id, item]));
+      for (const [id, constraint] of currentConstraints) {
+        const element = $(id);
+        if (!element) continue;
+        element.closest('label')?.classList.toggle('unsupported', !constraint.supported);
+        if (constraint.min === null || constraint.min === undefined) element.removeAttribute('min');
+        else element.min = String(constraint.min);
+        if (constraint.max === null || constraint.max === undefined) element.removeAttribute('max');
+        else element.max = String(constraint.max);
+        if (constraint.step === null || constraint.step === undefined) element.removeAttribute('step');
+        else element.step = String(constraint.step);
+      }
+      validateParameterConstraints();
+    }
+
+    function validateParameterConstraints() {
+      const messages = [];
+      for (const [id, constraint] of currentConstraints) {
+        const element = $(id);
+        if (!element) continue;
+        const label = element.closest('label');
+        label?.classList.remove('field-warning');
+        const hasValue = element.type === 'checkbox' ? element.checked : element.value.trim() !== '';
+        if (!constraint.supported) {
+          if (hasValue) {
+            messages.push(`${labelText(label)}: ${constraint.note}`);
+            label?.classList.add('field-warning');
+          }
+          continue;
+        }
+        if (element.type === 'number' && element.value.trim() !== '') {
+          const value = Number(element.value);
+          if (constraint.min !== null && constraint.min !== undefined && value < constraint.min) {
+            messages.push(`${labelText(label)}: ${value} меньше минимума ${constraint.min}. ${constraint.note}`);
+            label?.classList.add('field-warning');
+          }
+          if (constraint.max !== null && constraint.max !== undefined && value > constraint.max) {
+            messages.push(`${labelText(label)}: ${value} больше максимума ${constraint.max}. ${constraint.note}`);
+            label?.classList.add('field-warning');
+          }
+        }
+      }
+      const warnings = $('parameterWarnings');
+      warnings.innerHTML = messages.map(escapeHtml).join('<br>');
+      warnings.classList.toggle('visible', messages.length > 0);
+      return messages;
+    }
+
+    function labelText(label) {
+      return (label?.textContent || 'parameter').trim().split(/\s+/)[0];
     }
 
     function extraParamsValue() {
@@ -772,21 +1035,21 @@ const INDEX_HTML: &str = r#"<!doctype html>
           response_format: $('responseFormat').value,
           answer_format: $('answerFormat').value,
           max_tokens: controlledNumberValue('maxTokens'),
-          max_completion_tokens: numberValue('maxCompletionTokens'),
+          max_completion_tokens: controlledNumberValue('maxCompletionTokens'),
           temperature: controlledNumberValue('temperature'),
           top_p: controlledNumberValue('topP'),
-          top_k: numberValue('topK'),
-          min_p: numberValue('minP'),
-          top_a: numberValue('topA'),
+          top_k: controlledNumberValue('topK'),
+          min_p: controlledNumberValue('minP'),
+          top_a: controlledNumberValue('topA'),
           presence_penalty: controlledNumberValue('presencePenalty'),
           frequency_penalty: controlledNumberValue('frequencyPenalty'),
-          repetition_penalty: numberValue('repetitionPenalty'),
+          repetition_penalty: controlledNumberValue('repetitionPenalty'),
           seed: numberValue('seed'),
           reasoning_effort: textValue('reasoningEffort'),
           include_reasoning: boolValue('includeReasoning'),
           verbosity: textValue('verbosity'),
           logprobs: boolValue('logprobs'),
-          top_logprobs: numberValue('topLogprobs'),
+          top_logprobs: controlledNumberValue('topLogprobs'),
           n: controlledNumberValue('n'),
           store: boolValue('store'),
           parallel_tool_calls: boolValue('parallelToolCalls'),
@@ -845,6 +1108,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       $('baseUrl').value = selected.default_base_url;
       $('customModel').value = '';
       setModelOptions([selected.default_model], selected.default_model);
+      applyProviderConstraints(selected);
     }
 
     function setModelOptions(models, selectedModel) {
@@ -909,6 +1173,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
 
     providerSelect.addEventListener('change', applyProviderDefaults);
+    document.querySelectorAll('input, select, textarea').forEach((element) => {
+      element.addEventListener('input', validateParameterConstraints);
+      element.addEventListener('change', validateParameterConstraints);
+    });
     $('loadModels').addEventListener('click', loadModels);
     $('send').addEventListener('click', sendPrompt);
     $('clear').addEventListener('click', () => {
