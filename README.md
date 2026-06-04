@@ -102,6 +102,8 @@ aiteach web
 http://127.0.0.1:8787
 ```
 
+Пока открыта вкладка, процесс `aiteach web` должен продолжать работать. Если сервер остановлен, браузер покажет сетевую ошибку вроде `Failed to fetch`; запустите `aiteach web` снова и обновите страницу.
+
 Можно выбрать другой адрес:
 
 ```bash
@@ -119,16 +121,43 @@ aiteach web --listen 127.0.0.1:9000
 5. Если нужной модели нет в списке, впишите ее вручную в `Custom model id`; при отправке запроса это поле имеет приоритет над выпадающим списком.
 6. Введите prompt, настройте параметры и нажмите `Отправить`.
 
+Веб-форма показывает дефолтные значения для основных ручек:
+
+- `max_tokens`: `1024`
+- `temperature`: `1`
+- `top_p`: `1`
+- `presence_penalty`: `0`
+- `frequency_penalty`: `0`
+- `reasoning_effort`: `medium`
+- `verbosity`: `medium`
+- `n`: `1`
+- `parallel_tool_calls`: `true`
+
 Параметры запроса:
 
 - `response_format`
 - `answer_format`
 - `max_tokens`
+- `max_completion_tokens`
 - `temperature`
 - `top_p`
+- `top_k`
+- `min_p`
+- `top_a`
 - `presence_penalty`
 - `frequency_penalty`
+- `repetition_penalty`
 - `seed`
+- `reasoning_effort`
+- `include_reasoning`
+- `verbosity`
+- `logprobs`
+- `top_logprobs`
+- `n`
+- `store`
+- `parallel_tool_calls`
+- `user`
+- `service_tier`
 - `stop`
 - `answer_prefix`
 - `answer_suffix`
@@ -136,6 +165,17 @@ aiteach web --listen 127.0.0.1:9000
 - `quote_question`
 - `format_instruction`
 - `completion_instruction`
+
+Для редких или новых provider-specific параметров используйте поле `extra API parameters`. Оно принимает JSON object и добавляет его поля в тело запроса к провайдеру:
+
+```json
+{
+  "web_search_options": {},
+  "metadata": {
+    "source": "aiteach"
+  }
+}
+```
 
 Токен в веб-форме отправляется только в локальный backend для конкретного запроса и не сохраняется в config/keychain.
 

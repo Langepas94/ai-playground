@@ -177,11 +177,27 @@ struct WebResponseControl {
     response_format: Option<String>,
     answer_format: Option<String>,
     max_tokens: Option<u32>,
+    max_completion_tokens: Option<u32>,
     temperature: Option<f32>,
     top_p: Option<f32>,
+    top_k: Option<u32>,
+    min_p: Option<f32>,
+    top_a: Option<f32>,
     presence_penalty: Option<f32>,
     frequency_penalty: Option<f32>,
+    repetition_penalty: Option<f32>,
     seed: Option<i64>,
+    reasoning_effort: Option<String>,
+    include_reasoning: Option<bool>,
+    verbosity: Option<String>,
+    logprobs: Option<bool>,
+    top_logprobs: Option<u32>,
+    n: Option<u32>,
+    store: Option<bool>,
+    parallel_tool_calls: Option<bool>,
+    user: Option<String>,
+    service_tier: Option<String>,
+    extra_params: Option<serde_json::Map<String, serde_json::Value>>,
     stop: Vec<String>,
     answer_prefix: Option<String>,
     answer_suffix: Option<String>,
@@ -207,11 +223,27 @@ impl WebResponseControl {
                 _ => AnswerFormat::Natural,
             },
             max_tokens: self.max_tokens,
+            max_completion_tokens: self.max_completion_tokens,
             temperature: self.temperature,
             top_p: self.top_p,
+            top_k: self.top_k,
+            min_p: self.min_p,
+            top_a: self.top_a,
             presence_penalty: self.presence_penalty,
             frequency_penalty: self.frequency_penalty,
+            repetition_penalty: self.repetition_penalty,
             seed: self.seed,
+            reasoning_effort: blank_to_none(self.reasoning_effort),
+            include_reasoning: self.include_reasoning,
+            verbosity: blank_to_none(self.verbosity),
+            logprobs: self.logprobs,
+            top_logprobs: self.top_logprobs,
+            n: self.n,
+            store: self.store,
+            parallel_tool_calls: self.parallel_tool_calls,
+            user: blank_to_none(self.user),
+            service_tier: blank_to_none(self.service_tier),
+            extra_params: self.extra_params.unwrap_or_default(),
             stop: self.stop,
             answer_prefix: blank_to_none(self.answer_prefix),
             answer_suffix: blank_to_none(self.answer_suffix),
@@ -479,18 +511,47 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <label>answer_format<select id="answerFormat"><option value="natural">natural</option><option value="bullets">bullets</option><option value="numbered">numbered</option><option value="short">short</option><option value="steps">steps</option><option value="table">table</option></select></label>
           </div>
           <div class="row">
-            <label>max_tokens<input id="maxTokens" type="number" min="1" step="1"></label>
+            <label>max_tokens<input id="maxTokens" type="number" min="1" step="1" value="1024" data-default="1024"></label>
+            <label>max_completion_tokens<input id="maxCompletionTokens" type="number" min="1" step="1"></label>
+          </div>
+          <div class="row">
+            <label>temperature<input id="temperature" type="number" min="0" max="2" step="0.1" value="1" data-default="1"></label>
+            <label>top_p<input id="topP" type="number" min="0" max="1" step="0.05" value="1" data-default="1"></label>
+          </div>
+          <div class="row">
+            <label>top_k<input id="topK" type="number" min="0" step="1"></label>
+            <label>min_p<input id="minP" type="number" min="0" max="1" step="0.01"></label>
+          </div>
+          <div class="row">
+            <label>top_a<input id="topA" type="number" min="0" max="1" step="0.01"></label>
             <label>seed<input id="seed" type="number" step="1"></label>
           </div>
           <div class="row">
-            <label>temperature<input id="temperature" type="number" min="0" max="2" step="0.1"></label>
-            <label>top_p<input id="topP" type="number" min="0" max="1" step="0.05"></label>
+            <label>presence_penalty<input id="presencePenalty" type="number" min="-2" max="2" step="0.1" value="0" data-default="0"></label>
+            <label>frequency_penalty<input id="frequencyPenalty" type="number" min="-2" max="2" step="0.1" value="0" data-default="0"></label>
+          </div>
+          <label>repetition_penalty<input id="repetitionPenalty" type="number" min="0" step="0.05"></label>
+          <label>stop sequences<textarea id="stop" placeholder="Одна stop sequence на строку"></textarea></label>
+        </div>
+
+        <div class="group">
+          <h2>Reasoning и вывод</h2>
+          <div class="row">
+            <label>reasoning_effort<select id="reasoningEffort"><option value="" selected>provider default</option><option value="none">none</option><option value="minimal">minimal</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select></label>
+            <label>verbosity<select id="verbosity"><option value="" selected>provider default</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></label>
           </div>
           <div class="row">
-            <label>presence_penalty<input id="presencePenalty" type="number" min="-2" max="2" step="0.1"></label>
-            <label>frequency_penalty<input id="frequencyPenalty" type="number" min="-2" max="2" step="0.1"></label>
+            <label>n<input id="n" type="number" min="1" step="1" value="1" data-default="1"></label>
+            <label>top_logprobs<input id="topLogprobs" type="number" min="0" max="20" step="1"></label>
           </div>
-          <label>stop sequences<textarea id="stop" placeholder="Одна stop sequence на строку"></textarea></label>
+          <div class="row">
+            <label>service_tier<select id="serviceTier"><option value="">provider default</option><option value="auto">auto</option><option value="default">default</option><option value="flex">flex</option><option value="priority">priority</option></select></label>
+            <label>user<input id="user" spellcheck="false"></label>
+          </div>
+          <label class="inline"><input id="includeReasoning" type="checkbox" data-default="false"> include_reasoning</label>
+          <label class="inline"><input id="logprobs" type="checkbox" data-default="false"> logprobs</label>
+          <label class="inline"><input id="store" type="checkbox" data-default="false"> store</label>
+          <label class="inline"><input id="parallelToolCalls" type="checkbox" checked data-default="true"> parallel_tool_calls</label>
         </div>
 
         <div class="group">
@@ -503,6 +564,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <label class="inline"><input id="quoteQuestion" type="checkbox"> quote_question</label>
           <label>format_instruction<textarea id="formatInstruction"></textarea></label>
           <label>completion_instruction<textarea id="completionInstruction"></textarea></label>
+        </div>
+
+        <div class="group">
+          <h2>Дополнительный JSON</h2>
+          <label>extra API parameters<textarea id="extraParams" placeholder='{"web_search_options": {}, "metadata": {"source": "aiteach"}}'></textarea></label>
         </div>
       </section>
 
@@ -532,13 +598,41 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
 
     function numberValue(id) {
-      const value = $(id).value.trim();
+      const element = $(id);
+      const value = element.value.trim();
       return value === '' ? null : Number(value);
+    }
+
+    function controlledNumberValue(id) {
+      const element = $(id);
+      const value = element.value.trim();
+      if (value === '') return null;
+      if (element.dataset.default !== undefined && value === element.dataset.default) return null;
+      return Number(value);
     }
 
     function textValue(id) {
       const value = $(id).value;
       return value.trim() === '' ? null : value;
+    }
+
+    function boolValue(id) {
+      const element = $(id);
+      const checked = element.checked;
+      if (element.dataset.default !== undefined && String(checked) === element.dataset.default) {
+        return null;
+      }
+      return checked;
+    }
+
+    function extraParamsValue() {
+      const raw = $('extraParams').value.trim();
+      if (!raw) return {};
+      const parsed = JSON.parse(raw);
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+        throw new Error('extra API parameters должен быть JSON object');
+      }
+      return parsed;
     }
 
     function providerPayload() {
@@ -561,12 +655,28 @@ const INDEX_HTML: &str = r#"<!doctype html>
         control: {
           response_format: $('responseFormat').value,
           answer_format: $('answerFormat').value,
-          max_tokens: numberValue('maxTokens'),
-          temperature: numberValue('temperature'),
-          top_p: numberValue('topP'),
-          presence_penalty: numberValue('presencePenalty'),
-          frequency_penalty: numberValue('frequencyPenalty'),
+          max_tokens: controlledNumberValue('maxTokens'),
+          max_completion_tokens: numberValue('maxCompletionTokens'),
+          temperature: controlledNumberValue('temperature'),
+          top_p: controlledNumberValue('topP'),
+          top_k: numberValue('topK'),
+          min_p: numberValue('minP'),
+          top_a: numberValue('topA'),
+          presence_penalty: controlledNumberValue('presencePenalty'),
+          frequency_penalty: controlledNumberValue('frequencyPenalty'),
+          repetition_penalty: numberValue('repetitionPenalty'),
           seed: numberValue('seed'),
+          reasoning_effort: textValue('reasoningEffort'),
+          include_reasoning: boolValue('includeReasoning'),
+          verbosity: textValue('verbosity'),
+          logprobs: boolValue('logprobs'),
+          top_logprobs: numberValue('topLogprobs'),
+          n: controlledNumberValue('n'),
+          store: boolValue('store'),
+          parallel_tool_calls: boolValue('parallelToolCalls'),
+          user: textValue('user'),
+          service_tier: textValue('serviceTier'),
+          extra_params: extraParamsValue(),
           stop: $('stop').value.split('\n').map((item) => item.trim()).filter(Boolean),
           answer_prefix: textValue('answerPrefix'),
           answer_suffix: textValue('answerSuffix'),
@@ -579,11 +689,16 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
 
     async function requestJson(url, body) {
-      const response = await fetch(url, {
-        method: body ? 'POST' : 'GET',
-        headers: body ? { 'Content-Type': 'application/json' } : {},
-        body: body ? JSON.stringify(body) : undefined
-      });
+      let response;
+      try {
+        response = await fetch(url, {
+          method: body ? 'POST' : 'GET',
+          headers: body ? { 'Content-Type': 'application/json' } : {},
+          body: body ? JSON.stringify(body) : undefined
+        });
+      } catch {
+        throw new Error('Локальный сервер недоступен. Запустите `aiteach web` и обновите страницу.');
+      }
       const raw = await response.text();
       let data = {};
       try {
@@ -652,7 +767,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
       setStatus('Жду ответ модели...');
       $('output').textContent = '';
       try {
-        const data = await requestJson('/api/chat', chatPayload());
+        const payload = chatPayload();
+        const data = await requestJson('/api/chat', payload);
         $('output').textContent = data.text;
         setStatus(data.finish_reason ? `Готово: ${data.finish_reason}` : 'Готово');
       } catch (error) {

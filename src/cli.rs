@@ -187,6 +187,11 @@ struct ResponseControlArgs {
         help = "Maximum number of output tokens requested from the provider"
     )]
     max_tokens: Option<u32>,
+    #[arg(
+        long,
+        help = "Maximum number of completion tokens requested from newer providers"
+    )]
+    max_completion_tokens: Option<u32>,
     #[arg(long, help = "Sampling temperature requested from the provider")]
     temperature: Option<f32>,
     #[arg(
@@ -194,15 +199,49 @@ struct ResponseControlArgs {
         help = "Nucleus sampling probability requested from the provider"
     )]
     top_p: Option<f32>,
+    #[arg(long, help = "Top-k sampling requested from providers that support it")]
+    top_k: Option<u32>,
+    #[arg(long, help = "Min-p sampling requested from providers that support it")]
+    min_p: Option<f32>,
+    #[arg(long, help = "Top-a sampling requested from providers that support it")]
+    top_a: Option<f32>,
     #[arg(long, help = "Presence penalty requested from the provider")]
     presence_penalty: Option<f32>,
     #[arg(long, help = "Frequency penalty requested from the provider")]
     frequency_penalty: Option<f32>,
     #[arg(
         long,
+        help = "Repetition penalty requested from providers that support it"
+    )]
+    repetition_penalty: Option<f32>,
+    #[arg(
+        long,
         help = "Deterministic sampling seed, when supported by the provider"
     )]
     seed: Option<i64>,
+    #[arg(
+        long,
+        help = "Reasoning effort, such as none, minimal, low, medium, high, or xhigh"
+    )]
+    reasoning_effort: Option<String>,
+    #[arg(long, help = "Ask provider to include reasoning, when supported")]
+    include_reasoning: Option<bool>,
+    #[arg(long, help = "Verbosity, such as low, medium, or high")]
+    verbosity: Option<String>,
+    #[arg(long, help = "Request token log probabilities, when supported")]
+    logprobs: Option<bool>,
+    #[arg(long, help = "Number of top log probabilities to return")]
+    top_logprobs: Option<u32>,
+    #[arg(long, help = "Number of choices to generate")]
+    n: Option<u32>,
+    #[arg(long, help = "Whether provider may store this completion")]
+    store: Option<bool>,
+    #[arg(long, help = "Whether tools may be called in parallel")]
+    parallel_tool_calls: Option<bool>,
+    #[arg(long, help = "End-user identifier passed to the provider")]
+    user: Option<String>,
+    #[arg(long, help = "Service tier, such as auto, default, flex, or priority")]
+    service_tier: Option<String>,
     #[arg(
         long,
         action = clap::ArgAction::Append,
@@ -289,11 +328,27 @@ impl From<&ResponseControlArgs> for ResponseControl {
                 CliAnswerFormat::Table => AnswerFormat::Table,
             },
             max_tokens: args.max_tokens,
+            max_completion_tokens: args.max_completion_tokens,
             temperature: args.temperature,
             top_p: args.top_p,
+            top_k: args.top_k,
+            min_p: args.min_p,
+            top_a: args.top_a,
             presence_penalty: args.presence_penalty,
             frequency_penalty: args.frequency_penalty,
+            repetition_penalty: args.repetition_penalty,
             seed: args.seed,
+            reasoning_effort: args.reasoning_effort.clone(),
+            include_reasoning: args.include_reasoning,
+            verbosity: args.verbosity.clone(),
+            logprobs: args.logprobs,
+            top_logprobs: args.top_logprobs,
+            n: args.n,
+            store: args.store,
+            parallel_tool_calls: args.parallel_tool_calls,
+            user: args.user.clone(),
+            service_tier: args.service_tier.clone(),
+            extra_params: serde_json::Map::new(),
             stop: args.stop.clone(),
             answer_prefix: args.answer_prefix.clone(),
             answer_suffix: args.answer_suffix.clone(),
