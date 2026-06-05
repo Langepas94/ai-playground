@@ -728,4 +728,71 @@ mod tests {
         assert_eq!(messages[1].role, Role::User);
         assert_eq!(messages[1].content, "Привет");
     }
+
+    /// Баг 2: WebPricing с только output ценой должен конвертироваться в Some(ModelPricing)
+    #[test]
+    fn web_pricing_output_only_creates_model_pricing() {
+        let pricing = WebPricing {
+            input_per_million: None,
+            output_per_million: Some(4.0),
+            cache_hit_input_per_million: None,
+            cache_miss_input_per_million: None,
+            currency: Some("USD".to_string()),
+        };
+
+        let result = pricing.into_model_pricing();
+
+        let mp = result.expect("должен вернуть Some даже без input цены");
+        assert!(mp.input_per_million.is_none());
+        assert!((mp.output_per_million - 4.0).abs() < f64::EPSILON);
+        assert_eq!(mp.currency, "USD");
+    }
+
+    /// Без output цены — ModelPricing не имеет смысла, возвращаем None
+    #[test]
+    fn web_pricing_without_output_returns_none() {
+        let pricing = WebPricing {
+            input_per_million: Some(2.0),
+            output_per_million: None,
+            cache_hit_input_per_million: None,
+            cache_miss_input_per_million: None,
+            currency: None,
+        };
+
+        assert!(pricing.into_model_pricing().is_none());
+    }
+
+    /// Полные цены — оба поля присутствуют
+    #[test]
+    fn web_pricing_with_both_prices_creates_correct_model_pricing() {
+        let pricing = WebPricing {
+            input_per_million: Some(1.5),
+            output_per_million: Some(6.0),
+            cache_hit_input_per_million: Some(0.1),
+            cache_miss_input_per_million: None,
+            currency: Some("USD".to_string()),
+        };
+
+        let mp = pricing.into_model_pricing().expect("Some");
+
+        assert_eq!(mp.input_per_million, Some(1.5));
+        assert_eq!(mp.output_per_million, 6.0);
+        assert_eq!(mp.cache_hit_input_per_million, Some(0.1));
+        assert!(mp.cache_miss_input_per_million.is_none());
+    }
+
+    /// Пустая валюта → дефолт USD
+    #[test]
+    fn web_pricing_blank_currency_defaults_to_usd() {
+        let pricing = WebPricing {
+            input_per_million: None,
+            output_per_million: Some(1.0),
+            cache_hit_input_per_million: None,
+            cache_miss_input_per_million: None,
+            currency: Some("   ".to_string()),
+        };
+
+        let mp = pricing.into_model_pricing().expect("Some");
+        assert_eq!(mp.currency, "USD");
+    }
 }

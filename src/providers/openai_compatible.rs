@@ -868,4 +868,90 @@ mod tests {
         assert!((pricing.input_per_million.unwrap_or(0.0) - 0.7).abs() < f64::EPSILON);
         assert!((pricing.output_per_million - 2.1).abs() < 0.0000000001);
     }
+
+    /// Баг 2: расчёт стоимости без цены за input (DeepSeek) — считается только output
+    #[test]
+    fn configured_cost_with_no_input_price_charges_only_output() {
+        let raw = r#"{
+            "choices": [{ "message": { "content": "ok" }, "finish_reason": "stop" }],
+            "usage": { "prompt_tokens": 1000, "completion_tokens": 500, "total_tokens": 1500 }
+        }"#;
+        let pricing = ModelPricing {
+            currency: "USD".to_string(),
+            input_per_million: None,
+            output_per_million: 4.0,
+            cache_hit_input_per_million: None,
+            cache_miss_input_per_million: None,
+        };
+
+        let response = parse_chat_response(spec(), raw, 1, Some(&pricing)).expect("parse");
+
+        let cost = response.metrics.cost.expect("должна считаться стоимость без input цены");
+        // 500 * 4.0 / 1_000_000 = 0.000002
+        assert!((cost.amount - 0.000002).abs() < 1e-10, "actual: {}", cost.amount);
+        assert_eq!(cost.source, CostSource::ConfiguredPricing);
+    }
+
+    /// Баг 2: ModelPricing из entry без поля input — pricing должен возвращаться (не None)
+    #[test]
+    fn model_pricing_from_entry_with_no_input_field_still_returns_some() {
+        let raw = r#"{
+            "data": [{
+                "id": "free-model",
+                "pricing": { "completion": "0.000001" }
+            }]
+        }"#;
+
+        let models = parse_models_response(spec(), raw).expect("parse");
+
+        let pricing = models[0].pricing.as_ref()
+            .expect("pricing должен быть Some даже без поля input");
+        assert!(pricing.input_per_million.is_none(), "input_per_million должен быть None");
+        assert!((pricing.output_per_million - 1.0).abs() < f64::EPSILON);
+    }
+
+    /// Провайдер возвращает стоимость — она имеет приоритет над configured pricing
+    #[test]
+    fn provider_reported_cost_takes_priority_over_configured_pricing() {
+        let raw = r#"{
+            "choices": [{ "message": { "content": "ok" } }],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 100,
+                "total_tokens": 200,
+                "cost": 0.042
+            }
+        }"#;
+        let pricing = ModelPricing {
+            currency: "USD".to_string(),
+            input_per_million: Some(999.0),
+            output_per_million: 999.0,
+            cache_hit_input_per_million: None,
+            cache_miss_input_per_million: None,
+        };
+
+        let response = parse_chat_response(spec(), raw, 1, Some(&pricing)).expect("parse");
+
+        let cost = response.metrics.cost.expect("cost");
+        assert_eq!(cost.amount, 0.042);
+        assert_eq!(cost.source, CostSource::ProviderReported);
+    }
+
+    /// Без usage нет стоимости
+    #[test]
+    fn no_usage_in_response_means_no_cost() {
+        let raw = r#"{ "choices": [{ "message": { "content": "ok" } }] }"#;
+        let pricing = ModelPricing {
+            currency: "USD".to_string(),
+            input_per_million: Some(2.0),
+            output_per_million: 10.0,
+            cache_hit_input_per_million: None,
+            cache_miss_input_per_million: None,
+        };
+
+        let response = parse_chat_response(spec(), raw, 1, Some(&pricing)).expect("parse");
+
+        assert!(response.metrics.cost.is_none());
+        assert!(response.metrics.usage.is_none());
+    }
 }

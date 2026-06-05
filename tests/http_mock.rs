@@ -209,6 +209,180 @@ async fn missing_token_behavior_is_clear() {
     assert!(error.to_string().contains("ai token set --profile work"));
 }
 
+/// Баг 2: DeepSeek не имеет цены за input — расчёт должен считать только output
+#[tokio::test]
+async fn cost_calculated_with_output_only_pricing() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(bearer_token("secret"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{ "message": { "content": "ok" }, "finish_reason": "stop" }],
+            "usage": { "prompt_tokens": 1000, "completion_tokens": 500, "total_tokens": 1500 }
+        })))
+        .mount(&server)
+        .await;
+
+    let profile = ProfileConfig {
+        provider: ProviderKind::DeepSeek,
+        model: "deepseek-chat".to_string(),
+        base_url: server.uri(),
+        token_ref: "deepseek:test".to_string(),
+    };
+    let client = ReqwestProviderClient::new().expect("client");
+    let response = client
+        .chat_completion(
+            &profile,
+            "secret",
+            ChatRequest {
+                model: "deepseek-chat".to_string(),
+                messages: vec![ChatMessage { role: Role::User, content: "hi".to_string() }],
+                control: ResponseControl::uncontrolled(),
+                pricing: Some(ModelPricing {
+                    currency: "USD".to_string(),
+                    input_per_million: None,   // DeepSeek: нет цены за input
+                    output_per_million: 2.0,
+                    cache_hit_input_per_million: None,
+                    cache_miss_input_per_million: None,
+                }),
+                billing: None,
+            },
+        )
+        .await
+        .expect("chat");
+
+    let cost = response.metrics.cost.expect("cost must be calculated even without input price");
+    // 500 токенов * 2.0 / 1_000_000 = 0.000001
+    assert!((cost.amount - 0.000001).abs() < 1e-10, "actual: {}", cost.amount);
+    assert_eq!(cost.currency, "USD");
+}
+
+/// Баг 4: ошибка провайдера должна содержать имя провайдера, не "unknown"
+#[tokio::test]
+async fn http_error_includes_provider_name_not_unknown() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("Unauthorized"))
+        .mount(&server)
+        .await;
+
+    let profile = ProfileConfig {
+        provider: ProviderKind::OpenRouter,
+        model: "some/model".to_string(),
+        base_url: server.uri(),
+        token_ref: "openrouter:test".to_string(),
+    };
+    let client = ReqwestProviderClient::new().expect("client");
+    let error = client
+        .chat_completion(
+            &profile,
+            "bad-token",
+            ChatRequest {
+                model: "some/model".to_string(),
+                messages: vec![ChatMessage { role: Role::User, content: "hi".to_string() }],
+                control: ResponseControl::uncontrolled(),
+                pricing: None,
+                billing: None,
+            },
+        )
+        .await
+        .expect_err("should fail");
+
+    let msg = error.to_string();
+    assert!(msg.contains("openrouter"), "error должен содержать имя провайдера, получили: {msg}");
+    assert!(!msg.contains("'unknown'"), "не должно быть 'unknown', получили: {msg}");
+}
+
+/// Баг 3: elapsed_ms должен отражать реальное время ответа
+#[tokio::test]
+async fn elapsed_ms_is_measured_after_full_body_received() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(bearer_token("secret"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(50))
+                .set_body_json(json!({
+                    "choices": [{ "message": { "content": "slow reply" }, "finish_reason": "stop" }]
+                })),
+        )
+        .mount(&server)
+        .await;
+
+    let profile = ProfileConfig {
+        provider: ProviderKind::OpenAiCompatible,
+        model: "test-model".to_string(),
+        base_url: server.uri(),
+        token_ref: "openai-compatible:test".to_string(),
+    };
+    let client = ReqwestProviderClient::new().expect("client");
+    let (response, _debug) = client
+        .chat_completion_with_debug(
+            &profile,
+            "secret",
+            ChatRequest {
+                model: "test-model".to_string(),
+                messages: vec![ChatMessage { role: Role::User, content: "hi".to_string() }],
+                control: ResponseControl::uncontrolled(),
+                pricing: None,
+                billing: None,
+            },
+        )
+        .await
+        .expect("chat");
+
+    assert_eq!(response.text, "slow reply");
+    // 50мс задержки → elapsed должен быть хотя бы 30мс (CI может быть медленнее)
+    assert!(
+        response.metrics.elapsed_ms >= 30,
+        "elapsed_ms={} слишком мало — таймер должен стартовать до отправки запроса",
+        response.metrics.elapsed_ms
+    );
+}
+
+/// Список моделей с ценами за output, но без input — должен возвращать pricing
+#[tokio::test]
+async fn list_models_with_output_only_pricing_returns_model_info() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(bearer_token("secret"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{
+                "id": "provider/cheap-model",
+                "pricing": { "completion": "0.000002" }
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let profile = ProfileConfig {
+        provider: ProviderKind::OpenRouter,
+        model: "provider/cheap-model".to_string(),
+        base_url: server.uri(),
+        token_ref: "openrouter:test".to_string(),
+    };
+    let client = ReqwestProviderClient::new().expect("client");
+    let models = client.list_model_info(&profile, "secret").await.expect("models");
+
+    let model = models.iter().find(|m| m.id == "provider/cheap-model").expect("model");
+    let pricing = model.pricing.as_ref().expect("pricing должен присутствовать даже без input цены");
+    assert!(pricing.input_per_million.is_none(), "input_per_million должен быть None");
+    assert!((pricing.output_per_million - 2.0).abs() < f64::EPSILON);
+}
+
+/// При отсутствии токена сообщение об ошибке содержит имя профиля и подсказку
+#[tokio::test]
+async fn missing_token_error_shows_profile_name_and_hint() {
+    let error = AppError::MissingToken { profile: "my-profile".to_string() };
+    let msg = error.to_string();
+
+    assert!(msg.contains("my-profile"), "должно содержать имя профиля");
+    assert!(msg.contains("token set"), "должно содержать подсказку команды");
+}
+
 #[tokio::test]
 async fn rate_limit_maps_retry_after_from_provider() {
     let server = MockServer::start().await;
