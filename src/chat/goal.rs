@@ -270,6 +270,73 @@ mod tests {
         assert!(state.should_stop(ConversationStopMode::Combined));
     }
 
+    /// Инструкция формата включает все required_fields
+    #[test]
+    fn goal_format_instruction_includes_all_required_fields() {
+        let fields = vec!["topic".to_string(), "audience".to_string(), "tone".to_string()];
+        let instruction = goal_format_instruction(&fields);
+
+        assert!(instruction.contains("\"topic\""));
+        assert!(instruction.contains("\"audience\""));
+        assert!(instruction.contains("\"tone\""));
+        assert!(instruction.contains("\"done\":boolean"));
+    }
+
+    /// merge_instruction добавляет к существующей через перенос строки
+    #[test]
+    fn merge_instruction_appends_with_newline() {
+        let result = merge_instruction(Some("первая".to_string()), "вторая".to_string());
+        assert_eq!(result, "первая\nвторая");
+    }
+
+    /// merge_instruction с пустой existing → просто added
+    #[test]
+    fn merge_instruction_with_empty_existing_returns_added() {
+        assert_eq!(merge_instruction(None, "added".to_string()), "added");
+        assert_eq!(
+            merge_instruction(Some("   ".to_string()), "added".to_string()),
+            "added"
+        );
+    }
+
+    /// is_filled корректно обрабатывает разные типы
+    #[test]
+    fn is_filled_handles_various_json_types() {
+        use serde_json::json;
+
+        assert!(!is_filled(&json!(null)));
+        assert!(!is_filled(&json!("")));
+        assert!(!is_filled(&json!("   ")));
+        assert!(!is_filled(&serde_json::Value::Array(vec![])));
+        assert!(is_filled(&json!("hello")));
+        assert!(is_filled(&json!(42)));
+        assert!(is_filled(&json!(false)));
+        assert!(is_filled(&json!(["a"])));
+    }
+
+    /// GoalState: частичное заполнение не считается complete
+    #[test]
+    fn goal_state_partial_fill_is_not_complete() {
+        let mut state = GoalState::new(vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        state
+            .update_from_response(r#"{"fields":{"a":"val","b":"val"},"done":false}"#)
+            .expect("update");
+
+        assert!(!state.is_complete());
+        assert!(!state.should_stop(ConversationStopMode::State));
+    }
+
+    /// GoalState не считает null-поля заполненными
+    #[test]
+    fn goal_state_null_field_is_not_filled() {
+        let mut state = GoalState::new(vec!["topic".to_string()]);
+        state
+            .update_from_response(r#"{"fields":{"topic":null},"done":false}"#)
+            .expect("update");
+
+        assert!(!state.is_complete());
+    }
+
     #[test]
     fn goal_control_forces_json_and_preserves_user_instruction() {
         use crate::providers::ResponseFormat;
