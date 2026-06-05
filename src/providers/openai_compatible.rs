@@ -1,3 +1,5 @@
+use std::{collections::BTreeMap, time::Instant};
+
 use reqwest::Client;
 use reqwest::{StatusCode, header::RETRY_AFTER};
 use serde::{Deserialize, Serialize};
@@ -6,8 +8,9 @@ use crate::{
     config::ProfileConfig,
     errors::{AppError, EndpointCategory, HttpProblem, ProviderHttpError, map_http_status},
     providers::{
-        AuthScheme, ChatMessage, ChatRequest, ChatResponse, ProviderKind, ProviderSpec,
-        ResponseControl, ResponseFormat, StaticHeader,
+        AuthScheme, ChatMessage, ChatRequest, ChatResponse, CostSource, HttpDebugRequest,
+        HttpDebugResponse, ProviderExchangeDebug, ProviderKind, ProviderSpec, RequestCost,
+        RequestMetrics, ResponseControl, ResponseFormat, StaticHeader, TokenUsage,
     },
 };
 
@@ -48,6 +51,7 @@ pub async fn chat_completion(
     request: ChatRequest,
 ) -> Result<ChatResponse, AppError> {
     let url = endpoint(&profile.base_url, "chat/completions");
+    let started = Instant::now();
     let request = authorized(client.post(url), spec, token)
         .json(&chat_payload_for_provider(spec.kind, request))
         .send();
@@ -55,7 +59,57 @@ pub async fn chat_completion(
         .await
         .map_err(|error| map_network_error(spec, EndpointCategory::Chat, error))?;
     let raw = response_text_or_error(response, spec, EndpointCategory::Chat).await?;
-    parse_chat_response(spec, &raw)
+    parse_chat_response(spec, &raw, started.elapsed().as_millis())
+}
+
+pub async fn chat_completion_with_debug(
+    client: &Client,
+    spec: ProviderSpec,
+    profile: &ProfileConfig,
+    token: &str,
+    request: ChatRequest,
+) -> Result<(ChatResponse, ProviderExchangeDebug), AppError> {
+    let url = endpoint(&profile.base_url, "chat/completions");
+    let body = serde_json::to_value(chat_payload_for_provider(spec.kind, request))
+        .map_err(|error| AppError::Json(error.to_string()))?;
+    let provider_request = HttpDebugRequest {
+        method: "POST".to_string(),
+        url: url.clone(),
+        headers: debug_request_headers(spec),
+        body: body.clone(),
+    };
+    let started = Instant::now();
+    let response = authorized(client.post(url), spec, token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| map_network_error(spec, EndpointCategory::Chat, error))?;
+    let elapsed_ms = started.elapsed().as_millis();
+    let status = response.status();
+    let headers = debug_response_headers(response.headers());
+    let raw = response.text().await.map_err(AppError::from)?;
+    if !status.is_success() {
+        return Err(AppError::ProviderHttp(map_http_status(
+            spec.kind.to_string(),
+            EndpointCategory::Chat,
+            status,
+            headers.get("retry-after").cloned(),
+            short_reason(&raw),
+        )));
+    }
+    let parsed = parse_chat_response(spec, &raw, elapsed_ms)?;
+    let provider_response = HttpDebugResponse {
+        status: status.as_u16(),
+        headers,
+        body: parse_json_or_raw(&raw),
+    };
+    Ok((
+        parsed,
+        ProviderExchangeDebug {
+            request: provider_request,
+            response: provider_response,
+        },
+    ))
 }
 
 fn endpoint(base_url: &str, path: &str) -> String {
@@ -73,6 +127,32 @@ fn authorized(
     spec.extra_headers.iter().fold(request, |request, header| {
         request.header(header.name, header.value)
     })
+}
+
+fn debug_request_headers(spec: ProviderSpec) -> BTreeMap<String, String> {
+    let mut headers = BTreeMap::new();
+    headers.insert("authorization".to_string(), "Bearer [redacted]".to_string());
+    headers.insert("content-type".to_string(), "application/json".to_string());
+    for header in spec.extra_headers {
+        headers.insert(header.name.to_ascii_lowercase(), header.value.to_string());
+    }
+    headers
+}
+
+fn debug_response_headers(headers: &reqwest::header::HeaderMap) -> BTreeMap<String, String> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_ascii_lowercase(), value.to_string()))
+        })
+        .collect()
+}
+
+fn parse_json_or_raw(raw: &str) -> serde_json::Value {
+    serde_json::from_str(raw).unwrap_or_else(|_| serde_json::json!({ "raw": raw }))
 }
 
 async fn response_text_or_error(
@@ -198,6 +278,7 @@ pub struct OpenAiReasoning {
 #[derive(Debug, Deserialize)]
 struct OpenAiChatResponse {
     choices: Vec<OpenAiChoice>,
+    usage: Option<OpenAiUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -208,7 +289,16 @@ struct OpenAiChoice {
 
 #[derive(Debug, Deserialize)]
 struct OpenAiChoiceMessage {
-    content: String,
+    content: Option<String>,
+    reasoning_content: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiUsage {
+    prompt_tokens: Option<u32>,
+    completion_tokens: Option<u32>,
+    total_tokens: Option<u32>,
+    cost: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -289,7 +379,11 @@ fn controlled_messages(messages: Vec<ChatMessage>, control: &ResponseControl) ->
     controlled
 }
 
-fn parse_chat_response(spec: ProviderSpec, raw: &str) -> Result<ChatResponse, AppError> {
+fn parse_chat_response(
+    spec: ProviderSpec,
+    raw: &str,
+    elapsed_ms: u128,
+) -> Result<ChatResponse, AppError> {
     let parsed: OpenAiChatResponse = serde_json::from_str(raw).map_err(|error| {
         AppError::ProviderHttp(ProviderHttpError {
             provider: spec.kind.to_string(),
@@ -308,18 +402,40 @@ fn parse_chat_response(spec: ProviderSpec, raw: &str) -> Result<ChatResponse, Ap
             reason: "missing choices[0].message.content".to_string(),
         })
     })?;
-    if choice.message.content.is_empty() {
-        return Err(AppError::ProviderHttp(ProviderHttpError {
-            provider: spec.kind.to_string(),
-            endpoint: EndpointCategory::Chat,
-            status: Some(StatusCode::OK),
-            problem: HttpProblem::UnexpectedFormat,
-            reason: "empty choices[0].message.content".to_string(),
-        }));
-    }
+    let content = choice
+        .message
+        .content
+        .filter(|content| !content.is_empty())
+        .or(choice.message.reasoning_content)
+        .unwrap_or_default();
     Ok(ChatResponse {
-        text: choice.message.content,
+        text: content,
         finish_reason: choice.finish_reason,
+        metrics: RequestMetrics {
+            elapsed_ms,
+            usage: parsed.usage.as_ref().map(token_usage),
+            cost: parsed.usage.and_then(provider_reported_cost),
+        },
+    })
+}
+
+fn token_usage(usage: &OpenAiUsage) -> TokenUsage {
+    let input_tokens = usage.prompt_tokens.unwrap_or_default();
+    let output_tokens = usage.completion_tokens.unwrap_or_default();
+    TokenUsage {
+        input_tokens,
+        output_tokens,
+        total_tokens: usage
+            .total_tokens
+            .unwrap_or_else(|| input_tokens.saturating_add(output_tokens)),
+    }
+}
+
+fn provider_reported_cost(usage: OpenAiUsage) -> Option<RequestCost> {
+    usage.cost.map(|amount| RequestCost {
+        amount,
+        currency: "credits".to_string(),
+        source: CostSource::ProviderReported,
     })
 }
 
@@ -334,4 +450,62 @@ fn parse_models_response(spec: ProviderSpec, raw: &str) -> Result<Vec<String>, A
         })
     })?;
     Ok(parsed.data.into_iter().map(|model| model.id).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_response_parses_provider_reported_metrics() {
+        let raw = r#"{
+            "choices": [{
+                "message": { "content": "hello" },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 4,
+                "total_tokens": 14,
+                "cost": 0.00014
+            }
+        }"#;
+
+        let response = parse_chat_response(spec(), raw, 123).expect("parse response");
+
+        assert_eq!(response.text, "hello");
+        assert_eq!(response.finish_reason.as_deref(), Some("stop"));
+        assert_eq!(response.metrics.elapsed_ms, 123);
+        assert_eq!(
+            response.metrics.usage,
+            Some(TokenUsage {
+                input_tokens: 10,
+                output_tokens: 4,
+                total_tokens: 14,
+            })
+        );
+        let cost = response.metrics.cost.expect("provider-reported cost");
+        assert_eq!(cost.amount, 0.00014);
+        assert_eq!(cost.currency, "credits");
+        assert_eq!(cost.source, CostSource::ProviderReported);
+    }
+
+    #[test]
+    fn chat_response_does_not_guess_cost_without_provider_cost() {
+        let raw = r#"{
+            "choices": [{
+                "message": { "content": "hello" },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 4,
+                "total_tokens": 14
+            }
+        }"#;
+
+        let response = parse_chat_response(spec(), raw, 123).expect("parse response");
+
+        assert_eq!(response.metrics.cost, None);
+    }
 }

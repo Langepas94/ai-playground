@@ -151,7 +151,7 @@ pub async fn ask_once(
     profile: &ProfileConfig,
     prompt: String,
     control: ResponseControl,
-) -> Result<String, AppError> {
+) -> Result<crate::providers::ChatResponse, AppError> {
     let token =
         get_config_profile_token(secrets, config, profile_name, profile)?.ok_or_else(|| {
             AppError::MissingToken {
@@ -172,7 +172,7 @@ pub async fn ask_once(
             },
         )
         .await?;
-    Ok(response.text)
+    Ok(response)
 }
 
 pub async fn compare_response_control(
@@ -183,7 +183,13 @@ pub async fn compare_response_control(
     profile: &ProfileConfig,
     prompt: String,
     controlled: ResponseControl,
-) -> Result<(String, String), AppError> {
+) -> Result<
+    (
+        crate::providers::ChatResponse,
+        crate::providers::ChatResponse,
+    ),
+    AppError,
+> {
     let token =
         get_config_profile_token(secrets, config, profile_name, profile)?.ok_or_else(|| {
             AppError::MissingToken {
@@ -208,12 +214,10 @@ pub async fn compare_response_control(
     };
     let unrestricted = client
         .chat_completion(profile, &token, base_request)
-        .await?
-        .text;
+        .await?;
     let restricted = client
         .chat_completion(profile, &token, controlled_request)
-        .await?
-        .text;
+        .await?;
     Ok((unrestricted, restricted))
 }
 
@@ -537,6 +541,7 @@ pub async fn interactive_chat(
             )
             .await?;
         println!("{}", response.text);
+        eprintln!("{}", format_request_metrics(&response.metrics));
 
         if goal.is_enabled() {
             match goal_state.update_from_response(&response.text) {
@@ -563,6 +568,30 @@ pub async fn interactive_chat(
     Ok(())
 }
 
+pub fn format_request_metrics(metrics: &crate::providers::RequestMetrics) -> String {
+    let usage = metrics
+        .usage
+        .as_ref()
+        .map(|usage| {
+            format!(
+                "tokens: input={} output={} total={}",
+                usage.input_tokens, usage.output_tokens, usage.total_tokens
+            )
+        })
+        .unwrap_or_else(|| "tokens: unavailable".to_string());
+    let cost = metrics
+        .cost
+        .as_ref()
+        .map(|cost| {
+            format!(
+                "cost: {:.8} {} ({})",
+                cost.amount, cost.currency, cost.source
+            )
+        })
+        .unwrap_or_else(|| "cost: unavailable".to_string());
+    format!("time: {} ms\n{usage}\n{cost}", metrics.elapsed_ms)
+}
+
 fn read_terminal_line() -> Result<Option<String>, AppError> {
     let mut bytes = Vec::new();
     let read = io::stdin()
@@ -585,15 +614,16 @@ fn decode_terminal_line(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GoalRun {
     pub mode: ConversationStopMode,
     pub response: String,
+    pub metrics: crate::providers::RequestMetrics,
     pub state_summary: String,
     pub stopped: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GoalComparison {
     pub state: GoalRun,
     pub instruction: GoalRun,
@@ -632,6 +662,7 @@ async fn run_goal_once(
     Ok(GoalRun {
         mode,
         response: response.text,
+        metrics: response.metrics,
         state_summary: state.summary(),
         stopped,
     })

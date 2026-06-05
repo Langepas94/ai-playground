@@ -1,4 +1,4 @@
-use std::{env, fs, path::PathBuf};
+use std::{collections::BTreeMap, env, fs, path::PathBuf};
 
 use async_trait::async_trait;
 use reqwest::{Client, ClientBuilder};
@@ -120,7 +120,7 @@ pub struct ChatMessage {
     pub content: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
 pub enum ResponseFormat {
     #[default]
     Text,
@@ -136,7 +136,7 @@ impl std::fmt::Display for ResponseFormat {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
 pub enum AnswerFormat {
     #[default]
     Natural,
@@ -160,7 +160,7 @@ impl std::fmt::Display for AnswerFormat {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
 pub struct ResponseControl {
     pub format: ResponseFormat,
     pub answer_format: AnswerFormat,
@@ -309,17 +309,74 @@ impl ResponseControl {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
     pub control: ResponseControl,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub total_tokens: u32,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct RequestCost {
+    pub amount: f64,
+    pub currency: String,
+    pub source: CostSource,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CostSource {
+    ProviderReported,
+}
+
+impl std::fmt::Display for CostSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ProviderReported => write!(f, "provider-reported"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct RequestMetrics {
+    pub elapsed_ms: u128,
+    pub usage: Option<TokenUsage>,
+    pub cost: Option<RequestCost>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ChatResponse {
     pub text: String,
     pub finish_reason: Option<String>,
+    pub metrics: RequestMetrics,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ProviderExchangeDebug {
+    pub request: HttpDebugRequest,
+    pub response: HttpDebugResponse,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HttpDebugRequest {
+    pub method: String,
+    pub url: String,
+    pub headers: BTreeMap<String, String>,
+    pub body: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HttpDebugResponse {
+    pub status: u16,
+    pub headers: BTreeMap<String, String>,
+    pub body: serde_json::Value,
 }
 
 #[async_trait]
@@ -417,6 +474,18 @@ impl ReqwestProviderClient {
             ProviderKind::GigaChat => gigachat::bearer_token(&self.client, token).await,
             _ => Ok(token.to_string()),
         }
+    }
+
+    pub async fn chat_completion_with_debug(
+        &self,
+        profile: &ProfileConfig,
+        token: &str,
+        request: ChatRequest,
+    ) -> Result<(ChatResponse, ProviderExchangeDebug), AppError> {
+        let spec = profile.provider.spec();
+        let token = self.bearer_token(profile, token).await?;
+        openai_compatible::chat_completion_with_debug(&self.client, spec, profile, &token, request)
+            .await
     }
 }
 
