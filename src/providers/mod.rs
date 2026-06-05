@@ -437,7 +437,7 @@ pub struct ReqwestProviderClient {
 
 impl ReqwestProviderClient {
     pub fn new() -> Result<Self, AppError> {
-        let builder = Client::builder().timeout(std::time::Duration::from_secs(60));
+        let builder = Client::builder().timeout(std::time::Duration::from_secs(300));
         let client = add_extra_root_certificates(builder)?
             .build()
             .map_err(AppError::from)?;

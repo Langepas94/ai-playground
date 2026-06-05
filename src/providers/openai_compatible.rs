@@ -129,7 +129,10 @@ pub async fn chat_completion_with_debug(
         .map_err(|error| map_network_error(spec, EndpointCategory::Chat, error))?;
     let status = response.status();
     let headers = debug_response_headers(response.headers());
-    let raw = response.text().await.map_err(AppError::from)?;
+    let raw = response
+        .text()
+        .await
+        .map_err(|error| map_network_error(spec, EndpointCategory::Chat, error))?;
     let elapsed_ms = started.elapsed().as_millis();
     if !status.is_success() {
         return Err(AppError::ProviderHttp(map_http_status(
@@ -217,7 +220,10 @@ async fn response_text_or_error(
         .get(RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
         .map(ToString::to_string);
-    let body = response.text().await.map_err(AppError::from)?;
+    let body = response
+        .text()
+        .await
+        .map_err(|error| map_network_error(spec, endpoint.clone(), error))?;
     if status.is_success() {
         return Ok(body);
     }

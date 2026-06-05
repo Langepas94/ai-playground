@@ -826,27 +826,57 @@
       return data;
     }
 
+    // ── Model list cache ──────────────────────────────────────────────────────
+    function persistModelList() {
+      const provider = currentProvider();
+      const ids = [...$('model').options].map((o) => o.value);
+      if (ids.length > 1 || (ids.length === 1 && ids[0] !== providers.find((p) => p.id === provider)?.default_model)) {
+        localStorage.setItem(`ai_models:${provider}`, JSON.stringify(ids));
+      }
+    }
+    function restoreModelList() {
+      const provider = currentProvider();
+      const raw = localStorage.getItem(`ai_models:${provider}`);
+      if (!raw) return null;
+      try { return JSON.parse(raw).map((id) => ({ id, pricing: null })); } catch { return null; }
+    }
+    function persistSelectedModel() {
+      localStorage.setItem(`ai_sel:${currentProvider()}`, selectedModel());
+    }
+    function restoreSelectedModel() {
+      return localStorage.getItem(`ai_sel:${currentProvider()}`) || null;
+    }
+
     function applyProviderDefaults() {
       const selected = providers.find((item) => item.id === providerSelect.value);
       if (!selected) return;
       $('baseUrl').value = selected.default_base_url;
       $('customModel').value = '';
+      // Reset maps for new provider, then restore from cache
+      modelPricingById = new Map();
+      userPricingOverrides = new Map();
       restoreModelPricing();
       restoreUserOverrides();
-      setModelOptions([{ id: selected.default_model, pricing: null }], selected.default_model);
+      const cached = restoreModelList();
+      const savedModel = restoreSelectedModel();
+      setModelOptions(cached || [{ id: selected.default_model, pricing: null }], savedModel || selected.default_model);
       applyProviderConstraints(selected);
     }
 
     function setModelOptions(models, selectedModel) {
       const normalized = models.map((model) => typeof model === 'string' ? { id: model, pricing: null } : model).filter((model) => model?.id);
       const uniqueModels = [...new Map(normalized.map((model) => [model.id, model])).values()];
-      modelPricingById = new Map(uniqueModels.filter((model) => model.pricing).map((model) => [model.id, model.pricing]));
+      // Merge API pricing INTO existing map (preserves localStorage-restored pricing)
+      for (const model of uniqueModels) {
+        if (model.pricing) modelPricingById.set(model.id, model.pricing);
+      }
       $('model').innerHTML = uniqueModels.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.id)}</option>`).join('');
       if (selectedModel && uniqueModels.some((model) => model.id === selectedModel)) {
         $('model').value = selectedModel;
       }
       applySelectedModelPricing();
       persistModelPricing();
+      persistModelList();
     }
 
     function escapeHtml(value) {
@@ -867,8 +897,6 @@
       providerSelect.innerHTML = providers.map((item) => `<option value="${item.id}">${item.name}</option>`).join('');
       resetTokenOverrideForProvider();
       applyProviderDefaults();
-      restoreModelPricing();
-      restoreUserOverrides();
       setStatus('Готово');
     }
 
@@ -917,8 +945,8 @@
       applyProviderDefaults();
     });
     $('token').addEventListener('input', markTokenOverrideProvider);
-    $('model').addEventListener('change', applySelectedModelPricing);
-    $('customModel').addEventListener('input', applySelectedModelPricing);
+    $('model').addEventListener('change', () => { applySelectedModelPricing(); persistSelectedModel(); });
+    $('customModel').addEventListener('input', () => { applySelectedModelPricing(); persistSelectedModel(); });
     ['priceInput', 'priceOutput', 'priceCacheHitInput', 'priceCacheMissInput', 'priceCurrency'].forEach((id) => {
       $(id).addEventListener('input', saveCurrentPricingOverride);
     });
