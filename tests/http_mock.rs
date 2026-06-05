@@ -90,7 +90,7 @@ async fn chat_completion_calculates_cost_from_configured_pricing() {
                 control: ResponseControl::uncontrolled(),
                 pricing: Some(ModelPricing {
                     currency: "USD".to_string(),
-                    input_per_million: 2.0,
+                    input_per_million: Some(2.0),
                     output_per_million: 10.0,
                     cache_hit_input_per_million: None,
                     cache_miss_input_per_million: None,

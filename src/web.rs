@@ -469,7 +469,7 @@ impl WebPricing {
     fn into_model_pricing(self) -> Option<ModelPricing> {
         Some(ModelPricing {
             currency: blank_to_none(self.currency).unwrap_or_else(|| "USD".to_string()),
-            input_per_million: self.input_per_million?,
+            input_per_million: self.input_per_million,
             output_per_million: self.output_per_million?,
             cache_hit_input_per_million: self.cache_hit_input_per_million,
             cache_miss_input_per_million: self.cache_miss_input_per_million,
@@ -1000,7 +1000,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <label>cache hit input / 1M<input id="priceCacheHitInput" type="number" min="0" step="0.000001"></label>
                 <label>cache miss input / 1M<input id="priceCacheMissInput" type="number" min="0" step="0.000001"></label>
               </div>
-              <label>currency<input id="priceCurrency" value="USD" spellcheck="false"></label>
+              <div class="row">
+                <label>currency<input id="priceCurrency" value="USD" spellcheck="false"></label>
+                <label>USD→RUB<input id="rubRate" type="number" min="0" step="0.1" placeholder="Курс, напр. 90"></label>
+              </div>
             </div>
           </details>
           <details class="panel">
@@ -1113,6 +1116,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     const providerSelect = $('provider');
     let providers = [];
     let modelPricingById = new Map();
+    let userPricingOverrides = new Map();
     let currentConstraints = new Map();
     let tokenProvider = null;
 
@@ -1323,7 +1327,29 @@ const INDEX_HTML: &str = r#"<!doctype html>
       if (!$('priceCurrency').value.trim()) $('priceCurrency').value = pricing.currency || 'USD';
     }
 
+    function saveCurrentPricingOverride() {
+      const model = selectedModel();
+      if (!model) return;
+      userPricingOverrides.set(model, {
+        input_per_million: $('priceInput').value,
+        output_per_million: $('priceOutput').value,
+        cache_hit_input_per_million: $('priceCacheHitInput').value,
+        cache_miss_input_per_million: $('priceCacheMissInput').value,
+        currency: $('priceCurrency').value
+      });
+    }
+
     function applySelectedModelPricing() {
+      const model = selectedModel();
+      const override_ = userPricingOverrides.get(model);
+      if (override_) {
+        $('priceInput').value = override_.input_per_million;
+        $('priceOutput').value = override_.output_per_million;
+        $('priceCacheHitInput').value = override_.cache_hit_input_per_million;
+        $('priceCacheMissInput').value = override_.cache_miss_input_per_million;
+        $('priceCurrency').value = override_.currency || 'USD';
+        return;
+      }
       const pricing = selectedModelPricing();
       $('priceInput').value = pricing?.input_per_million ?? '';
       $('priceOutput').value = pricing?.output_per_million ?? '';
@@ -1357,9 +1383,18 @@ const INDEX_HTML: &str = r#"<!doctype html>
       }
       $('metricTime').textContent = `${metrics.elapsed_ms} ms`;
       $('metricTokens').innerHTML = metrics.usage ? tokenLines(metrics.usage) : 'unavailable';
-      $('metricCost').textContent = metrics.cost
-        ? `${Number(metrics.cost.amount).toFixed(8)} ${metrics.cost.currency} (${metrics.cost.source})`
-        : 'unavailable';
+      if (metrics.cost) {
+        const amount = Number(metrics.cost.amount);
+        const rate = parseFloat($('rubRate').value);
+        let costText = `${amount.toFixed(8)} ${metrics.cost.currency}`;
+        if (rate > 0 && metrics.cost.currency === 'USD') {
+          costText += ` ≈ ${(amount * rate).toFixed(6)} ₽`;
+        }
+        costText += ` (${metrics.cost.source})`;
+        $('metricCost').textContent = costText;
+      } else {
+        $('metricCost').textContent = 'unavailable';
+      }
     }
 
     function tokenLines(usage) {
@@ -1431,6 +1466,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
 
     async function init() {
+      const savedRate = localStorage.getItem('rubRate');
+      if (savedRate !== null) $('rubRate').value = savedRate;
+      $('rubRate').addEventListener('input', () => localStorage.setItem('rubRate', $('rubRate').value));
       const data = await requestJson('/api/providers');
       providers = data.providers;
       providerSelect.innerHTML = providers.map((item) => `<option value="${item.id}">${item.name}</option>`).join('');
@@ -1485,6 +1523,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     $('token').addEventListener('input', markTokenOverrideProvider);
     $('model').addEventListener('change', applySelectedModelPricing);
     $('customModel').addEventListener('input', applySelectedModelPricing);
+    ['priceInput', 'priceOutput', 'priceCacheHitInput', 'priceCacheMissInput', 'priceCurrency'].forEach((id) => {
+      $(id).addEventListener('input', saveCurrentPricingOverride);
+    });
     document.querySelectorAll('input, select, textarea').forEach((element) => {
       element.addEventListener('input', validateParameterConstraints);
       element.addEventListener('change', validateParameterConstraints);

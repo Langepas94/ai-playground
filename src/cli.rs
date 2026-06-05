@@ -319,7 +319,7 @@ impl PricingArgs {
             (None, None) => Ok(None),
             (Some(input_per_million), Some(output_per_million)) => Ok(Some(ModelPricing {
                 currency: self.price_currency.clone(),
-                input_per_million,
+                input_per_million: Some(input_per_million),
                 output_per_million,
                 cache_hit_input_per_million: self.cache_hit_input_price_per_million,
                 cache_miss_input_per_million: self.cache_miss_input_price_per_million,

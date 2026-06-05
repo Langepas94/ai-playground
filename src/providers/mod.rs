@@ -330,7 +330,7 @@ pub struct TokenUsage {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ModelPricing {
     pub currency: String,
-    pub input_per_million: f64,
+    pub input_per_million: Option<f64>,
     pub output_per_million: f64,
     pub cache_hit_input_per_million: Option<f64>,
     pub cache_miss_input_per_million: Option<f64>,

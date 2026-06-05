@@ -127,10 +127,10 @@ pub async fn chat_completion_with_debug(
         .send()
         .await
         .map_err(|error| map_network_error(spec, EndpointCategory::Chat, error))?;
-    let elapsed_ms = started.elapsed().as_millis();
     let status = response.status();
     let headers = debug_response_headers(response.headers());
     let raw = response.text().await.map_err(AppError::from)?;
+    let elapsed_ms = started.elapsed().as_millis();
     if !status.is_success() {
         return Err(AppError::ProviderHttp(map_http_status(
             spec.kind.to_string(),
@@ -553,7 +553,7 @@ fn configured_cost(usage: &OpenAiUsage, pricing: &ModelPricing) -> Option<Reques
         (Some(hit), Some(miss), Some(hit_price), Some(miss_price)) => {
             token_cost(hit, hit_price) + token_cost(miss, miss_price)
         }
-        _ => token_cost(input_tokens, pricing.input_per_million),
+        _ => token_cost(input_tokens, pricing.input_per_million.unwrap_or(0.0)),
     };
     let output_cost = token_cost(output_tokens, pricing.output_per_million);
     Some(RequestCost {
@@ -696,11 +696,11 @@ fn parse_models_response(spec: ProviderSpec, raw: &str) -> Result<Vec<ModelInfo>
 }
 
 fn model_pricing_from_entry(pricing: ModelEntryPricing) -> Option<ModelPricing> {
-    let input = pricing.prompt.or(pricing.input)?;
+    let input = pricing.prompt.or(pricing.input);
     let output = pricing.completion.or(pricing.output)?;
     Some(ModelPricing {
         currency: pricing.currency.unwrap_or_else(|| "USD".to_string()),
-        input_per_million: parse_price_per_token(&input)? * 1_000_000.0,
+        input_per_million: input.and_then(|v| parse_price_per_token(&v)).map(|p| p * 1_000_000.0),
         output_per_million: parse_price_per_token(&output)? * 1_000_000.0,
         cache_hit_input_per_million: None,
         cache_miss_input_per_million: None,
@@ -789,7 +789,7 @@ mod tests {
         }"#;
         let pricing = ModelPricing {
             currency: "USD".to_string(),
-            input_per_million: 2.0,
+            input_per_million: Some(2.0),
             output_per_million: 10.0,
             cache_hit_input_per_million: None,
             cache_miss_input_per_million: None,
@@ -821,7 +821,7 @@ mod tests {
         }"#;
         let pricing = ModelPricing {
             currency: "USD".to_string(),
-            input_per_million: 2.0,
+            input_per_million: Some(2.0),
             output_per_million: 10.0,
             cache_hit_input_per_million: Some(0.2),
             cache_miss_input_per_million: Some(2.0),
