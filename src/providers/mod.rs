@@ -316,10 +316,46 @@ pub struct ChatRequest {
     pub control: ResponseControl,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub total_tokens: u32,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct RequestCost {
+    pub amount: f64,
+    pub currency: String,
+    pub source: CostSource,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CostSource {
+    ProviderReported,
+}
+
+impl std::fmt::Display for CostSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ProviderReported => write!(f, "provider-reported"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct RequestMetrics {
+    pub elapsed_ms: u128,
+    pub usage: Option<TokenUsage>,
+    pub cost: Option<RequestCost>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ChatResponse {
     pub text: String,
     pub finish_reason: Option<String>,
+    pub metrics: RequestMetrics,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

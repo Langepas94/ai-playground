@@ -78,7 +78,12 @@ async fn models(
 ) -> Result<Json<ModelsResponse>, WebError> {
     let profile = request.profile()?;
     validate_base_url(&profile.provider.to_string(), &profile.base_url)?;
-    let token = resolve_web_token(state.secrets.as_ref(), &profile, &request.token)?;
+    let token = resolve_web_token(
+        state.secrets.as_ref(),
+        &profile,
+        &request.token,
+        request.token_provider.as_deref(),
+    )?;
     let mut models = state.client.list_models(&profile, &token).await?;
     models.sort();
     Ok(Json(ModelsResponse { models }))
@@ -93,7 +98,12 @@ async fn chat(
     if request.prompt.trim().is_empty() {
         return Err(AppError::InvalidInput("Prompt is required".to_string()).into());
     }
-    let token = resolve_web_token(state.secrets.as_ref(), &profile, &request.token)?;
+    let token = resolve_web_token(
+        state.secrets.as_ref(),
+        &profile,
+        &request.token,
+        request.token_provider.as_deref(),
+    )?;
     let control = request.control.clone().into_control();
     let chat_request = ChatRequest {
         model: profile.model.clone(),
@@ -104,22 +114,13 @@ async fn chat(
         .client
         .chat_completion_with_debug(&profile, &token, chat_request)
         .await?;
-    let backend_response = serde_json::json!({
-        "text": response.text,
-        "finish_reason": response.finish_reason,
-    });
     Ok(Json(ChatWebResponse {
-        text: backend_response["text"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string(),
-        finish_reason: backend_response["finish_reason"]
-            .as_str()
-            .map(ToString::to_string),
+        text: response.text,
+        finish_reason: response.finish_reason,
+        metrics: response.metrics,
         debug: ChatDebugView {
             provider_request: provider_debug.request,
             provider_response: provider_debug.response,
-            backend_response,
         },
     }))
 }
@@ -331,6 +332,7 @@ struct ModelsRequest {
     provider: String,
     base_url: String,
     token: String,
+    token_provider: Option<String>,
 }
 
 impl ModelsRequest {
@@ -355,6 +357,7 @@ struct ChatWebRequest {
     provider: String,
     base_url: String,
     token: String,
+    token_provider: Option<String>,
     model: String,
     system_prompt: Option<String>,
     prompt: String,
@@ -478,6 +481,7 @@ impl WebResponseControl {
 struct ChatWebResponse {
     text: String,
     finish_reason: Option<String>,
+    metrics: crate::providers::RequestMetrics,
     debug: ChatDebugView,
 }
 
@@ -485,16 +489,16 @@ struct ChatWebResponse {
 struct ChatDebugView {
     provider_request: HttpDebugRequest,
     provider_response: HttpDebugResponse,
-    backend_response: serde_json::Value,
 }
 
 fn resolve_web_token(
     secrets: &dyn SecretStore,
     profile: &ProfileConfig,
     token_override: &str,
+    token_provider: Option<&str>,
 ) -> Result<String, AppError> {
     let token_override = token_override.trim();
-    if !token_override.is_empty() {
+    if !token_override.is_empty() && token_override_belongs_to_provider(profile, token_provider)? {
         set_profile_token(secrets, profile, token_override)?;
         return Ok(token_override.to_string());
     }
@@ -516,6 +520,20 @@ fn resolve_web_token(
     Err(AppError::InvalidInput(
         "API token is required. Save it with `ai token set --profile <name>` or paste it once in the web UI.".to_string(),
     ))
+}
+
+fn token_override_belongs_to_provider(
+    profile: &ProfileConfig,
+    token_provider: Option<&str>,
+) -> Result<bool, AppError> {
+    let Some(token_provider) = token_provider else {
+        return Ok(true);
+    };
+    let token_provider = token_provider.trim();
+    if token_provider.is_empty() {
+        return Ok(false);
+    }
+    Ok(parse_provider(token_provider)? == profile.provider)
 }
 
 fn parse_provider(value: &str) -> Result<ProviderKind, AppError> {
@@ -662,15 +680,17 @@ const INDEX_HTML: &str = r#"<!doctype html>
       min-height: 42px;
     }
     textarea {
-      min-height: 104px;
+      min-height: 84px;
       resize: vertical;
       line-height: 1.45;
     }
     #prompt {
-      min-height: 340px;
+      min-height: 180px;
+      max-height: 34vh;
     }
     #systemPrompt {
-      min-height: 92px;
+      min-height: 64px;
+      max-height: 18vh;
     }
     .row {
       display: grid;
@@ -742,7 +762,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       cursor: wait;
     }
     pre {
-      min-height: 420px;
+      min-height: 320px;
       margin: 0;
       padding: 16px;
       overflow: auto;
@@ -788,6 +808,34 @@ const INDEX_HTML: &str = r#"<!doctype html>
       border-radius: 6px;
       font-size: 12px;
     }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      margin: 12px 0 10px;
+    }
+    .metric {
+      display: grid;
+      gap: 3px;
+      min-height: 58px;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #f9fbfc;
+    }
+    .metric span {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.2;
+      text-transform: uppercase;
+    }
+    .metric strong {
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.25;
+      font-weight: 700;
+      word-break: break-word;
+    }
     .warnings {
       display: none;
       margin: 0;
@@ -816,6 +864,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .status { text-align: left; }
       .layout { grid-template-columns: 1fr; }
       .row { grid-template-columns: 1fr; }
+      .metrics { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -918,17 +967,22 @@ const INDEX_HTML: &str = r#"<!doctype html>
       <section class="prompt">
         <div class="group">
           <h2>Промпт</h2>
+          <label><textarea id="prompt" placeholder="Введите запрос к модели"></textarea></label>
           <details class="panel">
             <summary>System prompt</summary>
             <div class="panel-body">
               <label>system_prompt<textarea id="systemPrompt" placeholder="Необязательная системная инструкция для модели"></textarea></label>
             </div>
           </details>
-          <label><textarea id="prompt" placeholder="Введите запрос к модели"></textarea></label>
           <div class="send-row">
             <button id="send" type="button">Отправить</button>
             <button id="clear" class="secondary" type="button">Очистить ответ</button>
           </div>
+        </div>
+        <div id="metrics" class="metrics">
+          <div class="metric"><span>Время</span><strong id="metricTime">—</strong></div>
+          <div class="metric"><span>Токены</span><strong id="metricTokens">—</strong></div>
+          <div class="metric"><span>Стоимость</span><strong id="metricCost">—</strong></div>
         </div>
         <pre id="output">Ответ появится здесь.</pre>
         <details id="debugDetails" class="debug">
@@ -942,10 +996,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <h3>Ответ provider API</h3>
               <pre id="providerResponse">{}</pre>
             </div>
-            <div class="debug-item">
-              <h3>Ответ backend</h3>
-              <pre id="backendResponse">{}</pre>
-            </div>
           </div>
         </details>
       </section>
@@ -958,6 +1008,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     const providerSelect = $('provider');
     let providers = [];
     let currentConstraints = new Map();
+    let tokenProvider = null;
 
     function setStatus(text, isError = false) {
       status.textContent = text;
@@ -1075,8 +1126,22 @@ const INDEX_HTML: &str = r#"<!doctype html>
       return {
         provider: $('provider').value,
         base_url: $('baseUrl').value.trim(),
-        token: $('token').value.trim()
+        token: $('token').value.trim(),
+        token_provider: tokenProvider
       };
+    }
+
+    function currentProvider() {
+      return $('provider').value;
+    }
+
+    function resetTokenOverrideForProvider() {
+      $('token').value = '';
+      tokenProvider = currentProvider();
+    }
+
+    function markTokenOverrideProvider() {
+      tokenProvider = currentProvider();
     }
 
     function selectedModel() {
@@ -1132,7 +1197,22 @@ const INDEX_HTML: &str = r#"<!doctype html>
     function setDebug(debug) {
       $('providerRequest').textContent = prettyJson(debug?.provider_request);
       $('providerResponse').textContent = prettyJson(debug?.provider_response);
-      $('backendResponse').textContent = prettyJson(debug?.backend_response);
+    }
+
+    function setMetrics(metrics) {
+      if (!metrics) {
+        $('metricTime').textContent = '—';
+        $('metricTokens').textContent = '—';
+        $('metricCost').textContent = '—';
+        return;
+      }
+      $('metricTime').textContent = `${metrics.elapsed_ms} ms`;
+      $('metricTokens').textContent = metrics.usage
+        ? `${metrics.usage.input_tokens} / ${metrics.usage.output_tokens} / ${metrics.usage.total_tokens}`
+        : 'unavailable';
+      $('metricCost').textContent = metrics.cost
+        ? `${Number(metrics.cost.amount).toFixed(8)} ${metrics.cost.currency}`
+        : 'unavailable';
     }
 
     async function requestJson(url, body) {
@@ -1189,6 +1269,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const data = await requestJson('/api/providers');
       providers = data.providers;
       providerSelect.innerHTML = providers.map((item) => `<option value="${item.id}">${item.name}</option>`).join('');
+      resetTokenOverrideForProvider();
       applyProviderDefaults();
       setStatus('Готово');
     }
@@ -1215,10 +1296,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
       setStatus('Жду ответ модели...');
       $('output').textContent = '';
       setDebug(null);
+      setMetrics(null);
       try {
         const payload = chatPayload();
         const data = await requestJson('/api/chat', payload);
         $('output').textContent = data.text;
+        setMetrics(data.metrics);
         setDebug(data.debug);
         setStatus(data.finish_reason ? `Готово: ${data.finish_reason}` : 'Готово');
       } catch (error) {
@@ -1229,7 +1312,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
       }
     }
 
-    providerSelect.addEventListener('change', applyProviderDefaults);
+    providerSelect.addEventListener('change', () => {
+      resetTokenOverrideForProvider();
+      applyProviderDefaults();
+    });
+    $('token').addEventListener('input', markTokenOverrideProvider);
     document.querySelectorAll('input, select, textarea').forEach((element) => {
       element.addEventListener('input', validateParameterConstraints);
       element.addEventListener('change', validateParameterConstraints);
@@ -1239,6 +1326,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     $('clear').addEventListener('click', () => {
       $('output').textContent = 'Ответ появится здесь.';
       setDebug(null);
+      setMetrics(null);
     });
     init().catch((error) => setStatus(error.message, true));
   </script>
@@ -1268,7 +1356,7 @@ mod tests {
             .set_token("openrouter", "stored-token")
             .expect("set token");
 
-        let token = resolve_web_token(&secrets, &profile, "").expect("resolve token");
+        let token = resolve_web_token(&secrets, &profile, "", None).expect("resolve token");
 
         assert_eq!(token, "stored-token");
     }
@@ -1278,7 +1366,8 @@ mod tests {
         let secrets = MemorySecretStore::default();
         let profile = web_profile(ProviderKind::DeepSeek);
 
-        let token = resolve_web_token(&secrets, &profile, " fresh-token ").expect("resolve token");
+        let token = resolve_web_token(&secrets, &profile, " fresh-token ", Some("deepseek"))
+            .expect("resolve token");
 
         assert_eq!(token, "fresh-token");
         assert_eq!(
@@ -1288,11 +1377,30 @@ mod tests {
     }
 
     #[test]
+    fn web_token_override_from_another_provider_is_ignored() {
+        let secrets = MemorySecretStore::default();
+        let profile = web_profile(ProviderKind::DeepSeek);
+        secrets
+            .set_token("deepseek", "deepseek-token")
+            .expect("set deepseek token");
+
+        let token = resolve_web_token(&secrets, &profile, " kimi-token ", Some("kimi"))
+            .expect("resolve token");
+
+        assert_eq!(token, "deepseek-token");
+        assert_eq!(
+            secrets.get_token("deepseek").expect("get token"),
+            Some("deepseek-token".to_string())
+        );
+    }
+
+    #[test]
     fn web_chat_messages_put_system_prompt_before_user_prompt() {
         let request = ChatWebRequest {
             provider: "deepseek".to_string(),
             base_url: "https://api.deepseek.com/v1".to_string(),
             token: String::new(),
+            token_provider: None,
             model: "deepseek-chat".to_string(),
             system_prompt: Some("Ты отвечаешь кратко.".to_string()),
             prompt: "Привет".to_string(),
