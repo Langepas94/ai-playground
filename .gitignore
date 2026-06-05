@@ -3,3 +3,6 @@
 /.idea/Ai tech rust.iml
 /.idea/modules.xml
 /.idea/vcs.xml
+.DS_Store
+.fuse_hidden*
+setup-github-mcp.sh

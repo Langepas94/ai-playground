@@ -859,7 +859,7 @@ mod tests {
 
         assert_eq!(models[0].id, "provider/model");
         let pricing = models[0].pricing.as_ref().expect("pricing");
-        assert!((pricing.input_per_million - 0.7).abs() < f64::EPSILON);
+        assert!((pricing.input_per_million.unwrap_or(0.0) - 0.7).abs() < f64::EPSILON);
         assert!((pricing.output_per_million - 2.1).abs() < 0.0000000001);
     }
 }

@@ -983,7 +983,7 @@ fn format_model_line(model: &ModelInfo) -> String {
     format!(
         "{}\tinput={:.8}/{}/1M output={:.8}/{}/1M",
         model.id,
-        pricing.input_per_million,
+        pricing.input_per_million.unwrap_or(0.0),
         pricing.currency,
         pricing.output_per_million,
         pricing.currency
