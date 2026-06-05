@@ -894,7 +894,7 @@ async fn ask_command(args: &AskArgs, secrets: &dyn SecretStore) -> Result<(), Ap
     let (name, profile) = config.selected_profile(args.profile.as_deref())?;
     eprintln!("Waiting for provider response...");
     let client = ReqwestProviderClient::new()?;
-    let text = chat::ask_once(
+    let response = chat::ask_once(
         &client,
         secrets,
         &config,
@@ -904,7 +904,8 @@ async fn ask_command(args: &AskArgs, secrets: &dyn SecretStore) -> Result<(), Ap
         ResponseControl::from(&args.control),
     )
     .await?;
-    println!("{text}");
+    println!("{}", response.text);
+    eprintln!("{}", chat::format_request_metrics(&response.metrics));
     Ok(())
 }
 
@@ -940,8 +941,16 @@ async fn compare_command(args: &CompareArgs, secrets: &dyn SecretStore) -> Resul
         control,
     )
     .await?;
-    println!("## Without constraints\n{unrestricted}\n");
-    println!("## With constraints\n{controlled}");
+    println!("## Without constraints\n{}\n", unrestricted.text);
+    eprintln!(
+        "Without constraints metrics:\n{}",
+        chat::format_request_metrics(&unrestricted.metrics)
+    );
+    println!("## With constraints\n{}", controlled.text);
+    eprintln!(
+        "With constraints metrics:\n{}",
+        chat::format_request_metrics(&controlled.metrics)
+    );
     Ok(())
 }
 
@@ -976,8 +985,12 @@ async fn compare_goal_command(
 
 fn print_goal_run(title: &str, run: &chat::GoalRun) {
     println!(
-        "## {title}\nmode: {}\nstopped: {}\nstate: {}\n{}",
-        run.mode, run.stopped, run.state_summary, run.response
+        "## {title}\nmode: {}\nstopped: {}\nstate: {}\n{}\n\nmetrics:\n{}",
+        run.mode,
+        run.stopped,
+        run.state_summary,
+        run.response,
+        chat::format_request_metrics(&run.metrics)
     );
 }
 
