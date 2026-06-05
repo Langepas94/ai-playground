@@ -17,24 +17,30 @@ rtk cargo test                    # тесты
 
 ```
 src/
-  cli.rs          — все команды (setup, profile, token, ask, chat, web, compare, doctor, config)
+  cli/
+    mod.rs        — run(), dispatch, shared helpers (prompt, request_pricing)
+    args.rs       — все *Args structs (clap)
+    commands/     — по файлу на команду (ask, chat, compare, setup, profile, ...)
+  web/
+    mod.rs        — Axum server + handlers + типы
+    ui.html       — Web UI (HTML/CSS/JS), подключается через include_str!
+  chat.rs         — логика ask/chat/compare, ConversationGoal, GoalState
   config.rs       — AppConfig / ProfileConfig (TOML)
   secrets.rs      — keyring, provider-scoped токены
   errors.rs       — AppError, ProviderHttpError
-  chat.rs         — логика ask/chat/compare
-  web.rs          — Axum web UI + JSON API
   providers/
     mod.rs              — ProviderKind, trait ProviderClient, общие типы
     openai_compatible.rs — Chat Completions impl (используется всеми)
-    openrouter.rs       — spec + billing headers
+    openrouter.rs       — spec
     deepseek.rs         — spec
     gigachat.rs         — spec + custom CA bundle
     kimi.rs             — spec
   bin/ai.rs       — точка входа бинарника `ai`
+  lib.rs          — pub mod (использует #[path] для cli/ и web/)
 crates/aiteach-compat/  — legacy бинарник `aiteach`
 tests/http_mock.rs      — интеграционные тесты через wiremock
 docs/
-  architecture.md — обзор стека и потока запроса
+  architecture.md — обзор стека
   checks.md       — чеклист перед релизом
 ```
 

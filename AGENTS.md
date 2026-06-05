@@ -24,24 +24,28 @@ rtk cargo test
 
 ## Карта модулей
 
-| Файл | Ответственность |
-|------|----------------|
-| `src/cli.rs` | Все команды CLI (`setup`, `profile`, `token`, `ask`, `chat`, `web`, `compare`, `doctor`, `config`). Интерактивные промпты через stdin. |
+| Файл/Директория | Ответственность |
+|-----------------|----------------|
+| `src/cli/mod.rs` | `run()` — точка входа CLI, dispatch команд, shared helpers (prompt, select_profile_name, request_pricing). |
+| `src/cli/args.rs` | Все `*Args` structs (clap), `ResponseControlArgs`, `PricingArgs`, `ConversationGoalArgs`. |
+| `src/cli/commands/` | По одному файлу на команду: `ask`, `chat`, `compare`, `setup`, `profile`, `token`, `models`, `doctor`, `config`. |
+| `src/web/mod.rs` | Axum server: `/api/providers`, `/api/models`, `/api/chat`. Типы запросов/ответов, тесты. |
+| `src/web/ui.html` | Web UI — HTML/CSS/JS. Подключается через `include_str!("ui.html")`. Редактируется как обычный файл с подсветкой. |
+| `src/chat.rs` | Логика `ask_once`, `interactive_chat` (REPL), `compare_*`, `ConversationGoal`, `GoalState`. |
 | `src/config.rs` | `AppConfig` (TOML): профили, активный профиль. Пути — `ai-playground` с legacy fallback на `aiteach`. |
 | `src/secrets.rs` | `KeyringSecretStore`: provider-scoped токены через keyring. Fallback-миграция из profile-scoped. |
-| `src/providers/mod.rs` | `ProviderKind`, `ProviderSpec`, `ProviderClient` trait, `ReqwestProviderClient`. Общие типы: `ChatRequest`, `ChatResponse`, `ResponseControl`, `AnswerFormat`. |
-| `src/providers/openai_compatible.rs` | Реализация Chat Completions, list_models, billing, debug. Используется всеми провайдерами. |
-| `src/providers/openrouter.rs` | Spec + overrides для OpenRouter (extra headers, billing). |
+| `src/providers/mod.rs` | `ProviderKind`, `ProviderSpec`, `ProviderClient` trait, `ReqwestProviderClient`. Общие типы. |
+| `src/providers/openai_compatible.rs` | Chat Completions impl, list_models, billing, debug. Используется всеми провайдерами. |
+| `src/providers/openrouter.rs` | Spec + overrides для OpenRouter. |
 | `src/providers/deepseek.rs` | Spec для DeepSeek. |
-| `src/providers/gigachat.rs` | Spec + custom CA bundle (`russian_trusted_root_ca_pem.crt`). |
+| `src/providers/gigachat.rs` | Spec + custom CA bundle. |
 | `src/providers/kimi.rs` | Spec для Kimi/Moonshot. |
-| `src/chat.rs` | Логика `ask`, `chat` (REPL с `/`-командами), `compare`, `compare_goal`. |
-| `src/web.rs` | Axum server: `/api/providers`, `/api/models`, `/api/chat`. Встроенный HTML/JS. |
-| `src/errors.rs` | `AppError` + `ProviderHttpError`. HTTP → `AppError` через `map_http_status`. |
+| `src/errors.rs` | `AppError` + `ProviderHttpError`. |
 | `src/bin/ai.rs` | Точка входа бинарника `ai`. |
-| `src/main.rs` | Точка входа бинарника `ai-playground` (alias). |
-| `crates/aiteach-compat/` | Бинарник `aiteach` для обратной совместимости — просто вызывает тот же lib. |
-| `tests/http_mock.rs` | Интеграционные тесты provider-клиента через wiremock. |
+| `crates/aiteach-compat/` | Legacy бинарник `aiteach`. |
+| `tests/http_mock.rs` | Интеграционные тесты через wiremock. |
+
+> `src/lib.rs` использует `#[path = "cli/mod.rs"]` и `#[path = "web/mod.rs"]` — это намеренно, так как рядом остались пустые `cli.rs` / `web.rs` (нельзя удалить через агента).
 
 ## Поток запроса (коротко)
 
