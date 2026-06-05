@@ -14,9 +14,9 @@ use crate::{
     config::{AppConfig, ProfileConfig, token_ref},
     errors::AppError,
     providers::{
-        AnswerFormat, ChatMessage, ChatRequest, HttpDebugRequest, HttpDebugResponse,
-        ProviderClient, ProviderKind, ReqwestProviderClient, ResponseControl, ResponseFormat, Role,
-        validate_base_url,
+        AnswerFormat, BillingLookup, BillingProvider, ChatMessage, ChatRequest, HttpDebugRequest,
+        HttpDebugResponse, ModelPricing, ProviderKind, ReqwestProviderClient, ResponseControl,
+        ResponseFormat, Role, validate_base_url,
     },
     secrets::{KeyringSecretStore, SecretStore, get_config_profile_token, set_profile_token},
 };
@@ -84,9 +84,11 @@ async fn models(
         &request.token,
         request.token_provider.as_deref(),
     )?;
-    let mut models = state.client.list_models(&profile, &token).await?;
-    models.sort();
-    Ok(Json(ModelsResponse { models }))
+    let mut models = state.client.list_model_info(&profile, &token).await?;
+    models.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(Json(ModelsResponse {
+        models: models.into_iter().map(ModelView::from).collect(),
+    }))
 }
 
 async fn chat(
@@ -109,6 +111,14 @@ async fn chat(
         model: profile.model.clone(),
         messages: request.chat_messages(),
         control,
+        pricing: request
+            .pricing
+            .clone()
+            .and_then(WebPricing::into_model_pricing),
+        billing: request
+            .billing
+            .clone()
+            .and_then(WebBilling::into_billing_lookup),
     };
     let (response, provider_debug) = state
         .client
@@ -349,7 +359,22 @@ impl ModelsRequest {
 
 #[derive(Debug, Serialize)]
 struct ModelsResponse {
-    models: Vec<String>,
+    models: Vec<ModelView>,
+}
+
+#[derive(Debug, Serialize)]
+struct ModelView {
+    id: String,
+    pricing: Option<ModelPricing>,
+}
+
+impl From<crate::providers::ModelInfo> for ModelView {
+    fn from(model: crate::providers::ModelInfo) -> Self {
+        Self {
+            id: model.id,
+            pricing: model.pricing,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -362,6 +387,8 @@ struct ChatWebRequest {
     system_prompt: Option<String>,
     prompt: String,
     control: WebResponseControl,
+    pricing: Option<WebPricing>,
+    billing: Option<WebBilling>,
 }
 
 impl ChatWebRequest {
@@ -427,6 +454,44 @@ struct WebResponseControl {
     quote_question: bool,
     format_instruction: Option<String>,
     completion_instruction: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct WebPricing {
+    input_per_million: Option<f64>,
+    output_per_million: Option<f64>,
+    cache_hit_input_per_million: Option<f64>,
+    cache_miss_input_per_million: Option<f64>,
+    currency: Option<String>,
+}
+
+impl WebPricing {
+    fn into_model_pricing(self) -> Option<ModelPricing> {
+        Some(ModelPricing {
+            currency: blank_to_none(self.currency).unwrap_or_else(|| "USD".to_string()),
+            input_per_million: self.input_per_million?,
+            output_per_million: self.output_per_million?,
+            cache_hit_input_per_million: self.cache_hit_input_per_million,
+            cache_miss_input_per_million: self.cache_miss_input_per_million,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct WebBilling {
+    openai_admin_token: Option<String>,
+    openai_cost_poll_seconds: Option<u64>,
+}
+
+impl WebBilling {
+    fn into_billing_lookup(self) -> Option<BillingLookup> {
+        let token = blank_to_none(self.openai_admin_token)?;
+        Some(BillingLookup {
+            provider: BillingProvider::OpenAiCosts,
+            admin_token: token,
+            poll_seconds: self.openai_cost_poll_seconds.unwrap_or(20),
+        })
+    }
 }
 
 impl WebResponseControl {
@@ -836,6 +901,25 @@ const INDEX_HTML: &str = r#"<!doctype html>
       font-weight: 700;
       word-break: break-word;
     }
+    .metric-lines {
+      display: grid;
+      gap: 2px;
+      color: var(--text);
+      font-size: 13px;
+      line-height: 1.25;
+    }
+    .metric-line {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .metric-line em {
+      color: var(--muted);
+      font-style: normal;
+    }
+    .metric-line b {
+      font-weight: 700;
+    }
     .warnings {
       display: none;
       margin: 0;
@@ -905,6 +989,27 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <label>top_p<input id="topP" type="number" min="0" max="1" step="0.05" value="1"></label>
             <label>answer_format<select id="answerFormat"><option value="natural">natural</option><option value="bullets">bullets</option><option value="numbered">numbered</option><option value="short">short</option><option value="steps">steps</option><option value="table">table</option></select></label>
           </div>
+          <details class="panel">
+            <summary>Цена</summary>
+            <div class="panel-body">
+              <div class="row">
+                <label>input / 1M<input id="priceInput" type="number" min="0" step="0.000001" placeholder="Например 0.07"></label>
+                <label>output / 1M<input id="priceOutput" type="number" min="0" step="0.000001" placeholder="Например 1.10"></label>
+              </div>
+              <div class="row">
+                <label>cache hit input / 1M<input id="priceCacheHitInput" type="number" min="0" step="0.000001"></label>
+                <label>cache miss input / 1M<input id="priceCacheMissInput" type="number" min="0" step="0.000001"></label>
+              </div>
+              <label>currency<input id="priceCurrency" value="USD" spellcheck="false"></label>
+            </div>
+          </details>
+          <details class="panel">
+            <summary>Billing API</summary>
+            <div class="panel-body">
+              <label>OpenAI Admin API key<input id="openaiAdminToken" type="password" autocomplete="off" spellcheck="false" placeholder="Для /organization/costs"></label>
+              <label>poll seconds<input id="openaiCostPollSeconds" type="number" min="0" step="1" value="20"></label>
+            </div>
+          </details>
           <details class="panel">
             <summary>Расширенные параметры</summary>
             <div class="panel-body">
@@ -1007,6 +1112,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     const status = $('status');
     const providerSelect = $('provider');
     let providers = [];
+    let modelPricingById = new Map();
     let currentConstraints = new Map();
     let tokenProvider = null;
 
@@ -1148,12 +1254,18 @@ const INDEX_HTML: &str = r#"<!doctype html>
       return $('customModel').value.trim() || $('model').value.trim();
     }
 
+    function selectedModelPricing() {
+      return modelPricingById.get(selectedModel()) || null;
+    }
+
     function chatPayload() {
       return {
         ...providerPayload(),
         model: selectedModel(),
         system_prompt: textValue('systemPrompt'),
         prompt: $('prompt').value,
+        pricing: pricingPayload(),
+        billing: billingPayload(),
         control: {
           response_format: $('responseFormat').value,
           answer_format: $('answerFormat').value,
@@ -1190,6 +1302,43 @@ const INDEX_HTML: &str = r#"<!doctype html>
       };
     }
 
+    function pricingPayload() {
+      applySelectedModelPricingIfFieldsAreEmpty();
+      return {
+        input_per_million: numberValue('priceInput'),
+        output_per_million: numberValue('priceOutput'),
+        cache_hit_input_per_million: numberValue('priceCacheHitInput'),
+        cache_miss_input_per_million: numberValue('priceCacheMissInput'),
+        currency: textValue('priceCurrency')
+      };
+    }
+
+    function applySelectedModelPricingIfFieldsAreEmpty() {
+      const pricing = selectedModelPricing();
+      if (!pricing) return;
+      if (!$('priceInput').value.trim()) $('priceInput').value = pricing.input_per_million ?? '';
+      if (!$('priceOutput').value.trim()) $('priceOutput').value = pricing.output_per_million ?? '';
+      if (!$('priceCacheHitInput').value.trim()) $('priceCacheHitInput').value = pricing.cache_hit_input_per_million ?? '';
+      if (!$('priceCacheMissInput').value.trim()) $('priceCacheMissInput').value = pricing.cache_miss_input_per_million ?? '';
+      if (!$('priceCurrency').value.trim()) $('priceCurrency').value = pricing.currency || 'USD';
+    }
+
+    function applySelectedModelPricing() {
+      const pricing = selectedModelPricing();
+      $('priceInput').value = pricing?.input_per_million ?? '';
+      $('priceOutput').value = pricing?.output_per_million ?? '';
+      $('priceCacheHitInput').value = pricing?.cache_hit_input_per_million ?? '';
+      $('priceCacheMissInput').value = pricing?.cache_miss_input_per_million ?? '';
+      $('priceCurrency').value = pricing?.currency || 'USD';
+    }
+
+    function billingPayload() {
+      return {
+        openai_admin_token: textValue('openaiAdminToken'),
+        openai_cost_poll_seconds: numberValue('openaiCostPollSeconds')
+      };
+    }
+
     function prettyJson(value) {
       return JSON.stringify(value ?? {}, null, 2);
     }
@@ -1207,12 +1356,25 @@ const INDEX_HTML: &str = r#"<!doctype html>
         return;
       }
       $('metricTime').textContent = `${metrics.elapsed_ms} ms`;
-      $('metricTokens').textContent = metrics.usage
-        ? `${metrics.usage.input_tokens} / ${metrics.usage.output_tokens} / ${metrics.usage.total_tokens}`
-        : 'unavailable';
+      $('metricTokens').innerHTML = metrics.usage ? tokenLines(metrics.usage) : 'unavailable';
       $('metricCost').textContent = metrics.cost
-        ? `${Number(metrics.cost.amount).toFixed(8)} ${metrics.cost.currency}`
+        ? `${Number(metrics.cost.amount).toFixed(8)} ${metrics.cost.currency} (${metrics.cost.source})`
         : 'unavailable';
+    }
+
+    function tokenLines(usage) {
+      const rows = [
+        ['input', usage.input_tokens],
+        ['output', usage.output_tokens],
+        ['total', usage.total_tokens]
+      ];
+      if (usage.cache_hit_input_tokens !== null && usage.cache_hit_input_tokens !== undefined) {
+        rows.push(['cache hit', usage.cache_hit_input_tokens]);
+      }
+      if (usage.cache_miss_input_tokens !== null && usage.cache_miss_input_tokens !== undefined) {
+        rows.push(['cache miss', usage.cache_miss_input_tokens]);
+      }
+      return `<span class="metric-lines">${rows.map(([label, value]) => `<span class="metric-line"><em>${label}</em><b>${value}</b></span>`).join('')}</span>`;
     }
 
     async function requestJson(url, body) {
@@ -1244,16 +1406,19 @@ const INDEX_HTML: &str = r#"<!doctype html>
       if (!selected) return;
       $('baseUrl').value = selected.default_base_url;
       $('customModel').value = '';
-      setModelOptions([selected.default_model], selected.default_model);
+      setModelOptions([{ id: selected.default_model, pricing: null }], selected.default_model);
       applyProviderConstraints(selected);
     }
 
     function setModelOptions(models, selectedModel) {
-      const uniqueModels = [...new Set(models.filter(Boolean))];
-      $('model').innerHTML = uniqueModels.map((model) => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join('');
-      if (selectedModel && uniqueModels.includes(selectedModel)) {
+      const normalized = models.map((model) => typeof model === 'string' ? { id: model, pricing: null } : model).filter((model) => model?.id);
+      const uniqueModels = [...new Map(normalized.map((model) => [model.id, model])).values()];
+      modelPricingById = new Map(uniqueModels.filter((model) => model.pricing).map((model) => [model.id, model.pricing]));
+      $('model').innerHTML = uniqueModels.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.id)}</option>`).join('');
+      if (selectedModel && uniqueModels.some((model) => model.id === selectedModel)) {
         $('model').value = selectedModel;
       }
+      applySelectedModelPricing();
     }
 
     function escapeHtml(value) {
@@ -1280,8 +1445,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
       try {
         const data = await requestJson('/api/models', providerPayload());
         const current = selectedModel();
-        const fallback = data.models[0] || current;
-        setModelOptions(data.models, data.models.includes(current) ? current : fallback);
+        const modelIds = data.models.map((model) => model.id);
+        const fallback = modelIds[0] || current;
+        setModelOptions(data.models, modelIds.includes(current) ? current : fallback);
         $('customModel').value = '';
         setStatus(data.models.length ? `Загружено моделей: ${data.models.length}; выбрана ${$('model').value}` : 'Провайдер вернул пустой список моделей');
       } catch (error) {
@@ -1317,6 +1483,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
       applyProviderDefaults();
     });
     $('token').addEventListener('input', markTokenOverrideProvider);
+    $('model').addEventListener('change', applySelectedModelPricing);
+    $('customModel').addEventListener('input', applySelectedModelPricing);
     document.querySelectorAll('input, select, textarea').forEach((element) => {
       element.addEventListener('input', validateParameterConstraints);
       element.addEventListener('change', validateParameterConstraints);
@@ -1405,6 +1573,8 @@ mod tests {
             system_prompt: Some("Ты отвечаешь кратко.".to_string()),
             prompt: "Привет".to_string(),
             control: WebResponseControl::default(),
+            pricing: None,
+            billing: None,
         };
 
         let messages = request.chat_messages();

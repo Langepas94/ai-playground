@@ -11,8 +11,8 @@ use crate::{
     config::{AppConfig, ProfileConfig},
     errors::AppError,
     providers::{
-        AnswerFormat, ChatMessage, ChatRequest, ProviderClient, ResponseControl, ResponseFormat,
-        Role,
+        AnswerFormat, BillingLookup, ChatMessage, ChatRequest, ModelPricing, ProviderClient,
+        ResponseControl, ResponseFormat, Role,
     },
     secrets::{SecretStore, get_config_profile_token},
 };
@@ -151,6 +151,8 @@ pub async fn ask_once(
     profile: &ProfileConfig,
     prompt: String,
     control: ResponseControl,
+    pricing: Option<ModelPricing>,
+    billing: Option<BillingLookup>,
 ) -> Result<crate::providers::ChatResponse, AppError> {
     let token =
         get_config_profile_token(secrets, config, profile_name, profile)?.ok_or_else(|| {
@@ -169,6 +171,8 @@ pub async fn ask_once(
                     content: prompt,
                 }],
                 control,
+                pricing,
+                billing,
             },
         )
         .await?;
@@ -183,6 +187,8 @@ pub async fn compare_response_control(
     profile: &ProfileConfig,
     prompt: String,
     controlled: ResponseControl,
+    pricing: Option<ModelPricing>,
+    billing: Option<BillingLookup>,
 ) -> Result<
     (
         crate::providers::ChatResponse,
@@ -203,6 +209,8 @@ pub async fn compare_response_control(
             content: prompt.clone(),
         }],
         control: ResponseControl::uncontrolled(),
+        pricing: pricing.clone(),
+        billing: billing.clone(),
     };
     let controlled_request = ChatRequest {
         model: profile.model.clone(),
@@ -211,6 +219,8 @@ pub async fn compare_response_control(
             content: prompt,
         }],
         control: controlled,
+        pricing,
+        billing,
     };
     let unrestricted = client
         .chat_completion(profile, &token, base_request)
@@ -229,6 +239,8 @@ pub async fn compare_goal_stop(
     profile: &ProfileConfig,
     prompt: String,
     required_fields: Vec<String>,
+    pricing: Option<ModelPricing>,
+    billing: Option<BillingLookup>,
 ) -> Result<GoalComparison, AppError> {
     let token =
         get_config_profile_token(secrets, config, profile_name, profile)?.ok_or_else(|| {
@@ -243,6 +255,8 @@ pub async fn compare_goal_stop(
         prompt.clone(),
         &required_fields,
         ConversationStopMode::State,
+        pricing.clone(),
+        billing.clone(),
     )
     .await?;
     let instruction = run_goal_once(
@@ -252,6 +266,8 @@ pub async fn compare_goal_stop(
         prompt.clone(),
         &required_fields,
         ConversationStopMode::Instruction,
+        pricing.clone(),
+        billing.clone(),
     )
     .await?;
     let combined = run_goal_once(
@@ -261,6 +277,8 @@ pub async fn compare_goal_stop(
         prompt,
         &required_fields,
         ConversationStopMode::Combined,
+        pricing,
+        billing,
     )
     .await?;
     Ok(GoalComparison {
@@ -277,6 +295,8 @@ pub async fn interactive_chat(
     profile_name: &str,
     profile: &ProfileConfig,
     mut control: ResponseControl,
+    pricing: Option<ModelPricing>,
+    billing: Option<BillingLookup>,
     mut goal: ConversationGoal,
 ) -> Result<(), AppError> {
     let token =
@@ -537,6 +557,8 @@ pub async fn interactive_chat(
                     model: profile.model.clone(),
                     messages: messages.clone(),
                     control: effective_control,
+                    pricing: pricing.clone(),
+                    billing: billing.clone(),
                 },
             )
             .await?;
@@ -637,6 +659,8 @@ async fn run_goal_once(
     prompt: String,
     required_fields: &[String],
     mode: ConversationStopMode,
+    pricing: Option<ModelPricing>,
+    billing: Option<BillingLookup>,
 ) -> Result<GoalRun, AppError> {
     let goal = ConversationGoal {
         required_fields: required_fields.to_vec(),
@@ -653,6 +677,8 @@ async fn run_goal_once(
                     content: prompt,
                 }],
                 control: goal.apply_to_control(ResponseControl::uncontrolled()),
+                pricing,
+                billing,
             },
         )
         .await?;

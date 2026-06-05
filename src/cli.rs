@@ -9,8 +9,8 @@ use crate::{
     config::{AppConfig, ProfileConfig},
     errors::AppError,
     providers::{
-        AnswerFormat, ProviderClient, ProviderKind, ReqwestProviderClient, ResponseControl,
-        ResponseFormat, validate_base_url,
+        AnswerFormat, BillingLookup, BillingProvider, ModelInfo, ModelPricing, ProviderClient,
+        ProviderKind, ReqwestProviderClient, ResponseControl, ResponseFormat, validate_base_url,
     },
     secrets::{
         KeyringSecretStore, SecretStore, delete_legacy_profile_token, delete_profile_token,
@@ -120,6 +120,10 @@ struct AskArgs {
     profile: Option<String>,
     #[command(flatten)]
     control: ResponseControlArgs,
+    #[command(flatten)]
+    pricing: PricingArgs,
+    #[command(flatten)]
+    billing: BillingArgs,
 }
 
 #[derive(Debug, Args)]
@@ -129,6 +133,10 @@ struct CompareArgs {
     profile: Option<String>,
     #[command(flatten)]
     control: ResponseControlArgs,
+    #[command(flatten)]
+    pricing: PricingArgs,
+    #[command(flatten)]
+    billing: BillingArgs,
 }
 
 #[derive(Debug, Args)]
@@ -142,6 +150,10 @@ struct CompareGoalArgs {
         help = "Required entity field; provide at least one"
     )]
     required_field: Vec<String>,
+    #[command(flatten)]
+    pricing: PricingArgs,
+    #[command(flatten)]
+    billing: BillingArgs,
 }
 
 #[derive(Debug, Args)]
@@ -150,6 +162,10 @@ struct ChatArgs {
     profile: Option<String>,
     #[command(flatten)]
     control: ResponseControlArgs,
+    #[command(flatten)]
+    pricing: PricingArgs,
+    #[command(flatten)]
+    billing: BillingArgs,
     #[command(flatten)]
     goal: ConversationGoalArgs,
 }
@@ -271,6 +287,77 @@ struct ResponseControlArgs {
         help = "System instruction that describes when the answer should finish"
     )]
     completion_instruction: Option<String>,
+}
+
+#[derive(Debug, Clone, Args, Default)]
+struct PricingArgs {
+    #[arg(long, help = "Exact input token price per 1M tokens for this request")]
+    input_price_per_million: Option<f64>,
+    #[arg(long, help = "Exact output token price per 1M tokens for this request")]
+    output_price_per_million: Option<f64>,
+    #[arg(
+        long,
+        help = "Exact cached input token price per 1M tokens, when usage reports cache hits"
+    )]
+    cache_hit_input_price_per_million: Option<f64>,
+    #[arg(
+        long,
+        help = "Exact cache-miss input token price per 1M tokens, when usage reports cache misses"
+    )]
+    cache_miss_input_price_per_million: Option<f64>,
+    #[arg(
+        long,
+        default_value = "USD",
+        help = "Currency label for configured pricing"
+    )]
+    price_currency: String,
+}
+
+impl PricingArgs {
+    fn model_pricing(&self) -> Result<Option<ModelPricing>, AppError> {
+        match (self.input_price_per_million, self.output_price_per_million) {
+            (None, None) => Ok(None),
+            (Some(input_per_million), Some(output_per_million)) => Ok(Some(ModelPricing {
+                currency: self.price_currency.clone(),
+                input_per_million,
+                output_per_million,
+                cache_hit_input_per_million: self.cache_hit_input_price_per_million,
+                cache_miss_input_per_million: self.cache_miss_input_price_per_million,
+            })),
+            _ => Err(AppError::InvalidInput(
+                "Set both --input-price-per-million and --output-price-per-million to calculate request cost.".to_string(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Args, Default)]
+struct BillingArgs {
+    #[arg(
+        long,
+        help = "OpenAI Admin API key used to fetch /organization/costs after the request"
+    )]
+    openai_admin_token: Option<String>,
+    #[arg(
+        long,
+        default_value_t = 20,
+        help = "Seconds to poll OpenAI /organization/costs for billing data"
+    )]
+    openai_cost_poll_seconds: u64,
+}
+
+impl BillingArgs {
+    fn billing_lookup(&self) -> Option<BillingLookup> {
+        self.openai_admin_token
+            .as_ref()
+            .map(|token| token.trim())
+            .filter(|token| !token.is_empty())
+            .map(|token| BillingLookup {
+                provider: BillingProvider::OpenAiCosts,
+                admin_token: token.to_string(),
+                poll_seconds: self.openai_cost_poll_seconds,
+            })
+    }
 }
 
 #[derive(Debug, Clone, Args)]
@@ -883,10 +970,50 @@ async fn models_command(
     })?;
     eprintln!("Waiting for provider model list...");
     let client = ReqwestProviderClient::new()?;
-    for model in client.list_models(profile, &token).await? {
-        println!("{model}");
+    for model in client.list_model_info(profile, &token).await? {
+        println!("{}", format_model_line(&model));
     }
     Ok(())
+}
+
+fn format_model_line(model: &ModelInfo) -> String {
+    let Some(pricing) = model.pricing.as_ref() else {
+        return model.id.clone();
+    };
+    format!(
+        "{}\tinput={:.8}/{}/1M output={:.8}/{}/1M",
+        model.id,
+        pricing.input_per_million,
+        pricing.currency,
+        pricing.output_per_million,
+        pricing.currency
+    )
+}
+
+async fn request_pricing(
+    pricing_args: &PricingArgs,
+    client: &ReqwestProviderClient,
+    secrets: &dyn SecretStore,
+    config: &AppConfig,
+    profile_name: &str,
+    profile: &ProfileConfig,
+) -> Result<Option<ModelPricing>, AppError> {
+    if let Some(pricing) = pricing_args.model_pricing()? {
+        return Ok(Some(pricing));
+    }
+    let Some(token) = get_config_profile_token(secrets, config, profile_name, profile)? else {
+        return Ok(None);
+    };
+    match client.list_model_info(profile, &token).await {
+        Ok(models) => Ok(models
+            .into_iter()
+            .find(|model| model.id == profile.model)
+            .and_then(|model| model.pricing)),
+        Err(error) => {
+            eprintln!("Could not load model pricing from /models: {error}");
+            Ok(None)
+        }
+    }
 }
 
 async fn ask_command(args: &AskArgs, secrets: &dyn SecretStore) -> Result<(), AppError> {
@@ -894,6 +1021,8 @@ async fn ask_command(args: &AskArgs, secrets: &dyn SecretStore) -> Result<(), Ap
     let (name, profile) = config.selected_profile(args.profile.as_deref())?;
     eprintln!("Waiting for provider response...");
     let client = ReqwestProviderClient::new()?;
+    let pricing = request_pricing(&args.pricing, &client, secrets, &config, &name, profile).await?;
+    let billing = args.billing.billing_lookup();
     let response = chat::ask_once(
         &client,
         secrets,
@@ -902,6 +1031,8 @@ async fn ask_command(args: &AskArgs, secrets: &dyn SecretStore) -> Result<(), Ap
         profile,
         args.prompt.clone(),
         ResponseControl::from(&args.control),
+        pricing,
+        billing,
     )
     .await?;
     println!("{}", response.text);
@@ -913,6 +1044,8 @@ async fn chat_command(args: &ChatArgs, secrets: &dyn SecretStore) -> Result<(), 
     let config = AppConfig::load()?;
     let (name, profile) = config.selected_profile(args.profile.as_deref())?;
     let client = ReqwestProviderClient::new()?;
+    let pricing = request_pricing(&args.pricing, &client, secrets, &config, &name, profile).await?;
+    let billing = args.billing.billing_lookup();
     chat::interactive_chat(
         &client,
         secrets,
@@ -920,6 +1053,8 @@ async fn chat_command(args: &ChatArgs, secrets: &dyn SecretStore) -> Result<(), 
         &name,
         profile,
         ResponseControl::from(&args.control),
+        pricing,
+        billing,
         chat::ConversationGoal::from(&args.goal),
     )
     .await
@@ -929,8 +1064,10 @@ async fn compare_command(args: &CompareArgs, secrets: &dyn SecretStore) -> Resul
     let config = AppConfig::load()?;
     let (name, profile) = config.selected_profile(args.profile.as_deref())?;
     let control = ResponseControl::from(&args.control);
-    eprintln!("Waiting for unrestricted and controlled provider responses...");
     let client = ReqwestProviderClient::new()?;
+    let pricing = request_pricing(&args.pricing, &client, secrets, &config, &name, profile).await?;
+    let billing = args.billing.billing_lookup();
+    eprintln!("Waiting for unrestricted and controlled provider responses...");
     let (unrestricted, controlled) = chat::compare_response_control(
         &client,
         secrets,
@@ -939,6 +1076,8 @@ async fn compare_command(args: &CompareArgs, secrets: &dyn SecretStore) -> Resul
         profile,
         args.prompt.clone(),
         control,
+        pricing,
+        billing,
     )
     .await?;
     println!("## Without constraints\n{}\n", unrestricted.text);
@@ -965,8 +1104,10 @@ async fn compare_goal_command(
             "compare-goal requires at least one --required-field".to_string(),
         ));
     }
-    eprintln!("Waiting for state, instruction, and combined goal-stop responses...");
     let client = ReqwestProviderClient::new()?;
+    let pricing = request_pricing(&args.pricing, &client, secrets, &config, &name, profile).await?;
+    let billing = args.billing.billing_lookup();
+    eprintln!("Waiting for state, instruction, and combined goal-stop responses...");
     let comparison = chat::compare_goal_stop(
         &client,
         secrets,
@@ -975,6 +1116,8 @@ async fn compare_goal_command(
         profile,
         args.prompt.clone(),
         args.required_field.clone(),
+        pricing,
+        billing,
     )
     .await?;
     print_goal_run("State-based stop", &comparison.state);

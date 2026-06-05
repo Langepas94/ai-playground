@@ -314,6 +314,8 @@ pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
     pub control: ResponseControl,
+    pub pricing: Option<ModelPricing>,
+    pub billing: Option<BillingLookup>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -321,6 +323,36 @@ pub struct TokenUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub total_tokens: u32,
+    pub cache_hit_input_tokens: Option<u32>,
+    pub cache_miss_input_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ModelPricing {
+    pub currency: String,
+    pub input_per_million: f64,
+    pub output_per_million: f64,
+    pub cache_hit_input_per_million: Option<f64>,
+    pub cache_miss_input_per_million: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ModelInfo {
+    pub id: String,
+    pub pricing: Option<ModelPricing>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct BillingLookup {
+    pub provider: BillingProvider,
+    pub admin_token: String,
+    pub poll_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BillingProvider {
+    OpenAiCosts,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -334,12 +366,16 @@ pub struct RequestCost {
 #[serde(rename_all = "kebab-case")]
 pub enum CostSource {
     ProviderReported,
+    ConfiguredPricing,
+    BillingApi,
 }
 
 impl std::fmt::Display for CostSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ProviderReported => write!(f, "provider-reported"),
+            Self::ConfiguredPricing => write!(f, "configured-pricing"),
+            Self::BillingApi => write!(f, "billing-api"),
         }
     }
 }
@@ -476,6 +512,16 @@ impl ReqwestProviderClient {
         }
     }
 
+    pub async fn list_model_info(
+        &self,
+        profile: &ProfileConfig,
+        token: &str,
+    ) -> Result<Vec<ModelInfo>, AppError> {
+        let spec = profile.provider.spec();
+        let token = self.bearer_token(profile, token).await?;
+        openai_compatible::list_model_info(&self.client, spec, profile, &token).await
+    }
+
     pub async fn chat_completion_with_debug(
         &self,
         profile: &ProfileConfig,
@@ -518,6 +564,8 @@ mod tests {
                 content: "hello".to_string(),
             }],
             control: ResponseControl::uncontrolled(),
+            pricing: None,
+            billing: None,
         });
 
         assert_eq!(payload.model, "m");
@@ -569,6 +617,8 @@ mod tests {
                 format_instruction: None,
                 completion_instruction: Some("Stop after the summary field.".to_string()),
             },
+            pricing: None,
+            billing: None,
         });
 
         assert_eq!(payload.max_tokens, Some(64));
@@ -621,6 +671,8 @@ mod tests {
                     include_reasoning: Some(true),
                     ..ResponseControl::uncontrolled()
                 },
+                pricing: None,
+                billing: None,
             },
         );
 

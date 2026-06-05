@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, time::Instant};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use reqwest::Client;
 use reqwest::{StatusCode, header::RETRY_AFTER};
@@ -8,9 +11,10 @@ use crate::{
     config::ProfileConfig,
     errors::{AppError, EndpointCategory, HttpProblem, ProviderHttpError, map_http_status},
     providers::{
-        AuthScheme, ChatMessage, ChatRequest, ChatResponse, CostSource, HttpDebugRequest,
-        HttpDebugResponse, ProviderExchangeDebug, ProviderKind, ProviderSpec, RequestCost,
-        RequestMetrics, ResponseControl, ResponseFormat, StaticHeader, TokenUsage,
+        AuthScheme, BillingLookup, BillingProvider, ChatMessage, ChatRequest, ChatResponse,
+        CostSource, HttpDebugRequest, HttpDebugResponse, ModelInfo, ModelPricing,
+        ProviderExchangeDebug, ProviderKind, ProviderSpec, RequestCost, RequestMetrics,
+        ResponseControl, ResponseFormat, StaticHeader, TokenUsage,
     },
 };
 
@@ -33,6 +37,19 @@ pub async fn list_models(
     profile: &ProfileConfig,
     token: &str,
 ) -> Result<Vec<String>, AppError> {
+    Ok(list_model_info(client, spec, profile, token)
+        .await?
+        .into_iter()
+        .map(|model| model.id)
+        .collect())
+}
+
+pub async fn list_model_info(
+    client: &Client,
+    spec: ProviderSpec,
+    profile: &ProfileConfig,
+    token: &str,
+) -> Result<Vec<ModelInfo>, AppError> {
     let url = endpoint(&profile.base_url, "models");
     let request = authorized(client.get(url), spec, token);
     let response = request
@@ -51,6 +68,14 @@ pub async fn chat_completion(
     request: ChatRequest,
 ) -> Result<ChatResponse, AppError> {
     let url = endpoint(&profile.base_url, "chat/completions");
+    let pricing = request.pricing.clone();
+    let billing = request.billing.clone();
+    let billing_window_start = unix_seconds().saturating_sub(60);
+    let billing_before =
+        billing_cost_before_request(client, billing.as_ref(), billing_window_start)
+            .await
+            .ok()
+            .flatten();
     let started = Instant::now();
     let request = authorized(client.post(url), spec, token)
         .json(&chat_payload_for_provider(spec.kind, request))
@@ -59,7 +84,17 @@ pub async fn chat_completion(
         .await
         .map_err(|error| map_network_error(spec, EndpointCategory::Chat, error))?;
     let raw = response_text_or_error(response, spec, EndpointCategory::Chat).await?;
-    parse_chat_response(spec, &raw, started.elapsed().as_millis())
+    let mut parsed =
+        parse_chat_response(spec, &raw, started.elapsed().as_millis(), pricing.as_ref())?;
+    apply_billing_cost(
+        client,
+        billing.as_ref(),
+        billing_window_start,
+        billing_before,
+        &mut parsed,
+    )
+    .await?;
+    Ok(parsed)
 }
 
 pub async fn chat_completion_with_debug(
@@ -70,6 +105,14 @@ pub async fn chat_completion_with_debug(
     request: ChatRequest,
 ) -> Result<(ChatResponse, ProviderExchangeDebug), AppError> {
     let url = endpoint(&profile.base_url, "chat/completions");
+    let pricing = request.pricing.clone();
+    let billing = request.billing.clone();
+    let billing_window_start = unix_seconds().saturating_sub(60);
+    let billing_before =
+        billing_cost_before_request(client, billing.as_ref(), billing_window_start)
+            .await
+            .ok()
+            .flatten();
     let body = serde_json::to_value(chat_payload_for_provider(spec.kind, request))
         .map_err(|error| AppError::Json(error.to_string()))?;
     let provider_request = HttpDebugRequest {
@@ -97,7 +140,15 @@ pub async fn chat_completion_with_debug(
             short_reason(&raw),
         )));
     }
-    let parsed = parse_chat_response(spec, &raw, elapsed_ms)?;
+    let mut parsed = parse_chat_response(spec, &raw, elapsed_ms, pricing.as_ref())?;
+    apply_billing_cost(
+        client,
+        billing.as_ref(),
+        billing_window_start,
+        billing_before,
+        &mut parsed,
+    )
+    .await?;
     let provider_response = HttpDebugResponse {
         status: status.as_u16(),
         headers,
@@ -299,6 +350,14 @@ struct OpenAiUsage {
     completion_tokens: Option<u32>,
     total_tokens: Option<u32>,
     cost: Option<f64>,
+    prompt_cache_hit_tokens: Option<u32>,
+    prompt_cache_miss_tokens: Option<u32>,
+    prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiPromptTokensDetails {
+    cached_tokens: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -309,6 +368,37 @@ struct ModelsResponse {
 #[derive(Debug, Deserialize)]
 struct ModelEntry {
     id: String,
+    pricing: Option<ModelEntryPricing>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelEntryPricing {
+    prompt: Option<serde_json::Value>,
+    completion: Option<serde_json::Value>,
+    input: Option<serde_json::Value>,
+    output: Option<serde_json::Value>,
+    currency: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiCostsResponse {
+    data: Vec<OpenAiCostsBucket>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiCostsBucket {
+    results: Vec<OpenAiCostsResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiCostsResult {
+    amount: Option<OpenAiCostAmount>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiCostAmount {
+    currency: Option<String>,
+    value: Option<f64>,
 }
 
 pub fn chat_payload(request: ChatRequest) -> OpenAiChatPayload {
@@ -383,6 +473,7 @@ fn parse_chat_response(
     spec: ProviderSpec,
     raw: &str,
     elapsed_ms: u128,
+    pricing: Option<&ModelPricing>,
 ) -> Result<ChatResponse, AppError> {
     let parsed: OpenAiChatResponse = serde_json::from_str(raw).map_err(|error| {
         AppError::ProviderHttp(ProviderHttpError {
@@ -414,7 +505,7 @@ fn parse_chat_response(
         metrics: RequestMetrics {
             elapsed_ms,
             usage: parsed.usage.as_ref().map(token_usage),
-            cost: parsed.usage.and_then(provider_reported_cost),
+            cost: parsed.usage.and_then(|usage| request_cost(usage, pricing)),
         },
     })
 }
@@ -428,18 +519,163 @@ fn token_usage(usage: &OpenAiUsage) -> TokenUsage {
         total_tokens: usage
             .total_tokens
             .unwrap_or_else(|| input_tokens.saturating_add(output_tokens)),
+        cache_hit_input_tokens: cache_hit_input_tokens(usage),
+        cache_miss_input_tokens: usage.prompt_cache_miss_tokens,
     }
 }
 
-fn provider_reported_cost(usage: OpenAiUsage) -> Option<RequestCost> {
-    usage.cost.map(|amount| RequestCost {
-        amount,
-        currency: "credits".to_string(),
-        source: CostSource::ProviderReported,
+fn cache_hit_input_tokens(usage: &OpenAiUsage) -> Option<u32> {
+    usage
+        .prompt_cache_hit_tokens
+        .or_else(|| usage.prompt_tokens_details.as_ref()?.cached_tokens)
+}
+
+fn request_cost(usage: OpenAiUsage, pricing: Option<&ModelPricing>) -> Option<RequestCost> {
+    if let Some(amount) = usage.cost {
+        return Some(RequestCost {
+            amount,
+            currency: "credits".to_string(),
+            source: CostSource::ProviderReported,
+        });
+    }
+    configured_cost(&usage, pricing?)
+}
+
+fn configured_cost(usage: &OpenAiUsage, pricing: &ModelPricing) -> Option<RequestCost> {
+    let input_tokens = usage.prompt_tokens?;
+    let output_tokens = usage.completion_tokens.unwrap_or_default();
+    let input_cost = match (
+        cache_hit_input_tokens(usage),
+        usage.prompt_cache_miss_tokens,
+        pricing.cache_hit_input_per_million,
+        pricing.cache_miss_input_per_million,
+    ) {
+        (Some(hit), Some(miss), Some(hit_price), Some(miss_price)) => {
+            token_cost(hit, hit_price) + token_cost(miss, miss_price)
+        }
+        _ => token_cost(input_tokens, pricing.input_per_million),
+    };
+    let output_cost = token_cost(output_tokens, pricing.output_per_million);
+    Some(RequestCost {
+        amount: input_cost + output_cost,
+        currency: pricing.currency.clone(),
+        source: CostSource::ConfiguredPricing,
     })
 }
 
-fn parse_models_response(spec: ProviderSpec, raw: &str) -> Result<Vec<String>, AppError> {
+fn token_cost(tokens: u32, price_per_million: f64) -> f64 {
+    f64::from(tokens) * price_per_million / 1_000_000.0
+}
+
+async fn billing_cost_before_request(
+    client: &Client,
+    billing: Option<&BillingLookup>,
+    window_start: u64,
+) -> Result<Option<RequestCost>, AppError> {
+    let Some(billing) = billing else {
+        return Ok(None);
+    };
+    match billing.provider {
+        BillingProvider::OpenAiCosts => openai_costs_total(client, billing, window_start).await,
+    }
+}
+
+async fn apply_billing_cost(
+    client: &Client,
+    billing: Option<&BillingLookup>,
+    window_start: u64,
+    before: Option<RequestCost>,
+    response: &mut ChatResponse,
+) -> Result<(), AppError> {
+    if matches!(
+        response.metrics.cost.as_ref().map(|cost| &cost.source),
+        Some(CostSource::ProviderReported)
+    ) {
+        return Ok(());
+    }
+    let Some(billing) = billing else {
+        return Ok(());
+    };
+    match billing.provider {
+        BillingProvider::OpenAiCosts => {
+            let before_amount = before.as_ref().map(|cost| cost.amount).unwrap_or_default();
+            let deadline = Instant::now() + Duration::from_secs(billing.poll_seconds);
+            loop {
+                if let Some(after) = openai_costs_total(client, billing, window_start).await? {
+                    let delta = after.amount - before_amount;
+                    if delta > 0.0 || Instant::now() >= deadline {
+                        if delta > 0.0 {
+                            response.metrics.cost = Some(RequestCost {
+                                amount: delta,
+                                currency: after.currency,
+                                source: CostSource::BillingApi,
+                            });
+                        }
+                        return Ok(());
+                    }
+                }
+                if Instant::now() >= deadline {
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        }
+    }
+}
+
+async fn openai_costs_total(
+    client: &Client,
+    billing: &BillingLookup,
+    window_start: u64,
+) -> Result<Option<RequestCost>, AppError> {
+    let start_time = window_start.to_string();
+    let end_time = unix_seconds().saturating_add(120).to_string();
+    let response = client
+        .get("https://api.openai.com/v1/organization/costs")
+        .bearer_auth(&billing.admin_token)
+        .query(&[
+            ("start_time", start_time.as_str()),
+            ("end_time", end_time.as_str()),
+            ("bucket_width", "1m"),
+        ])
+        .send()
+        .await
+        .map_err(|error| map_network_error(spec(), EndpointCategory::Chat, error))?;
+    let raw = response_text_or_error(response, spec(), EndpointCategory::Chat).await?;
+    parse_openai_costs_total(&raw)
+}
+
+fn parse_openai_costs_total(raw: &str) -> Result<Option<RequestCost>, AppError> {
+    let parsed: OpenAiCostsResponse = serde_json::from_str(raw)
+        .map_err(|error| AppError::Json(format!("invalid OpenAI costs response: {error}")))?;
+    let mut currency = None;
+    let amount = parsed
+        .data
+        .iter()
+        .flat_map(|bucket| bucket.results.iter())
+        .filter_map(|result| result.amount.as_ref())
+        .filter_map(|amount| {
+            if currency.is_none() {
+                currency = amount.currency.clone();
+            }
+            amount.value
+        })
+        .sum::<f64>();
+    Ok(Some(RequestCost {
+        amount,
+        currency: currency.unwrap_or_else(|| "usd".to_string()),
+        source: CostSource::BillingApi,
+    }))
+}
+
+fn unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
+fn parse_models_response(spec: ProviderSpec, raw: &str) -> Result<Vec<ModelInfo>, AppError> {
     let parsed: ModelsResponse = serde_json::from_str(raw).map_err(|error| {
         AppError::ProviderHttp(ProviderHttpError {
             provider: spec.kind.to_string(),
@@ -449,7 +685,34 @@ fn parse_models_response(spec: ProviderSpec, raw: &str) -> Result<Vec<String>, A
             reason: error.to_string(),
         })
     })?;
-    Ok(parsed.data.into_iter().map(|model| model.id).collect())
+    Ok(parsed
+        .data
+        .into_iter()
+        .map(|model| ModelInfo {
+            pricing: model.pricing.and_then(model_pricing_from_entry),
+            id: model.id,
+        })
+        .collect())
+}
+
+fn model_pricing_from_entry(pricing: ModelEntryPricing) -> Option<ModelPricing> {
+    let input = pricing.prompt.or(pricing.input)?;
+    let output = pricing.completion.or(pricing.output)?;
+    Some(ModelPricing {
+        currency: pricing.currency.unwrap_or_else(|| "USD".to_string()),
+        input_per_million: parse_price_per_token(&input)? * 1_000_000.0,
+        output_per_million: parse_price_per_token(&output)? * 1_000_000.0,
+        cache_hit_input_per_million: None,
+        cache_miss_input_per_million: None,
+    })
+}
+
+fn parse_price_per_token(value: &serde_json::Value) -> Option<f64> {
+    match value {
+        serde_json::Value::Number(number) => number.as_f64(),
+        serde_json::Value::String(text) => text.parse::<f64>().ok(),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -471,7 +734,7 @@ mod tests {
             }
         }"#;
 
-        let response = parse_chat_response(spec(), raw, 123).expect("parse response");
+        let response = parse_chat_response(spec(), raw, 123, None).expect("parse response");
 
         assert_eq!(response.text, "hello");
         assert_eq!(response.finish_reason.as_deref(), Some("stop"));
@@ -482,6 +745,8 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 4,
                 total_tokens: 14,
+                cache_hit_input_tokens: None,
+                cache_miss_input_tokens: None,
             })
         );
         let cost = response.metrics.cost.expect("provider-reported cost");
@@ -504,8 +769,97 @@ mod tests {
             }
         }"#;
 
-        let response = parse_chat_response(spec(), raw, 123).expect("parse response");
+        let response = parse_chat_response(spec(), raw, 123, None).expect("parse response");
 
         assert_eq!(response.metrics.cost, None);
+    }
+
+    #[test]
+    fn chat_response_calculates_cost_from_configured_pricing() {
+        let raw = r#"{
+            "choices": [{
+                "message": { "content": "hello" },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 500,
+                "total_tokens": 1500
+            }
+        }"#;
+        let pricing = ModelPricing {
+            currency: "USD".to_string(),
+            input_per_million: 2.0,
+            output_per_million: 10.0,
+            cache_hit_input_per_million: None,
+            cache_miss_input_per_million: None,
+        };
+
+        let response =
+            parse_chat_response(spec(), raw, 123, Some(&pricing)).expect("parse response");
+
+        let cost = response.metrics.cost.expect("configured cost");
+        assert!((cost.amount - 0.007).abs() < f64::EPSILON);
+        assert_eq!(cost.currency, "USD");
+        assert_eq!(cost.source, CostSource::ConfiguredPricing);
+    }
+
+    #[test]
+    fn chat_response_uses_cache_pricing_when_usage_has_cache_breakdown() {
+        let raw = r#"{
+            "choices": [{
+                "message": { "content": "hello" },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 500,
+                "total_tokens": 1500,
+                "prompt_cache_hit_tokens": 800,
+                "prompt_cache_miss_tokens": 200
+            }
+        }"#;
+        let pricing = ModelPricing {
+            currency: "USD".to_string(),
+            input_per_million: 2.0,
+            output_per_million: 10.0,
+            cache_hit_input_per_million: Some(0.2),
+            cache_miss_input_per_million: Some(2.0),
+        };
+
+        let response =
+            parse_chat_response(spec(), raw, 123, Some(&pricing)).expect("parse response");
+
+        assert_eq!(
+            response
+                .metrics
+                .usage
+                .expect("usage")
+                .cache_hit_input_tokens,
+            Some(800)
+        );
+        let cost = response.metrics.cost.expect("configured cost");
+        assert!((cost.amount - 0.00556).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn models_response_parses_pricing_metadata() {
+        let raw = r#"{
+            "data": [{
+                "id": "provider/model",
+                "pricing": {
+                    "prompt": "0.0000007",
+                    "completion": 0.0000021,
+                    "currency": "USD"
+                }
+            }]
+        }"#;
+
+        let models = parse_models_response(spec(), raw).expect("parse models");
+
+        assert_eq!(models[0].id, "provider/model");
+        let pricing = models[0].pricing.as_ref().expect("pricing");
+        assert!((pricing.input_per_million - 0.7).abs() < f64::EPSILON);
+        assert!((pricing.output_per_million - 2.1).abs() < 0.0000000001);
     }
 }

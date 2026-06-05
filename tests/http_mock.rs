@@ -2,8 +2,8 @@ use ai_playground::{
     config::ProfileConfig,
     errors::{AppError, HttpProblem},
     providers::{
-        ChatMessage, ChatRequest, ProviderClient, ProviderKind, ReqwestProviderClient,
-        ResponseControl, Role,
+        ChatMessage, ChatRequest, CostSource, ModelPricing, ProviderClient, ProviderKind,
+        ReqwestProviderClient, ResponseControl, Role,
     },
 };
 use reqwest::StatusCode;
@@ -43,12 +43,68 @@ async fn chat_completion_uses_mock_provider() {
                     content: "hello".to_string(),
                 }],
                 control: ResponseControl::uncontrolled(),
+                pricing: None,
+                billing: None,
             },
         )
         .await
         .expect("chat");
 
     assert_eq!(response.text, "hello back");
+}
+
+#[tokio::test]
+async fn chat_completion_calculates_cost_from_configured_pricing() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(bearer_token("secret"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{ "message": { "content": "hello back" } }],
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 500,
+                "total_tokens": 1500
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let profile = ProfileConfig {
+        provider: ProviderKind::OpenAiCompatible,
+        model: "test-model".to_string(),
+        base_url: server.uri(),
+        token_ref: "openai-compatible:test".to_string(),
+    };
+    let client = ReqwestProviderClient::new().expect("client");
+    let response = client
+        .chat_completion(
+            &profile,
+            "secret",
+            ChatRequest {
+                model: "test-model".to_string(),
+                messages: vec![ChatMessage {
+                    role: Role::User,
+                    content: "hello".to_string(),
+                }],
+                control: ResponseControl::uncontrolled(),
+                pricing: Some(ModelPricing {
+                    currency: "USD".to_string(),
+                    input_per_million: 2.0,
+                    output_per_million: 10.0,
+                    cache_hit_input_per_million: None,
+                    cache_miss_input_per_million: None,
+                }),
+                billing: None,
+            },
+        )
+        .await
+        .expect("chat");
+
+    let cost = response.metrics.cost.expect("configured cost");
+    assert!((cost.amount - 0.007).abs() < f64::EPSILON);
+    assert_eq!(cost.currency, "USD");
+    assert_eq!(cost.source, CostSource::ConfiguredPricing);
 }
 
 #[tokio::test]
@@ -81,6 +137,8 @@ async fn chat_completion_debug_redacts_auth_and_keeps_json_bodies() {
                     content: "hello".to_string(),
                 }],
                 control: ResponseControl::uncontrolled(),
+                pricing: None,
+                billing: None,
             },
         )
         .await
@@ -132,6 +190,8 @@ async fn chat_completion_falls_back_to_reasoning_content_when_content_is_empty()
                     content: "hello".to_string(),
                 }],
                 control: ResponseControl::uncontrolled(),
+                pricing: None,
+                billing: None,
             },
         )
         .await
