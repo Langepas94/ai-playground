@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 
 use crate::{
-    chat::ChatAgent,
+    chat::{ChatAgent, LocalSessionStore, web_session_key},
     config::{AppConfig, ProfileConfig, token_ref},
     errors::AppError,
     providers::{
@@ -28,17 +28,24 @@ const INDEX_HTML: &str = include_str!("ui.html");
 struct AppState {
     client: ReqwestProviderClient,
     secrets: Arc<dyn SecretStore>,
+    sessions: LocalSessionStore,
 }
 
 pub async fn serve(addr: SocketAddr) -> Result<(), AppError> {
     let client = ReqwestProviderClient::new()?;
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
+    let sessions = LocalSessionStore::new()?;
     let app = Router::new()
         .route("/", get(index))
         .route("/api/providers", get(providers))
         .route("/api/models", post(models))
+        .route("/api/chat/session", post(chat_session))
         .route("/api/chat", post(chat))
-        .with_state(AppState { client, secrets });
+        .with_state(AppState {
+            client,
+            secrets,
+            sessions,
+        });
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|error| AppError::Terminal(error.to_string()))?;
@@ -109,11 +116,20 @@ async fn chat(
         &request.token,
         request.token_provider.as_deref(),
     )?;
+    let session_key = web_session_key(&profile.provider.to_string(), &profile.model);
+    let session = if request.new_session {
+        state.sessions.create_session()?
+    } else {
+        match request.session_id.as_deref().and_then(blank_str_to_none) {
+            Some(session_id) => state.sessions.load_session(session_id)?,
+            None => state.sessions.load_or_create_latest(&session_key)?,
+        }
+    };
     let control = request.control.clone().into_control();
     let mut agent = ChatAgent::new(
         profile.clone(),
         token,
-        request.initial_history(),
+        request.initial_history(session.messages),
         control,
         request
             .pricing
@@ -127,7 +143,11 @@ async fn chat(
     let (response, provider_debug) = agent
         .respond_with_debug(&state.client, request.prompt.clone())
         .await?;
+    state
+        .sessions
+        .save_session(&session_key, &session.id, agent.history())?;
     Ok(Json(ChatWebResponse {
+        session_id: session.id,
         text: response.text,
         finish_reason: response.finish_reason,
         metrics: response.metrics,
@@ -136,6 +156,32 @@ async fn chat(
             provider_request: provider_debug.request,
             provider_response: provider_debug.response,
         },
+    }))
+}
+
+async fn chat_session(
+    State(state): State<AppState>,
+    Json(request): Json<ChatSessionRequest>,
+) -> Result<Json<ChatSessionResponse>, WebError> {
+    let provider = parse_provider(&request.provider)?;
+    let model = blank_to_none(Some(request.model))
+        .ok_or_else(|| AppError::InvalidInput("Model is required".to_string()))?;
+    let session_key = web_session_key(&provider.to_string(), &model);
+    let session = if request.new_session {
+        let session = state.sessions.create_session()?;
+        state
+            .sessions
+            .save_session(&session_key, &session.id, &session.messages)?;
+        session
+    } else {
+        match request.session_id.as_deref().and_then(blank_str_to_none) {
+            Some(session_id) => state.sessions.load_session(session_id)?,
+            None => state.sessions.load_or_create_latest(&session_key)?,
+        }
+    };
+    Ok(Json(ChatSessionResponse {
+        session_id: session.id,
+        messages: session.messages,
     }))
 }
 
@@ -390,6 +436,8 @@ struct ChatWebRequest {
     model: String,
     system_prompt: Option<String>,
     prompt: String,
+    session_id: Option<String>,
+    new_session: bool,
     messages: Option<Vec<ChatMessage>>,
     control: WebResponseControl,
     pricing: Option<WebPricing>,
@@ -410,8 +458,12 @@ impl ChatWebRequest {
         })
     }
 
-    fn initial_history(&self) -> Vec<ChatMessage> {
-        let mut messages = self.messages.clone().unwrap_or_default();
+    fn initial_history(&self, stored_messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+        let mut messages = if stored_messages.is_empty() {
+            self.messages.clone().unwrap_or_default()
+        } else {
+            stored_messages
+        };
         if let Some(system_prompt) = blank_to_none(self.system_prompt.clone()) {
             let has_system = messages.iter().any(|message| message.role == Role::System);
             if !has_system {
@@ -426,6 +478,20 @@ impl ChatWebRequest {
         }
         messages
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatSessionRequest {
+    provider: String,
+    model: String,
+    session_id: Option<String>,
+    new_session: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ChatSessionResponse {
+    session_id: String,
+    messages: Vec<ChatMessage>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -551,6 +617,7 @@ impl WebResponseControl {
 
 #[derive(Debug, Serialize)]
 struct ChatWebResponse {
+    session_id: String,
     text: String,
     finish_reason: Option<String>,
     metrics: crate::providers::RequestMetrics,
@@ -618,6 +685,11 @@ fn blank_to_none(value: Option<String>) -> Option<String> {
         let trimmed = value.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_string())
     })
+}
+
+fn blank_str_to_none(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
 }
 
 struct WebError(AppError);
@@ -721,13 +793,15 @@ mod tests {
             model: "deepseek-chat".to_string(),
             system_prompt: Some("Ты отвечаешь кратко.".to_string()),
             prompt: "Привет".to_string(),
+            session_id: None,
+            new_session: false,
             messages: None,
             control: WebResponseControl::default(),
             pricing: None,
             billing: None,
         };
 
-        let messages = request.initial_history();
+        let messages = request.initial_history(Vec::new());
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, Role::System);
@@ -744,6 +818,8 @@ mod tests {
             model: "deepseek-chat".to_string(),
             system_prompt: Some("Ты отвечаешь кратко.".to_string()),
             prompt: "Продолжи".to_string(),
+            session_id: None,
+            new_session: false,
             messages: Some(vec![
                 ChatMessage {
                     role: Role::System,
@@ -763,7 +839,7 @@ mod tests {
             billing: None,
         };
 
-        let messages = request.initial_history();
+        let messages = request.initial_history(Vec::new());
 
         assert_eq!(messages.len(), 3);
         assert_eq!(
@@ -773,6 +849,36 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn web_chat_initial_history_prefers_local_store_over_client_messages() {
+        let request = ChatWebRequest {
+            provider: "deepseek".to_string(),
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            token: String::new(),
+            token_provider: None,
+            model: "deepseek-chat".to_string(),
+            system_prompt: None,
+            prompt: "Продолжи".to_string(),
+            session_id: Some("session".to_string()),
+            new_session: false,
+            messages: Some(vec![ChatMessage {
+                role: Role::User,
+                content: "client".to_string(),
+            }]),
+            control: WebResponseControl::default(),
+            pricing: None,
+            billing: None,
+        };
+
+        let messages = request.initial_history(vec![ChatMessage {
+            role: Role::Assistant,
+            content: "stored".to_string(),
+        }]);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "stored");
     }
 
     /// Баг 2: WebPricing с только output ценой должен конвертироваться в Some(ModelPricing)
