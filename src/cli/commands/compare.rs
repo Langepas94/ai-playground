@@ -17,15 +17,18 @@ pub async fn run_compare(args: &CompareArgs, secrets: &dyn SecretStore) -> Resul
     let billing = args.billing.billing_lookup();
     eprintln!("Waiting for unrestricted and controlled provider responses...");
     let (unrestricted, controlled) = chat::compare_response_control(
-        &client,
-        secrets,
-        &config,
-        &name,
-        profile,
+        chat::ChatRuntime {
+            client: &client,
+            secrets,
+            config: &config,
+        },
+        chat::SelectedProfile {
+            name: &name,
+            config: profile,
+        },
         args.prompt.clone(),
         control,
-        pricing,
-        billing,
+        chat::RequestOptions { pricing, billing },
     )
     .await?;
     println!("## Without constraints\n{}\n", unrestricted.text);
@@ -57,15 +60,18 @@ pub async fn run_compare_goal(
     let billing = args.billing.billing_lookup();
     eprintln!("Waiting for state, instruction, and combined goal-stop responses...");
     let comparison = chat::compare_goal_stop(
-        &client,
-        secrets,
-        &config,
-        &name,
-        profile,
+        chat::ChatRuntime {
+            client: &client,
+            secrets,
+            config: &config,
+        },
+        chat::SelectedProfile {
+            name: &name,
+            config: profile,
+        },
         args.prompt.clone(),
         args.required_field.clone(),
-        pricing,
-        billing,
+        chat::RequestOptions { pricing, billing },
     )
     .await?;
     print_goal_run("State-based stop", &comparison.state);

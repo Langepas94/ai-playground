@@ -15,14 +15,17 @@ pub async fn run_chat(args: &ChatArgs, secrets: &dyn SecretStore) -> Result<(), 
     let pricing = request_pricing(&args.pricing, &client, secrets, &config, &name, profile).await?;
     let billing = args.billing.billing_lookup();
     chat::interactive_chat(
-        &client,
-        secrets,
-        &config,
-        &name,
-        profile,
+        chat::ChatRuntime {
+            client: &client,
+            secrets,
+            config: &config,
+        },
+        chat::SelectedProfile {
+            name: &name,
+            config: profile,
+        },
         ResponseControl::from(&args.control),
-        pricing,
-        billing,
+        chat::RequestOptions { pricing, billing },
         chat::ConversationGoal::from(&args.goal),
     )
     .await
