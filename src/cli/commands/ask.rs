@@ -16,15 +16,18 @@ pub async fn run_ask(args: &AskArgs, secrets: &dyn SecretStore) -> Result<(), Ap
     let pricing = request_pricing(&args.pricing, &client, secrets, &config, &name, profile).await?;
     let billing = args.billing.billing_lookup();
     let response = chat::ask_once(
-        &client,
-        secrets,
-        &config,
-        &name,
-        profile,
+        chat::ChatRuntime {
+            client: &client,
+            secrets,
+            config: &config,
+        },
+        chat::SelectedProfile {
+            name: &name,
+            config: profile,
+        },
         args.prompt.clone(),
         ResponseControl::from(&args.control),
-        pricing,
-        billing,
+        chat::RequestOptions { pricing, billing },
     )
     .await?;
     println!("{}", response.text);

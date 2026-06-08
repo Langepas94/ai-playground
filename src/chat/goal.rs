@@ -5,11 +5,10 @@ use serde::Deserialize;
 use crate::{
     config::ProfileConfig,
     errors::AppError,
-    providers::{
-        BillingLookup, ChatMessage, ChatRequest, ModelPricing, ProviderClient, ResponseControl,
-        ResponseFormat, Role,
-    },
+    providers::{ChatMessage, ChatRequest, ProviderClient, ResponseControl, ResponseFormat, Role},
 };
+
+use super::RequestOptions;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConversationStopMode {
@@ -161,8 +160,7 @@ pub async fn run_goal_once(
     prompt: String,
     required_fields: &[String],
     mode: ConversationStopMode,
-    pricing: Option<ModelPricing>,
-    billing: Option<BillingLookup>,
+    options: RequestOptions,
 ) -> Result<GoalRun, AppError> {
     let goal = ConversationGoal {
         required_fields: required_fields.to_vec(),
@@ -179,8 +177,8 @@ pub async fn run_goal_once(
                     content: prompt,
                 }],
                 control: goal.apply_to_control(ResponseControl::uncontrolled()),
-                pricing,
-                billing,
+                pricing: options.pricing,
+                billing: options.billing,
             },
         )
         .await?;

@@ -26,46 +26,52 @@ use crate::{
     secrets::{SecretStore, get_config_profile_token},
 };
 
+#[derive(Clone, Copy)]
+pub struct ChatRuntime<'a> {
+    pub client: &'a dyn ProviderClient,
+    pub secrets: &'a dyn SecretStore,
+    pub config: &'a AppConfig,
+}
+
+#[derive(Clone, Copy)]
+pub struct SelectedProfile<'a> {
+    pub name: &'a str,
+    pub config: &'a ProfileConfig,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RequestOptions {
+    pub pricing: Option<ModelPricing>,
+    pub billing: Option<BillingLookup>,
+}
+
 pub async fn ask_once(
-    client: &dyn ProviderClient,
-    secrets: &dyn SecretStore,
-    config: &AppConfig,
-    profile_name: &str,
-    profile: &ProfileConfig,
+    runtime: ChatRuntime<'_>,
+    profile: SelectedProfile<'_>,
     prompt: String,
     control: ResponseControl,
-    pricing: Option<ModelPricing>,
-    billing: Option<BillingLookup>,
+    options: RequestOptions,
 ) -> Result<crate::providers::ChatResponse, AppError> {
-    let token =
-        get_config_profile_token(secrets, config, profile_name, profile)?.ok_or_else(|| {
-            AppError::MissingToken {
-                profile: profile_name.to_string(),
-            }
-        })?;
+    let token = resolve_profile_token(runtime, profile)?;
     ChatAgent::new(
-        profile.clone(),
+        profile.config.clone(),
         token,
         Vec::new(),
         AgentMemory::default(),
         control.clone(),
-        pricing,
-        billing,
+        options.pricing,
+        options.billing,
     )
-    .respond(client, prompt)
+    .respond(runtime.client, prompt)
     .await
 }
 
 pub async fn compare_response_control(
-    client: &dyn ProviderClient,
-    secrets: &dyn SecretStore,
-    config: &AppConfig,
-    profile_name: &str,
-    profile: &ProfileConfig,
+    runtime: ChatRuntime<'_>,
+    profile: SelectedProfile<'_>,
     prompt: String,
     controlled: ResponseControl,
-    pricing: Option<ModelPricing>,
-    billing: Option<BillingLookup>,
+    options: RequestOptions,
 ) -> Result<
     (
         crate::providers::ChatResponse,
@@ -73,62 +79,49 @@ pub async fn compare_response_control(
     ),
     AppError,
 > {
-    let token =
-        get_config_profile_token(secrets, config, profile_name, profile)?.ok_or_else(|| {
-            AppError::MissingToken {
-                profile: profile_name.to_string(),
-            }
-        })?;
+    let token = resolve_profile_token(runtime, profile)?;
     let make_request = |control, prompt: String| ChatRequest {
-        model: profile.model.clone(),
+        model: profile.config.model.clone(),
         messages: vec![ChatMessage {
             role: Role::User,
             content: prompt,
         }],
         control,
-        pricing: pricing.clone(),
-        billing: billing.clone(),
+        pricing: options.pricing.clone(),
+        billing: options.billing.clone(),
     };
-    let unrestricted = client
+    let unrestricted = runtime
+        .client
         .chat_completion(
-            profile,
+            profile.config,
             &token,
             make_request(ResponseControl::uncontrolled(), prompt.clone()),
         )
         .await?;
-    let restricted = client
-        .chat_completion(profile, &token, make_request(controlled, prompt))
+    let restricted = runtime
+        .client
+        .chat_completion(profile.config, &token, make_request(controlled, prompt))
         .await?;
     Ok((unrestricted, restricted))
 }
 
 pub async fn compare_goal_stop(
-    client: &dyn ProviderClient,
-    secrets: &dyn SecretStore,
-    config: &AppConfig,
-    profile_name: &str,
-    profile: &ProfileConfig,
+    runtime: ChatRuntime<'_>,
+    profile: SelectedProfile<'_>,
     prompt: String,
     required_fields: Vec<String>,
-    pricing: Option<ModelPricing>,
-    billing: Option<BillingLookup>,
+    options: RequestOptions,
 ) -> Result<GoalComparison, AppError> {
-    let token =
-        get_config_profile_token(secrets, config, profile_name, profile)?.ok_or_else(|| {
-            AppError::MissingToken {
-                profile: profile_name.to_string(),
-            }
-        })?;
+    let token = resolve_profile_token(runtime, profile)?;
     let run = |mode| {
         run_goal_once(
-            client,
-            profile,
+            runtime.client,
+            profile.config,
             &token,
             prompt.clone(),
             &required_fields,
             mode,
-            pricing.clone(),
-            billing.clone(),
+            options.clone(),
         )
     };
     let state = run(ConversationStopMode::State).await?;
@@ -138,6 +131,21 @@ pub async fn compare_goal_stop(
         state,
         instruction,
         combined,
+    })
+}
+
+pub(crate) fn resolve_profile_token(
+    runtime: ChatRuntime<'_>,
+    profile: SelectedProfile<'_>,
+) -> Result<String, AppError> {
+    get_config_profile_token(
+        runtime.secrets,
+        runtime.config,
+        profile.name,
+        profile.config,
+    )?
+    .ok_or_else(|| AppError::MissingToken {
+        profile: profile.name.to_string(),
     })
 }
 
