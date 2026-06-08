@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 
 use crate::{
-    chat::{ChatAgent, LocalSessionStore, available_agents, selected_agent, web_session_key},
+    chat::{
+        AgentMemory, ChatAgent, LocalSessionStore, available_agents, selected_agent,
+        web_session_key,
+    },
     config::{AppConfig, ProfileConfig, token_ref},
     errors::AppError,
     providers::{
@@ -142,11 +145,13 @@ async fn chat(
             None => state.sessions.load_or_create_latest(&session_key)?,
         }
     };
+    let memory = state.sessions.load_memory(&session.id)?;
     let control = request.control.clone().into_control();
     let mut agent = ChatAgent::new(
         profile.clone(),
         token,
         request.initial_history(session.messages),
+        memory,
         control,
         request
             .pricing
@@ -163,6 +168,7 @@ async fn chat(
     state
         .sessions
         .save_session(&session_key, &session.id, agent.history())?;
+    state.sessions.save_memory(&session.id, agent.memory())?;
     Ok(Json(ChatWebResponse {
         agent_id: agent_spec.id.to_string(),
         session_id: session.id,
@@ -191,6 +197,9 @@ async fn chat_session(
         state
             .sessions
             .save_session(&session_key, &session.id, &session.messages)?;
+        state
+            .sessions
+            .save_memory(&session.id, &AgentMemory::default())?;
         session
     } else {
         match request.session_id.as_deref().and_then(blank_str_to_none) {

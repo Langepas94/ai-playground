@@ -36,10 +36,12 @@ pub async fn interactive_chat(
     let store = LocalSessionStore::new()?;
     let session_key = session_key(profile_name, &profile.model);
     let mut session = store.load_or_create_latest(&session_key)?;
+    let mut memory = store.load_memory(&session.id)?;
     let mut agent = ChatAgent::new(
         profile.clone(),
         token,
         session.messages.clone(),
+        memory,
         control.clone(),
         pricing,
         billing,
@@ -81,7 +83,9 @@ pub async fn interactive_chat(
             "/clear" => {
                 agent.clear_history();
                 session = store.create_session()?;
+                memory = agent.memory().clone();
                 store.save_session(&session_key, &session.id, agent.history())?;
+                store.save_memory(&session.id, &memory)?;
                 println!("History cleared. New session: {}", session.id);
                 continue;
             }
@@ -279,7 +283,9 @@ pub async fn interactive_chat(
         let effective_control = goal.apply_to_control(control.clone());
         agent.set_control(effective_control);
         let response = agent.respond(client, line.to_string()).await?;
+        memory = agent.memory().clone();
         store.save_session(&session_key, &session.id, agent.history())?;
+        store.save_memory(&session.id, &memory)?;
         println!("{}", response.text);
         eprintln!("{}", format_request_metrics(&response.metrics));
 

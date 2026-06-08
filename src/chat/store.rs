@@ -14,6 +14,8 @@ use crate::{
     providers::{ChatMessage, Role},
 };
 
+use super::memory::AgentMemory;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationSession {
     pub id: String,
@@ -105,6 +107,17 @@ impl LocalSessionStore {
         })
     }
 
+    pub fn load_memory(&self, session_id: &str) -> Result<AgentMemory, AppError> {
+        validate_session_id(session_id)?;
+        let path = self.memory_path(session_id);
+        if !path.exists() {
+            return Ok(AgentMemory::default());
+        }
+        let raw = fs::read_to_string(&path)
+            .map_err(|error| config_error(path.clone(), format!("read failed: {error}")))?;
+        crate::toon_codec::from_str_or_json::<AgentMemory>(&raw)
+    }
+
     pub fn save_session(
         &self,
         profile_key: &str,
@@ -151,6 +164,35 @@ impl LocalSessionStore {
         Ok(())
     }
 
+    pub fn save_memory(&self, session_id: &str, memory: &AgentMemory) -> Result<(), AppError> {
+        validate_session_id(session_id)?;
+        fs::create_dir_all(self.sessions_dir()).map_err(|error| {
+            config_error(
+                self.sessions_dir(),
+                format!("could not create directory: {error}"),
+            )
+        })?;
+
+        let path = self.memory_path(session_id);
+        let temp_path = path.with_extension("memory.toon.tmp");
+        {
+            let mut file = fs::File::create(&temp_path).map_err(|error| {
+                config_error(temp_path.clone(), format!("create failed: {error}"))
+            })?;
+            let raw = crate::toon_codec::to_string(memory)?;
+            writeln!(file, "{raw}").map_err(|error| {
+                config_error(temp_path.clone(), format!("write failed: {error}"))
+            })?;
+        }
+        fs::rename(&temp_path, &path).map_err(|error| {
+            config_error(
+                path.clone(),
+                format!("could not replace memory file: {error}"),
+            )
+        })?;
+        Ok(())
+    }
+
     fn sessions_dir(&self) -> PathBuf {
         self.root.join("data")
     }
@@ -161,6 +203,11 @@ impl LocalSessionStore {
 
     fn session_path(&self, session_id: &str) -> PathBuf {
         self.sessions_dir().join(format!("{session_id}.toon"))
+    }
+
+    fn memory_path(&self, session_id: &str) -> PathBuf {
+        self.sessions_dir()
+            .join(format!("{session_id}.memory.toon"))
     }
 
     fn legacy_session_path(&self, session_id: &str) -> PathBuf {
@@ -312,6 +359,24 @@ mod tests {
 
         assert_eq!(loaded.id, session.id);
         assert_eq!(loaded.messages, messages);
+    }
+
+    #[test]
+    fn local_session_store_roundtrips_memory_sidecar() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalSessionStore::from_root(dir.path().join("sessions"));
+        let session = store.create_session().expect("create session");
+        let memory = AgentMemory {
+            session_summary: Some("User prefers short technical answers.".to_string()),
+            summarized_message_count: 8,
+        };
+
+        store
+            .save_memory(&session.id, &memory)
+            .expect("save memory");
+        let loaded = store.load_memory(&session.id).expect("load memory");
+
+        assert_eq!(loaded, memory);
     }
 
     #[test]
