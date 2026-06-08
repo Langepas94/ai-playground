@@ -463,11 +463,11 @@
         <div class="group">
           <h2>Агент и история</h2>
           <div class="agent-panel">
-            <label>agent<select id="agentMode"><option value="local-session-agent">Локальный чат-агент с историей</option></select></label>
+            <label>agent<select id="agentMode"></select></label>
             <div class="agent-status">
               <span>Сессия<strong id="sessionLabel">—</strong></span>
               <span>История<strong id="historyLabel">0 сообщений</strong></span>
-              <span>Хранилище<strong>Локально</strong></span>
+              <span>Хранилище<strong id="storageLabel">—</strong></span>
             </div>
           </div>
         </div>
@@ -512,6 +512,7 @@
     const $ = (id) => document.getElementById(id);
     const status = $('status');
     const providerSelect = $('provider');
+    let agents = [];
     let providers = [];
     let modelPricingById = new Map();
     let userPricingOverrides = new Map();
@@ -701,6 +702,10 @@
       return `ai_chat_session:${$('agentMode').value}:${currentProvider()}:${selectedModel()}`;
     }
 
+    function selectedAgent() {
+      return agents.find((agent) => agent.id === $('agentMode').value) || agents[0] || null;
+    }
+
     function chatPayload() {
       return {
         agent_id: $('agentMode').value,
@@ -844,6 +849,7 @@
       $('sessionLabel').textContent = chatSessionId ? chatSessionId.slice(0, 8) : 'новая';
       const visibleMessages = chatHistory.filter((message) => message.role !== 'system').length;
       $('historyLabel').textContent = `${visibleMessages} сообщ.`;
+      $('storageLabel').textContent = selectedAgent()?.history_storage || '—';
     }
 
     async function loadChatSession() {
@@ -1001,6 +1007,11 @@
       const savedRate = localStorage.getItem('rubRate');
       if (savedRate !== null) $('rubRate').value = savedRate;
       $('rubRate').addEventListener('input', () => localStorage.setItem('rubRate', $('rubRate').value));
+      const agentData = await requestJson('/api/agents');
+      agents = agentData.agents || [];
+      $('agentMode').innerHTML = agents.map((agent) => `<option value="${escapeHtml(agent.id)}">${escapeHtml(agent.name)}</option>`).join('');
+      if (!agents.length) throw new Error('Нет доступных агентов');
+      $('agentMode').value = agents[0].id;
       const data = await requestJson('/api/providers');
       providers = data.providers;
       providerSelect.innerHTML = providers.map((item) => `<option value="${item.id}">${item.name}</option>`).join('');

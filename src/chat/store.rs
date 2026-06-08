@@ -173,8 +173,8 @@ pub fn session_key(profile_name: &str, model: &str) -> String {
     format!("{profile_name}:{model}")
 }
 
-pub fn web_session_key(provider: &str, model: &str) -> String {
-    format!("web:{provider}:{model}")
+pub fn web_session_key(agent_id: &str, provider: &str, model: &str) -> String {
+    format!("web:{agent_id}:{provider}:{model}")
 }
 
 fn safe_key(value: &str) -> String {
