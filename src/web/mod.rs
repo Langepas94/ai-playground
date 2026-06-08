@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 
 use crate::{
-    chat::{ChatAgent, LocalSessionStore, web_session_key},
+    chat::{ChatAgent, LocalSessionStore, available_agents, selected_agent, web_session_key},
     config::{AppConfig, ProfileConfig, token_ref},
     errors::AppError,
     providers::{
@@ -23,7 +23,6 @@ use crate::{
 };
 
 const INDEX_HTML: &str = include_str!("ui.html");
-const LOCAL_SESSION_AGENT_ID: &str = "local-session-agent";
 
 #[derive(Clone)]
 struct AppState {
@@ -38,6 +37,7 @@ pub async fn serve(addr: SocketAddr) -> Result<(), AppError> {
     let sessions = LocalSessionStore::new()?;
     let app = Router::new()
         .route("/", get(index))
+        .route("/api/agents", get(agents))
         .route("/api/providers", get(providers))
         .route("/api/models", post(models))
         .route("/api/chat/session", post(chat_session))
@@ -63,6 +63,19 @@ pub async fn serve(addr: SocketAddr) -> Result<(), AppError> {
 
 async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
+}
+
+async fn agents() -> Json<AgentsResponse> {
+    Json(AgentsResponse {
+        agents: available_agents()
+            .iter()
+            .map(|agent| AgentView {
+                id: agent.id.to_string(),
+                name: agent.name.to_string(),
+                history_storage: agent.history_storage.to_string(),
+            })
+            .collect(),
+    })
 }
 
 async fn providers() -> Json<ProvidersResponse> {
@@ -106,7 +119,7 @@ async fn chat(
     State(state): State<AppState>,
     Json(request): Json<ChatWebRequest>,
 ) -> Result<Json<ChatWebResponse>, WebError> {
-    validate_agent_id(request.agent_id.as_deref())?;
+    let agent_spec = selected_agent(request.agent_id.as_deref())?;
     let profile = request.profile()?;
     validate_base_url(&profile.provider.to_string(), &profile.base_url)?;
     if request.prompt.trim().is_empty() {
@@ -118,7 +131,7 @@ async fn chat(
         &request.token,
         request.token_provider.as_deref(),
     )?;
-    let session_key = web_session_key(&profile.provider.to_string(), &profile.model);
+    let session_key = web_session_key(agent_spec.id, &profile.provider.to_string(), &profile.model);
     let session = if request.new_session {
         state.sessions.create_session()?
     } else {
@@ -149,6 +162,7 @@ async fn chat(
         .sessions
         .save_session(&session_key, &session.id, agent.history())?;
     Ok(Json(ChatWebResponse {
+        agent_id: agent_spec.id.to_string(),
         session_id: session.id,
         text: response.text,
         finish_reason: response.finish_reason,
@@ -165,11 +179,11 @@ async fn chat_session(
     State(state): State<AppState>,
     Json(request): Json<ChatSessionRequest>,
 ) -> Result<Json<ChatSessionResponse>, WebError> {
-    validate_agent_id(request.agent_id.as_deref())?;
+    let agent = selected_agent(request.agent_id.as_deref())?;
     let provider = parse_provider(&request.provider)?;
     let model = blank_to_none(Some(request.model))
         .ok_or_else(|| AppError::InvalidInput("Model is required".to_string()))?;
-    let session_key = web_session_key(&provider.to_string(), &model);
+    let session_key = web_session_key(agent.id, &provider.to_string(), &model);
     let session = if request.new_session {
         let session = state.sessions.create_session()?;
         state
@@ -183,9 +197,22 @@ async fn chat_session(
         }
     };
     Ok(Json(ChatSessionResponse {
+        agent_id: agent.id.to_string(),
         session_id: session.id,
         messages: session.messages,
     }))
+}
+
+#[derive(Debug, Serialize)]
+struct AgentsResponse {
+    agents: Vec<AgentView>,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentView {
+    id: String,
+    name: String,
+    history_storage: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -495,6 +522,7 @@ struct ChatSessionRequest {
 
 #[derive(Debug, Serialize)]
 struct ChatSessionResponse {
+    agent_id: String,
     session_id: String,
     messages: Vec<ChatMessage>,
 }
@@ -622,6 +650,7 @@ impl WebResponseControl {
 
 #[derive(Debug, Serialize)]
 struct ChatWebResponse {
+    agent_id: String,
     session_id: String,
     text: String,
     finish_reason: Option<String>,
@@ -683,15 +712,6 @@ fn token_override_belongs_to_provider(
 
 fn parse_provider(value: &str) -> Result<ProviderKind, AppError> {
     value.parse()
-}
-
-fn validate_agent_id(agent_id: Option<&str>) -> Result<(), AppError> {
-    match agent_id.and_then(blank_str_to_none) {
-        None | Some(LOCAL_SESSION_AGENT_ID) => Ok(()),
-        Some(value) => Err(AppError::InvalidInput(format!(
-            "Unsupported agent: {value}"
-        ))),
-    }
 }
 
 fn blank_to_none(value: Option<String>) -> Option<String> {
@@ -800,7 +820,7 @@ mod tests {
     #[test]
     fn web_chat_messages_put_system_prompt_before_user_prompt() {
         let request = ChatWebRequest {
-            agent_id: Some(LOCAL_SESSION_AGENT_ID.to_string()),
+            agent_id: Some(crate::chat::LOCAL_SESSION_AGENT_ID.to_string()),
             provider: "deepseek".to_string(),
             base_url: "https://api.deepseek.com/v1".to_string(),
             token: String::new(),
@@ -826,7 +846,7 @@ mod tests {
     #[test]
     fn web_chat_history_keeps_prior_messages_and_does_not_duplicate_system_prompt() {
         let request = ChatWebRequest {
-            agent_id: Some(LOCAL_SESSION_AGENT_ID.to_string()),
+            agent_id: Some(crate::chat::LOCAL_SESSION_AGENT_ID.to_string()),
             provider: "deepseek".to_string(),
             base_url: "https://api.deepseek.com/v1".to_string(),
             token: String::new(),
@@ -870,7 +890,7 @@ mod tests {
     #[test]
     fn web_chat_initial_history_prefers_local_store_over_client_messages() {
         let request = ChatWebRequest {
-            agent_id: Some(LOCAL_SESSION_AGENT_ID.to_string()),
+            agent_id: Some(crate::chat::LOCAL_SESSION_AGENT_ID.to_string()),
             provider: "deepseek".to_string(),
             base_url: "https://api.deepseek.com/v1".to_string(),
             token: String::new(),
@@ -901,10 +921,10 @@ mod tests {
     #[test]
     fn web_rejects_unknown_agent_id() {
         assert!(matches!(
-            validate_agent_id(Some("unknown-agent")),
+            selected_agent(Some("unknown-agent")),
             Err(AppError::InvalidInput(_))
         ));
-        assert!(validate_agent_id(Some(LOCAL_SESSION_AGENT_ID)).is_ok());
+        assert!(selected_agent(Some(crate::chat::LOCAL_SESSION_AGENT_ID)).is_ok());
     }
 
     /// Баг 2: WebPricing с только output ценой должен конвертироваться в Some(ModelPricing)

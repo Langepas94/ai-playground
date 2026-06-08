@@ -4,7 +4,9 @@ pub mod history;
 pub mod session;
 pub mod store;
 
-pub use agent::ChatAgent;
+pub use agent::{
+    AgentDescriptor, ChatAgent, LOCAL_SESSION_AGENT_ID, available_agents, selected_agent,
+};
 pub use goal::{
     ConversationGoal, ConversationStopMode, GoalComparison, GoalRun, GoalState, run_goal_once,
 };
