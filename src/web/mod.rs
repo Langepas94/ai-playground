@@ -23,6 +23,7 @@ use crate::{
 };
 
 const INDEX_HTML: &str = include_str!("ui.html");
+const LOCAL_SESSION_AGENT_ID: &str = "local-session-agent";
 
 #[derive(Clone)]
 struct AppState {
@@ -105,6 +106,7 @@ async fn chat(
     State(state): State<AppState>,
     Json(request): Json<ChatWebRequest>,
 ) -> Result<Json<ChatWebResponse>, WebError> {
+    validate_agent_id(request.agent_id.as_deref())?;
     let profile = request.profile()?;
     validate_base_url(&profile.provider.to_string(), &profile.base_url)?;
     if request.prompt.trim().is_empty() {
@@ -163,6 +165,7 @@ async fn chat_session(
     State(state): State<AppState>,
     Json(request): Json<ChatSessionRequest>,
 ) -> Result<Json<ChatSessionResponse>, WebError> {
+    validate_agent_id(request.agent_id.as_deref())?;
     let provider = parse_provider(&request.provider)?;
     let model = blank_to_none(Some(request.model))
         .ok_or_else(|| AppError::InvalidInput("Model is required".to_string()))?;
@@ -429,6 +432,7 @@ impl From<crate::providers::ModelInfo> for ModelView {
 
 #[derive(Debug, Deserialize)]
 struct ChatWebRequest {
+    agent_id: Option<String>,
     provider: String,
     base_url: String,
     token: String,
@@ -482,6 +486,7 @@ impl ChatWebRequest {
 
 #[derive(Debug, Deserialize)]
 struct ChatSessionRequest {
+    agent_id: Option<String>,
     provider: String,
     model: String,
     session_id: Option<String>,
@@ -680,6 +685,15 @@ fn parse_provider(value: &str) -> Result<ProviderKind, AppError> {
     value.parse()
 }
 
+fn validate_agent_id(agent_id: Option<&str>) -> Result<(), AppError> {
+    match agent_id.and_then(blank_str_to_none) {
+        None | Some(LOCAL_SESSION_AGENT_ID) => Ok(()),
+        Some(value) => Err(AppError::InvalidInput(format!(
+            "Unsupported agent: {value}"
+        ))),
+    }
+}
+
 fn blank_to_none(value: Option<String>) -> Option<String> {
     value.and_then(|value| {
         let trimmed = value.trim();
@@ -786,6 +800,7 @@ mod tests {
     #[test]
     fn web_chat_messages_put_system_prompt_before_user_prompt() {
         let request = ChatWebRequest {
+            agent_id: Some(LOCAL_SESSION_AGENT_ID.to_string()),
             provider: "deepseek".to_string(),
             base_url: "https://api.deepseek.com/v1".to_string(),
             token: String::new(),
@@ -811,6 +826,7 @@ mod tests {
     #[test]
     fn web_chat_history_keeps_prior_messages_and_does_not_duplicate_system_prompt() {
         let request = ChatWebRequest {
+            agent_id: Some(LOCAL_SESSION_AGENT_ID.to_string()),
             provider: "deepseek".to_string(),
             base_url: "https://api.deepseek.com/v1".to_string(),
             token: String::new(),
@@ -854,6 +870,7 @@ mod tests {
     #[test]
     fn web_chat_initial_history_prefers_local_store_over_client_messages() {
         let request = ChatWebRequest {
+            agent_id: Some(LOCAL_SESSION_AGENT_ID.to_string()),
             provider: "deepseek".to_string(),
             base_url: "https://api.deepseek.com/v1".to_string(),
             token: String::new(),
@@ -879,6 +896,15 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].content, "stored");
+    }
+
+    #[test]
+    fn web_rejects_unknown_agent_id() {
+        assert!(matches!(
+            validate_agent_id(Some("unknown-agent")),
+            Err(AppError::InvalidInput(_))
+        ));
+        assert!(validate_agent_id(Some(LOCAL_SESSION_AGENT_ID)).is_ok());
     }
 
     /// Баг 2: WebPricing с только output ценой должен конвертироваться в Some(ModelPricing)
