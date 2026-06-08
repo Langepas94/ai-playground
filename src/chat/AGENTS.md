@@ -8,6 +8,7 @@ chat/
   mod.rs       — публичный API: ask_once, compare_*, compare_goal_stop, format_request_metrics
   goal.rs      — ConversationGoal, GoalState, ConversationStopMode, GoalRun/GoalComparison
   session.rs   — interactive_chat (REPL), describe_control/goal, terminal I/O
+  store.rs     — LocalSessionStore: локальные JSONL-сессии и индекс последней сессии
   history.rs   — save_history (сохранение в файл)
 ```
 
@@ -56,3 +57,4 @@ Goal — механизм сбора структурированных данн
 - Токен резолвится через `get_config_profile_token` — общий путь для CLI и сессии
 - History не содержит токенов (сохраняются только `ChatMessage`)
 - Новый чатовый код должен идти через `ChatAgent`, а не собирать `ChatRequest` напрямую
+- История диалога должна сохраняться локально через `LocalSessionStore`; провайдеру отправляется только контекст текущего запроса
