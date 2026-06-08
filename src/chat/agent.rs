@@ -7,6 +7,8 @@ use crate::{
     },
 };
 
+use super::memory::{AgentMemory, MemoryConfig, format_messages_for_summary};
+
 pub const LOCAL_SESSION_AGENT_ID: &str = "local-session-agent";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +46,8 @@ pub struct ChatAgent {
     profile: ProfileConfig,
     token: String,
     history: Vec<ChatMessage>,
+    memory: AgentMemory,
+    memory_config: MemoryConfig,
     control: ResponseControl,
     pricing: Option<ModelPricing>,
     billing: Option<BillingLookup>,
@@ -54,6 +58,7 @@ impl ChatAgent {
         profile: ProfileConfig,
         token: String,
         history: Vec<ChatMessage>,
+        memory: AgentMemory,
         control: ResponseControl,
         pricing: Option<ModelPricing>,
         billing: Option<BillingLookup>,
@@ -62,6 +67,8 @@ impl ChatAgent {
             profile,
             token,
             history,
+            memory,
+            memory_config: MemoryConfig::default(),
             control,
             pricing,
             billing,
@@ -72,8 +79,13 @@ impl ChatAgent {
         &self.history
     }
 
+    pub fn memory(&self) -> &AgentMemory {
+        &self.memory
+    }
+
     pub fn clear_history(&mut self) {
         self.history.clear();
+        self.memory = AgentMemory::default();
     }
 
     pub fn set_control(&mut self, control: ResponseControl) {
@@ -93,6 +105,7 @@ impl ChatAgent {
             )
             .await?;
         self.commit_turn(prompt, response.text.clone());
+        self.refresh_memory(client).await;
         Ok(response)
     }
 
@@ -109,6 +122,7 @@ impl ChatAgent {
             )
             .await?;
         self.commit_turn(prompt, response.text.clone());
+        self.refresh_memory(client).await;
         Ok((response, debug))
     }
 
@@ -117,7 +131,7 @@ impl ChatAgent {
     }
 
     fn request_with_user_prompt(&self, prompt: String) -> ChatRequest {
-        let mut messages = self.history.clone();
+        let mut messages = self.memory.build_context(&self.history, self.memory_config);
         messages.push(ChatMessage {
             role: Role::User,
             content: prompt,
@@ -141,6 +155,60 @@ impl ChatAgent {
             content: answer,
         });
     }
+
+    async fn refresh_memory(&mut self, client: &dyn ProviderClient) {
+        let Some(range) = self
+            .memory
+            .next_summary_range(&self.history, self.memory_config)
+        else {
+            return;
+        };
+        let messages_to_summarize = format_messages_for_summary(&self.history[range.clone()]);
+        if messages_to_summarize.trim().is_empty() {
+            self.memory.summarized_message_count = range.end;
+            return;
+        }
+        let previous_summary = self
+            .memory
+            .session_summary
+            .as_deref()
+            .unwrap_or("No previous summary.");
+        let summary_request = ChatRequest {
+            model: self.profile.model.clone(),
+            messages: vec![
+                ChatMessage {
+                    role: Role::System,
+                    content: "You are the memory compaction module of a local chat agent. Update the session memory summary using only the supplied facts. Keep durable user preferences, goals, decisions, constraints, and unresolved context. Be concise. Do not invent facts.".to_string(),
+                },
+                ChatMessage {
+                    role: Role::User,
+                    content: format!(
+                        "Previous memory summary:\n{previous_summary}\n\nNew chat fragment to merge:\n{messages_to_summarize}\n\nReturn the updated memory summary."
+                    ),
+                },
+            ],
+            control: memory_summary_control(),
+            pricing: self.pricing.clone(),
+            billing: self.billing.clone(),
+        };
+        if let Ok(response) = client
+            .chat_completion(&self.profile, &self.token, summary_request)
+            .await
+        {
+            let summary = response.text.trim();
+            if !summary.is_empty() {
+                self.memory.session_summary = Some(summary.to_string());
+                self.memory.summarized_message_count = range.end;
+            }
+        }
+    }
+}
+
+fn memory_summary_control() -> ResponseControl {
+    let mut control = ResponseControl::uncontrolled();
+    control.temperature = Some(0.2);
+    control.max_tokens = Some(700);
+    control
 }
 
 #[cfg(test)]
@@ -239,6 +307,7 @@ mod tests {
             test_profile(),
             "secret".to_string(),
             Vec::new(),
+            AgentMemory::default(),
             ResponseControl::uncontrolled(),
             None,
             None,
@@ -260,6 +329,53 @@ mod tests {
         assert_eq!(seen[1][1].content, "first answer");
         assert_eq!(seen[1][2].content, "second question");
         assert_eq!(agent.history().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn agent_sends_layered_context_instead_of_full_long_history() {
+        let client = FakeClient {
+            replies: std::sync::Mutex::new(vec![
+                "summary of older turns".to_string(),
+                "fresh answer".to_string(),
+            ]),
+            seen_messages: std::sync::Mutex::new(Vec::new()),
+        };
+        let history = (0..20)
+            .map(|index| ChatMessage {
+                role: if index % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                content: format!("history {index}"),
+            })
+            .collect::<Vec<_>>();
+        let mut agent = ChatAgent::new(
+            test_profile(),
+            "secret".to_string(),
+            history,
+            AgentMemory::default(),
+            ResponseControl::uncontrolled(),
+            None,
+            None,
+        );
+
+        agent
+            .respond(&client, "current question".to_string())
+            .await
+            .expect("response");
+
+        let seen = client.seen_messages.lock().expect("seen messages");
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].len(), 13);
+        assert_eq!(seen[0][0].content, "history 8");
+        assert_eq!(seen[0][12].content, "current question");
+        assert_eq!(seen[1].len(), 2);
+        assert!(seen[1][1].content.contains("history 0"));
+        assert_eq!(
+            agent.memory().session_summary.as_deref(),
+            Some("summary of older turns")
+        );
     }
 
     #[test]
