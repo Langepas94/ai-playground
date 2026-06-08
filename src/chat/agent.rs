@@ -7,6 +7,38 @@ use crate::{
     },
 };
 
+pub const LOCAL_SESSION_AGENT_ID: &str = "local-session-agent";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentDescriptor {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub history_storage: &'static str,
+}
+
+const AGENTS: &[AgentDescriptor] = &[AgentDescriptor {
+    id: LOCAL_SESSION_AGENT_ID,
+    name: "Локальный чат-агент с историей",
+    history_storage: "Локально",
+}];
+
+pub fn available_agents() -> &'static [AgentDescriptor] {
+    AGENTS
+}
+
+pub fn selected_agent(agent_id: Option<&str>) -> Result<&'static AgentDescriptor, AppError> {
+    let id = agent_id
+        .and_then(|value| {
+            let value = value.trim();
+            (!value.is_empty()).then_some(value)
+        })
+        .unwrap_or(LOCAL_SESSION_AGENT_ID);
+    AGENTS
+        .iter()
+        .find(|agent| agent.id == id)
+        .ok_or_else(|| AppError::InvalidInput(format!("Unsupported agent: {id}")))
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatAgent {
     profile: ProfileConfig,
@@ -228,5 +260,17 @@ mod tests {
         assert_eq!(seen[1][1].content, "first answer");
         assert_eq!(seen[1][2].content, "second question");
         assert_eq!(agent.history().len(), 4);
+    }
+
+    #[test]
+    fn agent_registry_selects_known_agent() {
+        let agent = selected_agent(Some(LOCAL_SESSION_AGENT_ID)).expect("agent");
+
+        assert_eq!(agent.id, LOCAL_SESSION_AGENT_ID);
+        assert!(!available_agents().is_empty());
+        assert!(matches!(
+            selected_agent(Some("missing-agent")),
+            Err(AppError::InvalidInput(_))
+        ));
     }
 }
