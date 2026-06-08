@@ -27,5 +27,6 @@ rtk cargo run -- web
 
 - Версия поднята до коммита: `Cargo.toml`, `crates/aiteach-compat/Cargo.toml`, `Cargo.lock`.
 - `README.md` синхронизирован с текущими командами.
+- `src/README.md`, модульные README и `docs/debugging.md` синхронизированы, если менялись границы модулей.
 - В тексте нет старого бренда `aiteach`, кроме совместимости/migration, если она специально нужна.
 - Ошибки не раскрывают секреты.
