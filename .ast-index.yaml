@@ -1,0 +1,14 @@
+# ast-index project configuration.
+# Keep the index focused on Rust sources and tests; .gitignore is still honored.
+include:
+  - src
+  - crates
+  - tests
+
+exclude:
+  - target
+  - .git
+  - .idea
+  - docs
+
+no_ignore: false
