@@ -1,6 +1,6 @@
 [package]
 name = "ai-playground"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 
 [workspace]
@@ -24,6 +24,7 @@ keyring = "3.6.3"
 reqwest = { version = "0.12.28", features = ["json", "native-tls"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
+toon = { package = "serde_toon_format", version = "0.1.2" }
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "net"] }
 toml = "0.8.23"

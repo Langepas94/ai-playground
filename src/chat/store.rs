@@ -7,7 +7,12 @@ use std::{
 use directories::ProjectDirs;
 use uuid::Uuid;
 
-use crate::{errors::AppError, providers::ChatMessage};
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    errors::AppError,
+    providers::{ChatMessage, Role},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationSession {
@@ -18,6 +23,12 @@ pub struct ConversationSession {
 #[derive(Debug, Clone)]
 pub struct LocalSessionStore {
     root: PathBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredChatMessage {
+    role: String,
+    content: String,
 }
 
 impl LocalSessionStore {
@@ -73,29 +84,21 @@ impl LocalSessionStore {
         validate_session_id(session_id)?;
         let path = self.session_path(session_id);
         if !path.exists() {
+            let legacy_path = self.legacy_session_path(session_id);
+            if legacy_path.exists() {
+                return self.load_legacy_jsonl_session(session_id, &legacy_path);
+            }
             return Ok(ConversationSession {
                 id: session_id.to_string(),
                 messages: Vec::new(),
             });
         }
 
-        let file = fs::File::open(&path)
-            .map_err(|error| config_error(path.clone(), format!("open failed: {error}")))?;
-        let mut messages = Vec::new();
-        for line in std::io::BufReader::new(file).lines() {
-            let line = line.map_err(|error| {
-                config_error(
-                    path.clone(),
-                    format!("could not read session line: {error}"),
-                )
-            })?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            let message = serde_json::from_str::<ChatMessage>(&line)
-                .map_err(|error| AppError::Json(error.to_string()))?;
-            messages.push(message);
-        }
+        let raw = fs::read_to_string(&path)
+            .map_err(|error| config_error(path.clone(), format!("read failed: {error}")))?;
+        let messages = stored_messages_into_chat(crate::toon_codec::from_str_or_json::<
+            Vec<StoredChatMessage>,
+        >(&raw)?)?;
         Ok(ConversationSession {
             id: session_id.to_string(),
             messages,
@@ -123,18 +126,15 @@ impl LocalSessionStore {
         })?;
 
         let path = self.session_path(session_id);
-        let temp_path = path.with_extension("jsonl.tmp");
+        let temp_path = path.with_extension("toon.tmp");
         {
             let mut file = fs::File::create(&temp_path).map_err(|error| {
                 config_error(temp_path.clone(), format!("create failed: {error}"))
             })?;
-            for message in messages {
-                let raw = serde_json::to_string(message)
-                    .map_err(|error| AppError::Json(error.to_string()))?;
-                writeln!(file, "{raw}").map_err(|error| {
-                    config_error(temp_path.clone(), format!("write failed: {error}"))
-                })?;
-            }
+            let raw = crate::toon_codec::to_string(&stored_messages_from_chat(messages))?;
+            writeln!(file, "{raw}").map_err(|error| {
+                config_error(temp_path.clone(), format!("write failed: {error}"))
+            })?;
         }
         fs::rename(&temp_path, &path).map_err(|error| {
             config_error(
@@ -160,12 +160,79 @@ impl LocalSessionStore {
     }
 
     fn session_path(&self, session_id: &str) -> PathBuf {
+        self.sessions_dir().join(format!("{session_id}.toon"))
+    }
+
+    fn legacy_session_path(&self, session_id: &str) -> PathBuf {
         self.sessions_dir().join(format!("{session_id}.jsonl"))
+    }
+
+    fn load_legacy_jsonl_session(
+        &self,
+        session_id: &str,
+        path: &Path,
+    ) -> Result<ConversationSession, AppError> {
+        let file = fs::File::open(path)
+            .map_err(|error| config_error(path, format!("open failed: {error}")))?;
+        let mut messages = Vec::new();
+        for line in std::io::BufReader::new(file).lines() {
+            let line = line.map_err(|error| {
+                config_error(path, format!("could not read session line: {error}"))
+            })?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let message = serde_json::from_str::<ChatMessage>(&line)
+                .map_err(|error| AppError::Json(error.to_string()))?;
+            messages.push(message);
+        }
+        Ok(ConversationSession {
+            id: session_id.to_string(),
+            messages,
+        })
     }
 
     fn index_path(&self, profile_key: &str) -> PathBuf {
         self.index_dir()
             .join(format!("{}.txt", safe_key(profile_key)))
+    }
+}
+
+fn stored_messages_from_chat(messages: &[ChatMessage]) -> Vec<StoredChatMessage> {
+    messages
+        .iter()
+        .map(|message| StoredChatMessage {
+            role: match &message.role {
+                Role::System => "system",
+                Role::User => "user",
+                Role::Assistant => "assistant",
+            }
+            .to_string(),
+            content: message.content.clone(),
+        })
+        .collect()
+}
+
+fn stored_messages_into_chat(
+    messages: Vec<StoredChatMessage>,
+) -> Result<Vec<ChatMessage>, AppError> {
+    messages
+        .into_iter()
+        .map(|message| {
+            Ok(ChatMessage {
+                role: parse_role(&message.role)?,
+                content: message.content,
+            })
+        })
+        .collect()
+}
+
+fn parse_role(value: &str) -> Result<Role, AppError> {
+    match value {
+        "system" => Ok(Role::System),
+        "user" => Ok(Role::User),
+        "assistant" => Ok(Role::Assistant),
+        other => Err(AppError::Json(format!("unsupported chat role: {other}"))),
     }
 }
 

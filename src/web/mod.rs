@@ -607,6 +607,7 @@ impl WebResponseControl {
         ResponseControl {
             format: match self.response_format.as_deref() {
                 Some("json-object") => ResponseFormat::JsonObject,
+                Some("toon") => ResponseFormat::Toon,
                 _ => ResponseFormat::Text,
             },
             answer_format: match self.answer_format.as_deref() {

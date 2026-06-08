@@ -137,7 +137,11 @@ pub async fn interactive_chat(
                     control.format = ResponseFormat::JsonObject;
                     println!("Response format: json-object");
                 }
-                _ => println!("Use /format text or /format json-object."),
+                "toon" => {
+                    control.format = ResponseFormat::Toon;
+                    println!("Response format: toon");
+                }
+                _ => println!("Use /format text, /format json-object, or /format toon."),
             }
             continue;
         }

@@ -17,7 +17,7 @@ pub fn save_history(profile_name: &str, messages: &[ChatMessage]) -> Result<Path
         message: format!("could not create history directory: {error}"),
     })?;
     let filename = format!(
-        "{}-{}.json",
+        "{}-{}.toon",
         profile_name,
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -28,8 +28,7 @@ pub fn save_history(profile_name: &str, messages: &[ChatMessage]) -> Result<Path
             .as_secs()
     );
     let path = dir.join(filename);
-    let raw = serde_json::to_string_pretty(messages)
-        .map_err(|error| AppError::Json(error.to_string()))?;
+    let raw = crate::toon_codec::to_string(messages)?;
     fs::write(&path, raw).map_err(|error| AppError::Config {
         path: path.clone(),
         message: format!("could not write history: {error}"),
