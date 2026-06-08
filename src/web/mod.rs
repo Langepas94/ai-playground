@@ -12,8 +12,8 @@ use tokio::net::TcpListener;
 
 use crate::{
     chat::{
-        AgentMemory, ChatAgent, LocalSessionStore, available_agents, selected_agent,
-        web_session_key,
+        AgentMemory, ChatAgent, LocalSessionStore, add_request_metrics, available_agents,
+        selected_agent, web_session_key,
     },
     config::{AppConfig, ProfileConfig, token_ref},
     errors::AppError,
@@ -165,9 +165,11 @@ async fn chat(
     let (response, provider_debug) = agent
         .respond_with_debug(&state.client, request.prompt.clone())
         .await?;
+    let session_metrics = add_request_metrics(&session.metrics, &response.metrics);
     state
         .sessions
         .save_session(&session_key, &session.id, agent.history())?;
+    state.sessions.save_metrics(&session.id, &session_metrics)?;
     state.sessions.save_memory(&session.id, agent.memory())?;
     Ok(Json(ChatWebResponse {
         agent_id: agent_spec.id.to_string(),
@@ -175,6 +177,7 @@ async fn chat(
         text: response.text,
         finish_reason: response.finish_reason,
         metrics: response.metrics,
+        session_metrics,
         messages: agent.history().to_vec(),
         debug: ChatDebugView {
             provider_request: provider_debug.request,
@@ -197,6 +200,7 @@ async fn chat_session(
         state
             .sessions
             .save_session(&session_key, &session.id, &session.messages)?;
+        state.sessions.save_metrics(&session.id, &session.metrics)?;
         state
             .sessions
             .save_memory(&session.id, &AgentMemory::default())?;
@@ -211,6 +215,7 @@ async fn chat_session(
         agent_id: agent.id.to_string(),
         session_id: session.id,
         messages: session.messages,
+        metrics: session.metrics,
     }))
 }
 
@@ -544,6 +549,7 @@ struct ChatSessionResponse {
     agent_id: String,
     session_id: String,
     messages: Vec<ChatMessage>,
+    metrics: crate::providers::RequestMetrics,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -675,6 +681,7 @@ struct ChatWebResponse {
     text: String,
     finish_reason: Option<String>,
     metrics: crate::providers::RequestMetrics,
+    session_metrics: crate::providers::RequestMetrics,
     messages: Vec<ChatMessage>,
     debug: ChatDebugView,
 }

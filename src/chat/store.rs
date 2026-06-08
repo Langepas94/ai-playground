@@ -11,15 +11,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     errors::AppError,
-    providers::{ChatMessage, Role},
+    providers::{ChatMessage, RequestCost, RequestMetrics, Role, TokenUsage},
 };
 
 use super::memory::AgentMemory;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ConversationSession {
     pub id: String,
     pub messages: Vec<ChatMessage>,
+    pub metrics: RequestMetrics,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +80,7 @@ impl LocalSessionStore {
         Ok(ConversationSession {
             id: Uuid::new_v4().to_string(),
             messages: Vec::new(),
+            metrics: RequestMetrics::default(),
         })
     }
 
@@ -93,6 +95,7 @@ impl LocalSessionStore {
             return Ok(ConversationSession {
                 id: session_id.to_string(),
                 messages: Vec::new(),
+                metrics: RequestMetrics::default(),
             });
         }
 
@@ -104,7 +107,20 @@ impl LocalSessionStore {
         Ok(ConversationSession {
             id: session_id.to_string(),
             messages,
+            metrics: self.load_metrics(session_id)?,
         })
+    }
+
+    pub fn load_metrics(&self, session_id: &str) -> Result<RequestMetrics, AppError> {
+        validate_session_id(session_id)?;
+        let path = self.metrics_path(session_id);
+        if !path.exists() {
+            return Ok(RequestMetrics::default());
+        }
+        let raw = fs::read_to_string(&path)
+            .map_err(|error| config_error(path.clone(), format!("read failed: {error}")))?;
+        serde_json::from_str::<RequestMetrics>(&raw)
+            .map_err(|error| AppError::Json(error.to_string()))
     }
 
     pub fn load_memory(&self, session_id: &str) -> Result<AgentMemory, AppError> {
@@ -193,6 +209,36 @@ impl LocalSessionStore {
         Ok(())
     }
 
+    pub fn save_metrics(&self, session_id: &str, metrics: &RequestMetrics) -> Result<(), AppError> {
+        validate_session_id(session_id)?;
+        fs::create_dir_all(self.sessions_dir()).map_err(|error| {
+            config_error(
+                self.sessions_dir(),
+                format!("could not create directory: {error}"),
+            )
+        })?;
+
+        let path = self.metrics_path(session_id);
+        let temp_path = path.with_extension("metrics.json.tmp");
+        {
+            let mut file = fs::File::create(&temp_path).map_err(|error| {
+                config_error(temp_path.clone(), format!("create failed: {error}"))
+            })?;
+            let raw = serde_json::to_string_pretty(metrics)
+                .map_err(|error| AppError::Json(error.to_string()))?;
+            writeln!(file, "{raw}").map_err(|error| {
+                config_error(temp_path.clone(), format!("write failed: {error}"))
+            })?;
+        }
+        fs::rename(&temp_path, &path).map_err(|error| {
+            config_error(
+                path.clone(),
+                format!("could not replace metrics file: {error}"),
+            )
+        })?;
+        Ok(())
+    }
+
     fn sessions_dir(&self) -> PathBuf {
         self.root.join("data")
     }
@@ -208,6 +254,11 @@ impl LocalSessionStore {
     fn memory_path(&self, session_id: &str) -> PathBuf {
         self.sessions_dir()
             .join(format!("{session_id}.memory.toon"))
+    }
+
+    fn metrics_path(&self, session_id: &str) -> PathBuf {
+        self.sessions_dir()
+            .join(format!("{session_id}.metrics.json"))
     }
 
     fn legacy_session_path(&self, session_id: &str) -> PathBuf {
@@ -236,6 +287,7 @@ impl LocalSessionStore {
         Ok(ConversationSession {
             id: session_id.to_string(),
             messages,
+            metrics: self.load_metrics(session_id)?,
         })
     }
 
@@ -272,6 +324,64 @@ fn stored_messages_into_chat(
             })
         })
         .collect()
+}
+
+pub fn add_request_metrics(total: &RequestMetrics, request: &RequestMetrics) -> RequestMetrics {
+    RequestMetrics {
+        elapsed_ms: total.elapsed_ms.saturating_add(request.elapsed_ms),
+        usage: add_token_usage(total.usage.as_ref(), request.usage.as_ref()),
+        cost: add_request_cost(total.cost.as_ref(), request.cost.as_ref()),
+    }
+}
+
+fn add_token_usage(total: Option<&TokenUsage>, request: Option<&TokenUsage>) -> Option<TokenUsage> {
+    match (total, request) {
+        (Some(total), Some(request)) => Some(TokenUsage {
+            input_tokens: total.input_tokens.saturating_add(request.input_tokens),
+            output_tokens: total.output_tokens.saturating_add(request.output_tokens),
+            total_tokens: total.total_tokens.saturating_add(request.total_tokens),
+            cache_hit_input_tokens: add_optional_u32(
+                total.cache_hit_input_tokens,
+                request.cache_hit_input_tokens,
+            ),
+            cache_miss_input_tokens: add_optional_u32(
+                total.cache_miss_input_tokens,
+                request.cache_miss_input_tokens,
+            ),
+        }),
+        (Some(total), None) => Some(total.clone()),
+        (None, Some(request)) => Some(request.clone()),
+        (None, None) => None,
+    }
+}
+
+fn add_optional_u32(total: Option<u32>, request: Option<u32>) -> Option<u32> {
+    match (total, request) {
+        (Some(total), Some(request)) => Some(total.saturating_add(request)),
+        (Some(total), None) => Some(total),
+        (None, Some(request)) => Some(request),
+        (None, None) => None,
+    }
+}
+
+fn add_request_cost(
+    total: Option<&RequestCost>,
+    request: Option<&RequestCost>,
+) -> Option<RequestCost> {
+    match (total, request) {
+        (Some(total), Some(request))
+            if total.currency == request.currency && total.source == request.source =>
+        {
+            Some(RequestCost {
+                amount: total.amount + request.amount,
+                currency: total.currency.clone(),
+                source: total.source.clone(),
+            })
+        }
+        (Some(total), None) => Some(total.clone()),
+        (None, Some(request)) => Some(request.clone()),
+        _ => None,
+    }
 }
 
 fn parse_role(value: &str) -> Result<Role, AppError> {
@@ -332,7 +442,7 @@ fn config_error(path: impl AsRef<Path>, message: String) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::Role;
+    use crate::providers::{CostSource, Role};
 
     #[test]
     fn local_session_store_roundtrips_messages() {
@@ -359,6 +469,92 @@ mod tests {
 
         assert_eq!(loaded.id, session.id);
         assert_eq!(loaded.messages, messages);
+        assert_eq!(loaded.metrics, RequestMetrics::default());
+    }
+
+    #[test]
+    fn local_session_store_roundtrips_metrics_sidecar() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalSessionStore::from_root(dir.path().join("sessions"));
+        let session = store.create_session().expect("create session");
+        let metrics = RequestMetrics {
+            elapsed_ms: 123,
+            usage: Some(TokenUsage {
+                input_tokens: 10,
+                output_tokens: 20,
+                total_tokens: 30,
+                cache_hit_input_tokens: Some(4),
+                cache_miss_input_tokens: Some(6),
+            }),
+            cost: Some(RequestCost {
+                amount: 0.00042,
+                currency: "USD".to_string(),
+                source: CostSource::ConfiguredPricing,
+            }),
+        };
+
+        store
+            .save_metrics(&session.id, &metrics)
+            .expect("save metrics");
+        let loaded = store.load_metrics(&session.id).expect("load metrics");
+
+        assert_eq!(loaded, metrics);
+    }
+
+    #[test]
+    fn request_metrics_accumulate_usage_and_matching_costs() {
+        let total = RequestMetrics {
+            elapsed_ms: 100,
+            usage: Some(TokenUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+                total_tokens: 15,
+                cache_hit_input_tokens: Some(3),
+                cache_miss_input_tokens: None,
+            }),
+            cost: Some(RequestCost {
+                amount: 0.001,
+                currency: "USD".to_string(),
+                source: CostSource::ConfiguredPricing,
+            }),
+        };
+        let request = RequestMetrics {
+            elapsed_ms: 200,
+            usage: Some(TokenUsage {
+                input_tokens: 7,
+                output_tokens: 11,
+                total_tokens: 18,
+                cache_hit_input_tokens: Some(2),
+                cache_miss_input_tokens: Some(5),
+            }),
+            cost: Some(RequestCost {
+                amount: 0.002,
+                currency: "USD".to_string(),
+                source: CostSource::ConfiguredPricing,
+            }),
+        };
+
+        let added = add_request_metrics(&total, &request);
+
+        assert_eq!(added.elapsed_ms, 300);
+        assert_eq!(
+            added.usage,
+            Some(TokenUsage {
+                input_tokens: 17,
+                output_tokens: 16,
+                total_tokens: 33,
+                cache_hit_input_tokens: Some(5),
+                cache_miss_input_tokens: Some(5),
+            })
+        );
+        assert_eq!(
+            added.cost,
+            Some(RequestCost {
+                amount: 0.003,
+                currency: "USD".to_string(),
+                source: CostSource::ConfiguredPricing,
+            })
+        );
     }
 
     #[test]
