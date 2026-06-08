@@ -329,7 +329,7 @@ pub struct ChatRequest {
     pub billing: Option<BillingLookup>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TokenUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
@@ -366,14 +366,14 @@ pub enum BillingProvider {
     OpenAiCosts,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RequestCost {
     pub amount: f64,
     pub currency: String,
     pub source: CostSource,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum CostSource {
     ProviderReported,
@@ -391,7 +391,7 @@ impl std::fmt::Display for CostSource {
     }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct RequestMetrics {
     pub elapsed_ms: u128,
     pub usage: Option<TokenUsage>,
