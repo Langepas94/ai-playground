@@ -56,6 +56,8 @@ pub enum AppError {
     ProviderHttp(ProviderHttpError),
     #[error("Provider response has an unexpected JSON format: {0}")]
     Json(String),
+    #[error("TOON format error: {0}")]
+    Toon(String),
     #[error("Unsupported provider: {0}")]
     UnsupportedProvider(String),
     #[error("Invalid base_url for profile '{profile}': {url}")]

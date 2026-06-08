@@ -125,6 +125,7 @@ pub enum ResponseFormat {
     #[default]
     Text,
     JsonObject,
+    Toon,
 }
 
 impl std::fmt::Display for ResponseFormat {
@@ -132,6 +133,7 @@ impl std::fmt::Display for ResponseFormat {
         match self {
             Self::Text => write!(f, "text"),
             Self::JsonObject => write!(f, "json-object"),
+            Self::Toon => write!(f, "toon"),
         }
     }
 }
@@ -256,6 +258,15 @@ impl ResponseControl {
                     role: Role::System,
                     content: self.format_instruction.clone().unwrap_or_else(|| {
                         "Return only a valid JSON object. Do not include Markdown, prose, or code fences."
+                            .to_string()
+                    }),
+                });
+            }
+            ResponseFormat::Toon => {
+                messages.push(ChatMessage {
+                    role: Role::System,
+                    content: self.format_instruction.clone().unwrap_or_else(|| {
+                        "Return only a valid TOON document. Do not include Markdown, prose, JSON, or code fences."
                             .to_string()
                     }),
                 });

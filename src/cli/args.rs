@@ -364,6 +364,7 @@ pub enum CliResponseFormat {
     #[default]
     Text,
     JsonObject,
+    Toon,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
@@ -392,6 +393,7 @@ impl From<&ResponseControlArgs> for ResponseControl {
             format: match args.response_format {
                 CliResponseFormat::Text => ResponseFormat::Text,
                 CliResponseFormat::JsonObject => ResponseFormat::JsonObject,
+                CliResponseFormat::Toon => ResponseFormat::Toon,
             },
             answer_format: match args.answer_format {
                 CliAnswerFormat::Natural => AnswerFormat::Natural,

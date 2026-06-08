@@ -4,4 +4,5 @@ pub mod config;
 pub mod errors;
 pub mod providers;
 pub mod secrets;
+pub mod toon_codec;
 pub mod web;
