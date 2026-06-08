@@ -182,4 +182,5 @@ rtk cargo fmt --check
 rtk cargo test
 ```
 
-Короткие заметки для будущих правок лежат в `AGENTS.md` и `docs/`.
+Короткие заметки для будущих правок лежат в `AGENTS.md`, `src/README.md` и `docs/`.
+Если баг непонятно где искать, начинайте с `docs/debugging.md`.
