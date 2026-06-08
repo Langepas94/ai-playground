@@ -316,7 +316,7 @@
     }
     .metrics {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 8px;
       margin: 12px 0 10px;
     }
@@ -543,6 +543,7 @@
           <div class="metric"><span>Время</span><strong id="metricTime">—</strong></div>
           <div class="metric"><span>Токены</span><strong id="metricTokens">—</strong></div>
           <div class="metric"><span>Стоимость</span><strong id="metricCost">—</strong></div>
+          <div class="metric"><span>Диалог</span><strong id="metricSession">—</strong></div>
         </div>
         <div id="conversation" class="conversation" aria-live="polite">
           <p class="conversation-empty">Ответ появится здесь.</p>
@@ -952,11 +953,13 @@
         chatSessionId = data.session_id || null;
         forceNewSession = false;
         chatHistory = data.messages || [];
+        setSessionMetrics(data.metrics);
         if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
         renderChatHistory();
       } catch (error) {
         chatSessionId = null;
         chatHistory = [];
+        setSessionMetrics(null);
         renderChatHistory();
         setStatus(error.message, true);
       }
@@ -968,6 +971,8 @@
       chatSessionId = data.session_id || null;
       forceNewSession = false;
       chatHistory = data.messages || [];
+      setMetrics(null);
+      setSessionMetrics(data.metrics);
       if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
       renderChatHistory();
     }
@@ -993,6 +998,10 @@
       } else {
         $('metricCost').textContent = 'unavailable';
       }
+    }
+
+    function setSessionMetrics(metrics) {
+      $('metricSession').innerHTML = metrics && metrics.usage ? tokenLines(metrics.usage) : '—';
     }
 
     function tokenLines(usage) {
@@ -1149,6 +1158,7 @@
         renderChatHistory();
         $('prompt').value = '';
         setMetrics(data.metrics);
+        setSessionMetrics(data.session_metrics);
         setDebug(data.debug);
         setStatus(data.finish_reason ? `Готово: ${data.finish_reason}` : 'Готово');
       } catch (error) {
