@@ -1,7 +1,9 @@
+pub mod agent;
 pub mod goal;
 pub mod history;
 pub mod session;
 
+pub use agent::ChatAgent;
 pub use goal::{
     ConversationGoal, ConversationStopMode, GoalComparison, GoalRun, GoalState, run_goal_once,
 };
@@ -12,8 +14,8 @@ use crate::{
     config::{AppConfig, ProfileConfig},
     errors::AppError,
     providers::{
-        BillingLookup, ChatMessage, ChatRequest, ModelPricing, ProviderClient, ResponseControl,
-        RequestMetrics, Role,
+        BillingLookup, ChatMessage, ChatRequest, ModelPricing, ProviderClient, RequestMetrics,
+        ResponseControl, Role,
     },
     secrets::{SecretStore, get_config_profile_token},
 };
@@ -35,19 +37,16 @@ pub async fn ask_once(
                 profile: profile_name.to_string(),
             }
         })?;
-    client
-        .chat_completion(
-            profile,
-            &token,
-            ChatRequest {
-                model: profile.model.clone(),
-                messages: vec![ChatMessage { role: Role::User, content: prompt }],
-                control,
-                pricing,
-                billing,
-            },
-        )
-        .await
+    ChatAgent::new(
+        profile.clone(),
+        token,
+        Vec::new(),
+        control.clone(),
+        pricing,
+        billing,
+    )
+    .respond(client, prompt)
+    .await
 }
 
 pub async fn compare_response_control(
@@ -60,7 +59,13 @@ pub async fn compare_response_control(
     controlled: ResponseControl,
     pricing: Option<ModelPricing>,
     billing: Option<BillingLookup>,
-) -> Result<(crate::providers::ChatResponse, crate::providers::ChatResponse), AppError> {
+) -> Result<
+    (
+        crate::providers::ChatResponse,
+        crate::providers::ChatResponse,
+    ),
+    AppError,
+> {
     let token =
         get_config_profile_token(secrets, config, profile_name, profile)?.ok_or_else(|| {
             AppError::MissingToken {
@@ -69,13 +74,20 @@ pub async fn compare_response_control(
         })?;
     let make_request = |control, prompt: String| ChatRequest {
         model: profile.model.clone(),
-        messages: vec![ChatMessage { role: Role::User, content: prompt }],
+        messages: vec![ChatMessage {
+            role: Role::User,
+            content: prompt,
+        }],
         control,
         pricing: pricing.clone(),
         billing: billing.clone(),
     };
     let unrestricted = client
-        .chat_completion(profile, &token, make_request(ResponseControl::uncontrolled(), prompt.clone()))
+        .chat_completion(
+            profile,
+            &token,
+            make_request(ResponseControl::uncontrolled(), prompt.clone()),
+        )
         .await?;
     let restricted = client
         .chat_completion(profile, &token, make_request(controlled, prompt))
@@ -102,21 +114,36 @@ pub async fn compare_goal_stop(
         })?;
     let run = |mode| {
         run_goal_once(
-            client, profile, &token, prompt.clone(), &required_fields, mode,
-            pricing.clone(), billing.clone(),
+            client,
+            profile,
+            &token,
+            prompt.clone(),
+            &required_fields,
+            mode,
+            pricing.clone(),
+            billing.clone(),
         )
     };
-    let state       = run(ConversationStopMode::State).await?;
+    let state = run(ConversationStopMode::State).await?;
     let instruction = run(ConversationStopMode::Instruction).await?;
-    let combined    = run(ConversationStopMode::Combined).await?;
-    Ok(GoalComparison { state, instruction, combined })
+    let combined = run(ConversationStopMode::Combined).await?;
+    Ok(GoalComparison {
+        state,
+        instruction,
+        combined,
+    })
 }
 
 pub fn format_request_metrics(metrics: &RequestMetrics) -> String {
     let usage = metrics
         .usage
         .as_ref()
-        .map(|u| format!("tokens: input={} output={} total={}", u.input_tokens, u.output_tokens, u.total_tokens))
+        .map(|u| {
+            format!(
+                "tokens: input={} output={} total={}",
+                u.input_tokens, u.output_tokens, u.total_tokens
+            )
+        })
         .unwrap_or_else(|| "tokens: unavailable".to_string());
     let cost = metrics
         .cost

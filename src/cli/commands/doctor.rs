@@ -1,10 +1,10 @@
+use crate::cli::args::ProfileArg;
 use crate::{
     config::AppConfig,
     errors::AppError,
     providers::validate_base_url,
     secrets::{SecretStore, get_config_profile_token},
 };
-use crate::cli::args::ProfileArg;
 
 pub fn run_doctor(args: &ProfileArg, secrets: &dyn SecretStore) -> Result<(), AppError> {
     let path = AppConfig::config_path()?;

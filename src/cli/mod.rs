@@ -6,7 +6,9 @@ use clap::Parser;
 use crate::{
     config::{AppConfig, ProfileConfig},
     errors::AppError,
-    providers::{ModelPricing, ProviderClient, ProviderKind, ReqwestProviderClient, validate_base_url},
+    providers::{
+        ModelPricing, ProviderClient, ProviderKind, ReqwestProviderClient, validate_base_url,
+    },
     secrets::{KeyringSecretStore, SecretStore, get_config_profile_token, set_profile_token},
 };
 
@@ -14,8 +16,8 @@ pub mod args;
 pub mod commands;
 
 use args::{
-    Command, ConfigCommand, ProfileArg, ProfileCommand, ProfileUseArgs, SetupArgs, TokenCommand,
-    ModelsCommand, PricingArgs,
+    Command, ConfigCommand, ModelsCommand, PricingArgs, ProfileCommand, ProfileUseArgs,
+    TokenCommand,
 };
 use commands::{
     run_ask, run_chat, run_compare, run_compare_goal, run_config_path, run_doctor, run_models_list,
@@ -470,7 +472,7 @@ pub async fn request_pricing(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use args::{ProfileCommand, ProfileUseArgs};
+    use args::ProfileCommand;
 
     #[test]
     fn profile_use_accepts_unquoted_names_with_spaces() {

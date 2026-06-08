@@ -4,11 +4,11 @@ use clap::{Args, Subcommand, ValueEnum};
 
 use crate::{
     chat,
+    errors::AppError,
     providers::{
         AnswerFormat, BillingLookup, BillingProvider, ModelPricing, ProviderKind, ResponseControl,
         ResponseFormat,
     },
-    errors::AppError,
 };
 
 #[derive(Debug, Subcommand)]

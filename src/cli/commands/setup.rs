@@ -1,11 +1,8 @@
-use crate::{
-    config::AppConfig,
-    errors::AppError,
-    providers::validate_base_url,
-    secrets::SecretStore,
-};
 use crate::cli::args::SetupArgs;
-use crate::cli::{collect_profile_input_with_optional_setup_token};
+use crate::cli::collect_profile_input_with_optional_setup_token;
+use crate::{
+    config::AppConfig, errors::AppError, providers::validate_base_url, secrets::SecretStore,
+};
 
 pub async fn run_setup(args: &SetupArgs, secrets: &dyn SecretStore) -> Result<(), AppError> {
     println!("ai setup");
