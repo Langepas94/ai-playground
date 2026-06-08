@@ -162,6 +162,38 @@
       flex-wrap: wrap;
       align-items: center;
     }
+    .agent-panel {
+      display: grid;
+      gap: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: #f8fbfb;
+    }
+    .agent-status {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .agent-status span {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+      border: 1px solid #d4e2e4;
+      border-radius: 6px;
+      padding: 8px;
+      background: #fff;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.25;
+    }
+    .agent-status strong {
+      overflow: hidden;
+      color: var(--text);
+      font-size: 13px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     button {
       border: 1px solid transparent;
       border-radius: 6px;
@@ -429,6 +461,17 @@
 
       <section class="prompt">
         <div class="group">
+          <h2>Агент и история</h2>
+          <div class="agent-panel">
+            <label>agent<select id="agentMode"><option value="local-session-agent">Локальный чат-агент с историей</option></select></label>
+            <div class="agent-status">
+              <span>Сессия<strong id="sessionLabel">—</strong></span>
+              <span>История<strong id="historyLabel">0 сообщений</strong></span>
+              <span>Хранилище<strong>Локально</strong></span>
+            </div>
+          </div>
+        </div>
+        <div class="group">
           <h2>Промпт</h2>
           <label><textarea id="prompt" placeholder="Введите запрос к модели"></textarea></label>
           <details class="panel">
@@ -439,7 +482,7 @@
           </details>
           <div class="send-row">
             <button id="send" type="button">Отправить</button>
-            <button id="clear" class="secondary" type="button">Очистить ответ</button>
+            <button id="clear" class="secondary" type="button">Новая сессия</button>
           </div>
         </div>
         <div id="metrics" class="metrics">
@@ -655,11 +698,12 @@
     }
 
     function sessionCacheKey() {
-      return `ai_chat_session:${currentProvider()}:${selectedModel()}`;
+      return `ai_chat_session:${$('agentMode').value}:${currentProvider()}:${selectedModel()}`;
     }
 
     function chatPayload() {
       return {
+        agent_id: $('agentMode').value,
         ...providerPayload(),
         model: selectedModel(),
         system_prompt: textValue('systemPrompt'),
@@ -767,6 +811,7 @@
 
     function sessionPayload(newSession = false) {
       return {
+        agent_id: $('agentMode').value,
         provider: currentProvider(),
         model: selectedModel(),
         session_id: newSession ? null : localStorage.getItem(sessionCacheKey()),
@@ -784,6 +829,7 @@
     }
 
     function renderChatHistory() {
+      updateAgentStatus();
       if (!chatHistory.length) {
         $('output').textContent = 'Ответ появится здесь.';
         return;
@@ -792,6 +838,12 @@
         .filter((message) => message.role !== 'system')
         .map((message) => `${message.role === 'user' ? 'Вы' : 'Модель'}: ${message.content}`)
         .join('\n\n');
+    }
+
+    function updateAgentStatus() {
+      $('sessionLabel').textContent = chatSessionId ? chatSessionId.slice(0, 8) : 'новая';
+      const visibleMessages = chatHistory.filter((message) => message.role !== 'system').length;
+      $('historyLabel').textContent = `${visibleMessages} сообщ.`;
     }
 
     async function loadChatSession() {
@@ -1010,6 +1062,7 @@
       loadChatSession();
     });
     $('token').addEventListener('input', markTokenOverrideProvider);
+    $('agentMode').addEventListener('change', () => { chatSessionId = null; chatHistory = []; renderChatHistory(); loadChatSession(); });
     $('model').addEventListener('change', () => { applySelectedModelPricing(); persistSelectedModel(); loadChatSession(); });
     $('customModel').addEventListener('input', () => { applySelectedModelPricing(); persistSelectedModel(); loadChatSession(); });
     ['priceInput', 'priceOutput', 'priceCacheHitInput', 'priceCacheMissInput', 'priceCurrency'].forEach((id) => {
