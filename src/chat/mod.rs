@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod goal;
 pub mod history;
+pub mod memory;
 pub mod session;
 pub mod store;
 
@@ -11,6 +12,7 @@ pub use goal::{
     ConversationGoal, ConversationStopMode, GoalComparison, GoalRun, GoalState, run_goal_once,
 };
 pub use history::save_history;
+pub use memory::{AgentMemory, MemoryConfig};
 pub use session::{describe_control, describe_goal, interactive_chat, read_terminal_line};
 pub use store::{ConversationSession, LocalSessionStore, session_key, web_session_key};
 
@@ -45,6 +47,7 @@ pub async fn ask_once(
         profile.clone(),
         token,
         Vec::new(),
+        AgentMemory::default(),
         control.clone(),
         pricing,
         billing,
