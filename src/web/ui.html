@@ -650,6 +650,7 @@
 
     function applyProviderConstraints(selected) {
       currentConstraints = new Map((selected.parameter_constraints || []).map((item) => [item.id, item]));
+      applyTokenLimitDefaults(selected);
       for (const [id, constraint] of currentConstraints) {
         const element = $(id);
         if (!element) continue;
@@ -663,6 +664,16 @@
         else element.step = String(constraint.step);
       }
       validateParameterConstraints();
+    }
+
+    function applyTokenLimitDefaults(selected) {
+      if (selected.id === 'openai-compatible') {
+        if ($('maxTokens').value.trim() === $('maxTokens').defaultValue) $('maxTokens').value = '';
+        if (!$('maxCompletionTokens').value.trim()) $('maxCompletionTokens').value = $('maxTokens').defaultValue;
+        return;
+      }
+      if (!$('maxTokens').value.trim()) $('maxTokens').value = $('maxTokens').defaultValue;
+      if ($('maxCompletionTokens').value.trim() === $('maxTokens').defaultValue) $('maxCompletionTokens').value = '';
     }
 
     function validateParameterConstraints() {

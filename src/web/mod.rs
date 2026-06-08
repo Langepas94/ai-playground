@@ -253,7 +253,15 @@ struct ParameterConstraintView {
 fn parameter_constraints(provider: ProviderKind) -> Vec<ParameterConstraintView> {
     let mut constraints = openrouter_like_constraints();
     match provider {
-        ProviderKind::OpenRouter | ProviderKind::OpenAiCompatible => constraints,
+        ProviderKind::OpenRouter => constraints,
+        ProviderKind::OpenAiCompatible => {
+            mark_unsupported(
+                &mut constraints,
+                &["maxTokens"],
+                "OpenAI chat models use max_completion_tokens; max_tokens is converted server-side for compatibility.",
+            );
+            constraints
+        }
         ProviderKind::DeepSeek => {
             mark_unsupported(
                 &mut constraints,

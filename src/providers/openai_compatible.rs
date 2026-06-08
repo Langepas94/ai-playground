@@ -417,6 +417,7 @@ pub fn chat_payload_for_provider(
 ) -> OpenAiChatPayload {
     let response_format = api_response_format(request.control.format);
     let control = request.control;
+    let (max_tokens, max_completion_tokens) = token_limit_fields(provider, &control);
     let openrouter_reasoning = matches!(provider, ProviderKind::OpenRouter)
         .then(|| {
             control
@@ -431,8 +432,8 @@ pub fn chat_payload_for_provider(
         model: request.model,
         messages: controlled_messages(request.messages, &control),
         response_format,
-        max_tokens: control.max_tokens,
-        max_completion_tokens: control.max_completion_tokens,
+        max_tokens,
+        max_completion_tokens,
         temperature: control.temperature,
         top_p: control.top_p,
         top_k: control.top_k,
@@ -458,6 +459,16 @@ pub fn chat_payload_for_provider(
         stop: control.stop,
         extra_params: control.extra_params,
     }
+}
+
+fn token_limit_fields(
+    provider: ProviderKind,
+    control: &ResponseControl,
+) -> (Option<u32>, Option<u32>) {
+    if matches!(provider, ProviderKind::OpenAiCompatible) {
+        return (None, control.max_completion_tokens.or(control.max_tokens));
+    }
+    (control.max_tokens, control.max_completion_tokens)
 }
 
 fn api_response_format(format: ResponseFormat) -> Option<OpenAiResponseFormat> {
