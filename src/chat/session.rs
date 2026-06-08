@@ -10,9 +10,10 @@ use crate::{
 };
 
 use super::{
-    ChatAgent, format_request_metrics,
+    ChatAgent, LocalSessionStore, format_request_metrics,
     goal::{ConversationGoal, ConversationStopMode, GoalState},
     history::save_history,
+    session_key,
 };
 
 pub async fn interactive_chat(
@@ -32,19 +33,25 @@ pub async fn interactive_chat(
                 profile: profile_name.to_string(),
             }
         })?;
+    let store = LocalSessionStore::new()?;
+    let session_key = session_key(profile_name, &profile.model);
+    let mut session = store.load_or_create_latest(&session_key)?;
     let mut agent = ChatAgent::new(
         profile.clone(),
         token,
-        Vec::new(),
+        session.messages.clone(),
         control.clone(),
         pricing,
         billing,
     );
     let mut goal_state = GoalState::new(goal.required_fields.clone());
     println!(
-        "Chat started with profile '{profile_name}' and model '{}'.",
-        profile.model
+        "Chat started with profile '{profile_name}', model '{}', session '{}'.",
+        profile.model, session.id
     );
+    if !agent.history().is_empty() {
+        println!("Loaded {} local history messages.", agent.history().len());
+    }
     println!(
         "Use /exit, /profile, /model, /clear, /save, /control, /format, /answer-format, /max-tokens, /temperature, /top-p, /presence-penalty, /frequency-penalty, /seed, /stop, /goal."
     );
@@ -73,7 +80,9 @@ pub async fn interactive_chat(
             }
             "/clear" => {
                 agent.clear_history();
-                println!("History cleared.");
+                session = store.create_session()?;
+                store.save_session(&session_key, &session.id, agent.history())?;
+                println!("History cleared. New session: {}", session.id);
                 continue;
             }
             "/save" => {
@@ -266,6 +275,7 @@ pub async fn interactive_chat(
         let effective_control = goal.apply_to_control(control.clone());
         agent.set_control(effective_control);
         let response = agent.respond(client, line.to_string()).await?;
+        store.save_session(&session_key, &session.id, agent.history())?;
         println!("{}", response.text);
         eprintln!("{}", format_request_metrics(&response.metrics));
 

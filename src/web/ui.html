@@ -474,6 +474,8 @@
     let userPricingOverrides = new Map();
     let currentConstraints = new Map();
     let chatHistory = [];
+    let chatSessionId = null;
+    let forceNewSession = false;
 
     function pricingCacheKey(provider, modelId) {
       return `ai_pricing:${provider}:${modelId}`;
@@ -652,12 +654,18 @@
       return modelPricingById.get(selectedModel()) || null;
     }
 
+    function sessionCacheKey() {
+      return `ai_chat_session:${currentProvider()}:${selectedModel()}`;
+    }
+
     function chatPayload() {
       return {
         ...providerPayload(),
         model: selectedModel(),
         system_prompt: textValue('systemPrompt'),
         prompt: $('prompt').value,
+        session_id: chatSessionId,
+        new_session: forceNewSession,
         messages: chatHistory,
         pricing: pricingPayload(),
         billing: billingPayload(),
@@ -757,6 +765,15 @@
       };
     }
 
+    function sessionPayload(newSession = false) {
+      return {
+        provider: currentProvider(),
+        model: selectedModel(),
+        session_id: newSession ? null : localStorage.getItem(sessionCacheKey()),
+        new_session: newSession
+      };
+    }
+
     function prettyJson(value) {
       return JSON.stringify(value ?? {}, null, 2);
     }
@@ -775,6 +792,33 @@
         .filter((message) => message.role !== 'system')
         .map((message) => `${message.role === 'user' ? 'Вы' : 'Модель'}: ${message.content}`)
         .join('\n\n');
+    }
+
+    async function loadChatSession() {
+      if (!selectedModel()) return;
+      try {
+        const data = await requestJson('/api/chat/session', sessionPayload());
+        chatSessionId = data.session_id || null;
+        forceNewSession = false;
+        chatHistory = data.messages || [];
+        if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
+        renderChatHistory();
+      } catch (error) {
+        chatSessionId = null;
+        chatHistory = [];
+        renderChatHistory();
+        setStatus(error.message, true);
+      }
+    }
+
+    async function startNewChatSession() {
+      if (!selectedModel()) return;
+      const data = await requestJson('/api/chat/session', sessionPayload(true));
+      chatSessionId = data.session_id || null;
+      forceNewSession = false;
+      chatHistory = data.messages || [];
+      if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
+      renderChatHistory();
     }
 
     function setMetrics(metrics) {
@@ -910,6 +954,7 @@
       providerSelect.innerHTML = providers.map((item) => `<option value="${item.id}">${item.name}</option>`).join('');
       resetTokenOverrideForProvider();
       applyProviderDefaults();
+      await loadChatSession();
       setStatus('Готово');
     }
 
@@ -924,6 +969,7 @@
         setModelOptions(data.models, modelIds.includes(current) ? current : fallback);
         persistModelPricing();
         $('customModel').value = '';
+        await loadChatSession();
         setStatus(data.models.length ? `Загружено моделей: ${data.models.length}; выбрана ${$('model').value}` : 'Провайдер вернул пустой список моделей');
       } catch (error) {
         setStatus(error.message, true);
@@ -941,6 +987,9 @@
       try {
         const payload = chatPayload();
         const data = await requestJson('/api/chat', payload);
+        chatSessionId = data.session_id || chatSessionId;
+        forceNewSession = false;
+        if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
         chatHistory = data.messages || chatHistory;
         renderChatHistory();
         $('prompt').value = '';
@@ -957,13 +1006,12 @@
 
     providerSelect.addEventListener('change', () => {
       resetTokenOverrideForProvider();
-      chatHistory = [];
-      renderChatHistory();
       applyProviderDefaults();
+      loadChatSession();
     });
     $('token').addEventListener('input', markTokenOverrideProvider);
-    $('model').addEventListener('change', () => { applySelectedModelPricing(); persistSelectedModel(); });
-    $('customModel').addEventListener('input', () => { applySelectedModelPricing(); persistSelectedModel(); });
+    $('model').addEventListener('change', () => { applySelectedModelPricing(); persistSelectedModel(); loadChatSession(); });
+    $('customModel').addEventListener('input', () => { applySelectedModelPricing(); persistSelectedModel(); loadChatSession(); });
     ['priceInput', 'priceOutput', 'priceCacheHitInput', 'priceCacheMissInput', 'priceCurrency'].forEach((id) => {
       $(id).addEventListener('input', saveCurrentPricingOverride);
     });
@@ -973,11 +1021,21 @@
     });
     $('loadModels').addEventListener('click', loadModels);
     $('send').addEventListener('click', sendPrompt);
-    $('clear').addEventListener('click', () => {
-      chatHistory = [];
-      renderChatHistory();
-      setDebug(null);
-      setMetrics(null);
+    $('clear').addEventListener('click', async () => {
+      try {
+        await startNewChatSession();
+        setStatus('Новая сессия создана');
+      } catch (error) {
+        localStorage.removeItem(sessionCacheKey());
+        chatSessionId = null;
+        forceNewSession = true;
+        chatHistory = [];
+        renderChatHistory();
+        setStatus(error.message, true);
+      } finally {
+        setDebug(null);
+        setMetrics(null);
+      }
     });
     init().catch((error) => setStatus(error.message, true));
   </script>
