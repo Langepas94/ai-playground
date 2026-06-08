@@ -428,6 +428,12 @@ pub trait ProviderClient: Send + Sync {
         token: &str,
         request: ChatRequest,
     ) -> Result<ChatResponse, AppError>;
+    async fn chat_completion_with_debug(
+        &self,
+        profile: &ProfileConfig,
+        token: &str,
+        request: ChatRequest,
+    ) -> Result<(ChatResponse, ProviderExchangeDebug), AppError>;
 }
 
 #[derive(Debug, Clone)]
@@ -501,6 +507,18 @@ impl ProviderClient for ReqwestProviderClient {
         let spec = profile.provider.spec();
         let token = self.bearer_token(profile, token).await?;
         openai_compatible::chat_completion(&self.client, spec, profile, &token, request).await
+    }
+
+    async fn chat_completion_with_debug(
+        &self,
+        profile: &ProfileConfig,
+        token: &str,
+        request: ChatRequest,
+    ) -> Result<(ChatResponse, ProviderExchangeDebug), AppError> {
+        let spec = profile.provider.spec();
+        let token = self.bearer_token(profile, token).await?;
+        openai_compatible::chat_completion_with_debug(&self.client, spec, profile, &token, request)
+            .await
     }
 }
 

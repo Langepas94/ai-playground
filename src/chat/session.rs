@@ -4,14 +4,13 @@ use crate::{
     config::{AppConfig, ProfileConfig},
     errors::AppError,
     providers::{
-        AnswerFormat, BillingLookup, ChatMessage, ChatRequest, ModelPricing, ProviderClient,
-        ResponseControl, ResponseFormat, Role,
+        AnswerFormat, BillingLookup, ModelPricing, ProviderClient, ResponseControl, ResponseFormat,
     },
     secrets::{SecretStore, get_config_profile_token},
 };
 
 use super::{
-    format_request_metrics,
+    ChatAgent, format_request_metrics,
     goal::{ConversationGoal, ConversationStopMode, GoalState},
     history::save_history,
 };
@@ -33,7 +32,14 @@ pub async fn interactive_chat(
                 profile: profile_name.to_string(),
             }
         })?;
-    let mut messages = Vec::<ChatMessage>::new();
+    let mut agent = ChatAgent::new(
+        profile.clone(),
+        token,
+        Vec::new(),
+        control.clone(),
+        pricing,
+        billing,
+    );
     let mut goal_state = GoalState::new(goal.required_fields.clone());
     println!(
         "Chat started with profile '{profile_name}' and model '{}'.",
@@ -57,16 +63,32 @@ pub async fn interactive_chat(
         }
         match line {
             "/exit" => break,
-            "/profile" => { println!("{profile_name}"); continue; }
-            "/model" => { println!("{}", profile.model); continue; }
-            "/clear" => { messages.clear(); println!("History cleared."); continue; }
+            "/profile" => {
+                println!("{profile_name}");
+                continue;
+            }
+            "/model" => {
+                println!("{}", profile.model);
+                continue;
+            }
+            "/clear" => {
+                agent.clear_history();
+                println!("History cleared.");
+                continue;
+            }
             "/save" => {
-                let path = save_history(profile_name, &messages)?;
+                let path = save_history(profile_name, agent.history())?;
                 println!("Saved to {}", path.display());
                 continue;
             }
-            "/control" => { println!("{}", describe_control(&control)); continue; }
-            "/goal" => { println!("{}", describe_goal(&goal, &goal_state)); continue; }
+            "/control" => {
+                println!("{}", describe_control(&control));
+                continue;
+            }
+            "/goal" => {
+                println!("{}", describe_goal(&goal, &goal_state));
+                continue;
+            }
             "/control clear" => {
                 control = ResponseControl::uncontrolled();
                 println!("Response control cleared.");
@@ -78,81 +100,130 @@ pub async fn interactive_chat(
                 println!("Conversation goal cleared.");
                 continue;
             }
-            "/stop clear" => { control.stop.clear(); println!("Stop sequences cleared."); continue; }
-            "/quote-question" => { control.quote_question = true; println!("Question quoting enabled."); continue; }
-            "/quote-question clear" => { control.quote_question = false; println!("Question quoting disabled."); continue; }
+            "/stop clear" => {
+                control.stop.clear();
+                println!("Stop sequences cleared.");
+                continue;
+            }
+            "/quote-question" => {
+                control.quote_question = true;
+                println!("Question quoting enabled.");
+                continue;
+            }
+            "/quote-question clear" => {
+                control.quote_question = false;
+                println!("Question quoting disabled.");
+                continue;
+            }
             _ => {}
         }
 
         if let Some(value) = line.strip_prefix("/format ") {
             match value {
-                "text" => { control.format = ResponseFormat::Text; println!("Response format: text"); }
-                "json" | "json-object" => { control.format = ResponseFormat::JsonObject; println!("Response format: json-object"); }
+                "text" => {
+                    control.format = ResponseFormat::Text;
+                    println!("Response format: text");
+                }
+                "json" | "json-object" => {
+                    control.format = ResponseFormat::JsonObject;
+                    println!("Response format: json-object");
+                }
                 _ => println!("Use /format text or /format json-object."),
             }
             continue;
         }
         if let Some(value) = line.strip_prefix("/answer-format ") {
             match parse_answer_format(value) {
-                Some(format) => { control.answer_format = format; println!("Answer format: {format}"); }
+                Some(format) => {
+                    control.answer_format = format;
+                    println!("Answer format: {format}");
+                }
                 None => println!("Use /answer-format natural|bullets|numbered|short|steps|table."),
             }
             continue;
         }
         if let Some(value) = line.strip_prefix("/answer-prefix ") {
-            control.answer_prefix = Some(value.to_string()); println!("Answer prefix updated."); continue;
+            control.answer_prefix = Some(value.to_string());
+            println!("Answer prefix updated.");
+            continue;
         }
         if let Some(value) = line.strip_prefix("/answer-suffix ") {
-            control.answer_suffix = Some(value.to_string()); println!("Answer suffix updated."); continue;
+            control.answer_suffix = Some(value.to_string());
+            println!("Answer suffix updated.");
+            continue;
         }
         if let Some(value) = line.strip_prefix("/address-as ") {
-            control.address_as = Some(value.to_string()); println!("Addressing rule updated."); continue;
+            control.address_as = Some(value.to_string());
+            println!("Addressing rule updated.");
+            continue;
         }
         if let Some(value) = line.strip_prefix("/max-tokens ") {
             match value.parse::<u32>() {
-                Ok(v) => { control.max_tokens = Some(v); println!("Max tokens: {v}"); }
+                Ok(v) => {
+                    control.max_tokens = Some(v);
+                    println!("Max tokens: {v}");
+                }
                 Err(_) => println!("Use /max-tokens <number>."),
             }
             continue;
         }
         if let Some(value) = line.strip_prefix("/temperature ") {
             match value.parse::<f32>() {
-                Ok(v) => { control.temperature = Some(v); println!("Temperature: {v}"); }
+                Ok(v) => {
+                    control.temperature = Some(v);
+                    println!("Temperature: {v}");
+                }
                 Err(_) => println!("Use /temperature <number>."),
             }
             continue;
         }
         if let Some(value) = line.strip_prefix("/top-p ") {
             match value.parse::<f32>() {
-                Ok(v) => { control.top_p = Some(v); println!("Top-p: {v}"); }
+                Ok(v) => {
+                    control.top_p = Some(v);
+                    println!("Top-p: {v}");
+                }
                 Err(_) => println!("Use /top-p <number>."),
             }
             continue;
         }
         if let Some(value) = line.strip_prefix("/presence-penalty ") {
             match value.parse::<f32>() {
-                Ok(v) => { control.presence_penalty = Some(v); println!("Presence penalty: {v}"); }
+                Ok(v) => {
+                    control.presence_penalty = Some(v);
+                    println!("Presence penalty: {v}");
+                }
                 Err(_) => println!("Use /presence-penalty <number>."),
             }
             continue;
         }
         if let Some(value) = line.strip_prefix("/frequency-penalty ") {
             match value.parse::<f32>() {
-                Ok(v) => { control.frequency_penalty = Some(v); println!("Frequency penalty: {v}"); }
+                Ok(v) => {
+                    control.frequency_penalty = Some(v);
+                    println!("Frequency penalty: {v}");
+                }
                 Err(_) => println!("Use /frequency-penalty <number>."),
             }
             continue;
         }
         if let Some(value) = line.strip_prefix("/seed ") {
             match value.parse::<i64>() {
-                Ok(v) => { control.seed = Some(v); println!("Seed: {v}"); }
+                Ok(v) => {
+                    control.seed = Some(v);
+                    println!("Seed: {v}");
+                }
                 Err(_) => println!("Use /seed <integer>."),
             }
             continue;
         }
         if let Some(value) = line.strip_prefix("/stop ") {
-            if value.is_empty() { println!("Use /stop <sequence> or /stop clear."); }
-            else { control.stop.push(value.to_string()); println!("Stop sequence added."); }
+            if value.is_empty() {
+                println!("Use /stop <sequence> or /stop clear.");
+            } else {
+                control.stop.push(value.to_string());
+                println!("Stop sequence added.");
+            }
             continue;
         }
         if let Some(value) = line.strip_prefix("/goal field ") {
@@ -172,34 +243,29 @@ pub async fn interactive_chat(
         }
         if let Some(value) = line.strip_prefix("/goal mode ") {
             match parse_stop_mode(value) {
-                Some(mode) => { goal.mode = mode; println!("Goal stop mode: {mode}"); }
+                Some(mode) => {
+                    goal.mode = mode;
+                    println!("Goal stop mode: {mode}");
+                }
                 None => println!("Use /goal mode manual|state|instruction|combined."),
             }
             continue;
         }
         if let Some(value) = line.strip_prefix("/completion-instruction ") {
-            control.completion_instruction = Some(value.to_string()); println!("Completion instruction updated."); continue;
+            control.completion_instruction = Some(value.to_string());
+            println!("Completion instruction updated.");
+            continue;
         }
         if let Some(value) = line.strip_prefix("/format-instruction ") {
-            control.format_instruction = Some(value.to_string()); println!("Format instruction updated."); continue;
+            control.format_instruction = Some(value.to_string());
+            println!("Format instruction updated.");
+            continue;
         }
 
-        messages.push(ChatMessage { role: Role::User, content: line.to_string() });
         eprintln!("Waiting for provider response...");
         let effective_control = goal.apply_to_control(control.clone());
-        let response = client
-            .chat_completion(
-                profile,
-                &token,
-                ChatRequest {
-                    model: profile.model.clone(),
-                    messages: messages.clone(),
-                    control: effective_control,
-                    pricing: pricing.clone(),
-                    billing: billing.clone(),
-                },
-            )
-            .await?;
+        agent.set_control(effective_control);
+        let response = agent.respond(client, line.to_string()).await?;
         println!("{}", response.text);
         eprintln!("{}", format_request_metrics(&response.metrics));
 
@@ -215,8 +281,6 @@ pub async fn interactive_chat(
                 Err(error) => println!("Goal state was not updated: {error}"),
             }
         }
-
-        messages.push(ChatMessage { role: Role::Assistant, content: response.text });
     }
 
     if config.active_profile.as_deref() != Some(profile_name) {
@@ -238,12 +302,30 @@ pub fn describe_control(control: &ResponseControl) -> String {
         "Response control: api_format={}, answer_format={}, max_tokens={}, temperature={}, top_p={}, presence_penalty={}, frequency_penalty={}, seed={}, stop={}, answer_prefix={}, answer_suffix={}, address_as={}, quote_question={}, format_instruction={}, completion_instruction={}",
         control.format,
         control.answer_format,
-        control.max_tokens.map(|v| v.to_string()).unwrap_or_else(|| "none".to_string()),
-        control.temperature.map(|v| v.to_string()).unwrap_or_else(|| "none".to_string()),
-        control.top_p.map(|v| v.to_string()).unwrap_or_else(|| "none".to_string()),
-        control.presence_penalty.map(|v| v.to_string()).unwrap_or_else(|| "none".to_string()),
-        control.frequency_penalty.map(|v| v.to_string()).unwrap_or_else(|| "none".to_string()),
-        control.seed.map(|v| v.to_string()).unwrap_or_else(|| "none".to_string()),
+        control
+            .max_tokens
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        control
+            .temperature
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        control
+            .top_p
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        control
+            .presence_penalty
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        control
+            .frequency_penalty
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        control
+            .seed
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "none".to_string()),
         stop,
         control.answer_prefix.as_deref().unwrap_or("none"),
         control.answer_suffix.as_deref().unwrap_or("none"),
@@ -305,8 +387,6 @@ pub fn read_terminal_line() -> Result<Option<String>, AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::read_terminal_line;
-
     #[test]
     fn terminal_line_decode_tolerates_invalid_utf8() {
         // Can't call read_terminal_line directly (needs stdin), but verify the lossy decode logic

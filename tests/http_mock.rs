@@ -236,11 +236,14 @@ async fn cost_calculated_with_output_only_pricing() {
             "secret",
             ChatRequest {
                 model: "deepseek-chat".to_string(),
-                messages: vec![ChatMessage { role: Role::User, content: "hi".to_string() }],
+                messages: vec![ChatMessage {
+                    role: Role::User,
+                    content: "hi".to_string(),
+                }],
                 control: ResponseControl::uncontrolled(),
                 pricing: Some(ModelPricing {
                     currency: "USD".to_string(),
-                    input_per_million: None,   // DeepSeek: нет цены за input
+                    input_per_million: None, // DeepSeek: нет цены за input
                     output_per_million: 2.0,
                     cache_hit_input_per_million: None,
                     cache_miss_input_per_million: None,
@@ -251,9 +254,16 @@ async fn cost_calculated_with_output_only_pricing() {
         .await
         .expect("chat");
 
-    let cost = response.metrics.cost.expect("cost must be calculated even without input price");
-    // 500 токенов * 2.0 / 1_000_000 = 0.000001
-    assert!((cost.amount - 0.000001).abs() < 1e-10, "actual: {}", cost.amount);
+    let cost = response
+        .metrics
+        .cost
+        .expect("cost must be calculated even without input price");
+    // 500 токенов * 2.0 / 1_000_000 = 0.001
+    assert!(
+        (cost.amount - 0.001).abs() < 1e-10,
+        "actual: {}",
+        cost.amount
+    );
     assert_eq!(cost.currency, "USD");
 }
 
@@ -280,7 +290,10 @@ async fn http_error_includes_provider_name_not_unknown() {
             "bad-token",
             ChatRequest {
                 model: "some/model".to_string(),
-                messages: vec![ChatMessage { role: Role::User, content: "hi".to_string() }],
+                messages: vec![ChatMessage {
+                    role: Role::User,
+                    content: "hi".to_string(),
+                }],
                 control: ResponseControl::uncontrolled(),
                 pricing: None,
                 billing: None,
@@ -290,8 +303,14 @@ async fn http_error_includes_provider_name_not_unknown() {
         .expect_err("should fail");
 
     let msg = error.to_string();
-    assert!(msg.contains("openrouter"), "error должен содержать имя провайдера, получили: {msg}");
-    assert!(!msg.contains("'unknown'"), "не должно быть 'unknown', получили: {msg}");
+    assert!(
+        msg.contains("openrouter"),
+        "error должен содержать имя провайдера, получили: {msg}"
+    );
+    assert!(
+        !msg.contains("'unknown'"),
+        "не должно быть 'unknown', получили: {msg}"
+    );
 }
 
 /// Баг 3: elapsed_ms должен отражать реальное время ответа
@@ -324,7 +343,10 @@ async fn elapsed_ms_is_measured_after_full_body_received() {
             "secret",
             ChatRequest {
                 model: "test-model".to_string(),
-                messages: vec![ChatMessage { role: Role::User, content: "hi".to_string() }],
+                messages: vec![ChatMessage {
+                    role: Role::User,
+                    content: "hi".to_string(),
+                }],
                 control: ResponseControl::uncontrolled(),
                 pricing: None,
                 billing: None,
@@ -365,22 +387,39 @@ async fn list_models_with_output_only_pricing_returns_model_info() {
         token_ref: "openrouter:test".to_string(),
     };
     let client = ReqwestProviderClient::new().expect("client");
-    let models = client.list_model_info(&profile, "secret").await.expect("models");
+    let models = client
+        .list_model_info(&profile, "secret")
+        .await
+        .expect("models");
 
-    let model = models.iter().find(|m| m.id == "provider/cheap-model").expect("model");
-    let pricing = model.pricing.as_ref().expect("pricing должен присутствовать даже без input цены");
-    assert!(pricing.input_per_million.is_none(), "input_per_million должен быть None");
+    let model = models
+        .iter()
+        .find(|m| m.id == "provider/cheap-model")
+        .expect("model");
+    let pricing = model
+        .pricing
+        .as_ref()
+        .expect("pricing должен присутствовать даже без input цены");
+    assert!(
+        pricing.input_per_million.is_none(),
+        "input_per_million должен быть None"
+    );
     assert!((pricing.output_per_million - 2.0).abs() < f64::EPSILON);
 }
 
 /// При отсутствии токена сообщение об ошибке содержит имя профиля и подсказку
 #[tokio::test]
 async fn missing_token_error_shows_profile_name_and_hint() {
-    let error = AppError::MissingToken { profile: "my-profile".to_string() };
+    let error = AppError::MissingToken {
+        profile: "my-profile".to_string(),
+    };
     let msg = error.to_string();
 
     assert!(msg.contains("my-profile"), "должно содержать имя профиля");
-    assert!(msg.contains("token set"), "должно содержать подсказку команды");
+    assert!(
+        msg.contains("token set"),
+        "должно содержать подсказку команды"
+    );
 }
 
 #[tokio::test]

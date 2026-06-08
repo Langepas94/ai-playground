@@ -4,6 +4,7 @@
 
 ```
 chat/
+  agent.rs    — ChatAgent: состояние сессии, история, сборка ChatRequest, commit ответа
   mod.rs       — публичный API: ask_once, compare_*, compare_goal_stop, format_request_metrics
   goal.rs      — ConversationGoal, GoalState, ConversationStopMode, GoalRun/GoalComparison
   session.rs   — interactive_chat (REPL), describe_control/goal, terminal I/O
@@ -15,6 +16,9 @@ chat/
 ```rust
 // Один запрос
 ask_once(client, secrets, config, profile_name, profile, prompt, control, pricing, billing)
+
+// Сессионный агент
+ChatAgent::new(...).respond(client, prompt)
 
 // Сравнение без/с контролем
 compare_response_control(...)
@@ -51,3 +55,4 @@ Goal — механизм сбора структурированных данн
 
 - Токен резолвится через `get_config_profile_token` — общий путь для CLI и сессии
 - History не содержит токенов (сохраняются только `ChatMessage`)
+- Новый чатовый код должен идти через `ChatAgent`, а не собирать `ChatRequest` напрямую

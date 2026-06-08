@@ -1,3 +1,5 @@
+use crate::cli::args::ChatArgs;
+use crate::cli::request_pricing;
 use crate::{
     chat,
     config::AppConfig,
@@ -5,8 +7,6 @@ use crate::{
     providers::{ReqwestProviderClient, ResponseControl},
     secrets::SecretStore,
 };
-use crate::cli::args::ChatArgs;
-use crate::cli::request_pricing;
 
 pub async fn run_chat(args: &ChatArgs, secrets: &dyn SecretStore) -> Result<(), AppError> {
     let config = AppConfig::load()?;

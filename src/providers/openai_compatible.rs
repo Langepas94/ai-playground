@@ -706,7 +706,9 @@ fn model_pricing_from_entry(pricing: ModelEntryPricing) -> Option<ModelPricing> 
     let output = pricing.completion.or(pricing.output)?;
     Some(ModelPricing {
         currency: pricing.currency.unwrap_or_else(|| "USD".to_string()),
-        input_per_million: input.and_then(|v| parse_price_per_token(&v)).map(|p| p * 1_000_000.0),
+        input_per_million: input
+            .and_then(|v| parse_price_per_token(&v))
+            .map(|p| p * 1_000_000.0),
         output_per_million: parse_price_per_token(&output)? * 1_000_000.0,
         cache_hit_input_per_million: None,
         cache_miss_input_per_million: None,
@@ -886,9 +888,16 @@ mod tests {
 
         let response = parse_chat_response(spec(), raw, 1, Some(&pricing)).expect("parse");
 
-        let cost = response.metrics.cost.expect("должна считаться стоимость без input цены");
-        // 500 * 4.0 / 1_000_000 = 0.000002
-        assert!((cost.amount - 0.000002).abs() < 1e-10, "actual: {}", cost.amount);
+        let cost = response
+            .metrics
+            .cost
+            .expect("должна считаться стоимость без input цены");
+        // 500 * 4.0 / 1_000_000 = 0.002
+        assert!(
+            (cost.amount - 0.002).abs() < 1e-10,
+            "actual: {}",
+            cost.amount
+        );
         assert_eq!(cost.source, CostSource::ConfiguredPricing);
     }
 
@@ -904,9 +913,14 @@ mod tests {
 
         let models = parse_models_response(spec(), raw).expect("parse");
 
-        let pricing = models[0].pricing.as_ref()
+        let pricing = models[0]
+            .pricing
+            .as_ref()
             .expect("pricing должен быть Some даже без поля input");
-        assert!(pricing.input_per_million.is_none(), "input_per_million должен быть None");
+        assert!(
+            pricing.input_per_million.is_none(),
+            "input_per_million должен быть None"
+        );
         assert!((pricing.output_per_million - 1.0).abs() < f64::EPSILON);
     }
 

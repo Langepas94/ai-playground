@@ -473,6 +473,7 @@
     let modelPricingById = new Map();
     let userPricingOverrides = new Map();
     let currentConstraints = new Map();
+    let chatHistory = [];
 
     function pricingCacheKey(provider, modelId) {
       return `ai_pricing:${provider}:${modelId}`;
@@ -657,6 +658,7 @@
         model: selectedModel(),
         system_prompt: textValue('systemPrompt'),
         prompt: $('prompt').value,
+        messages: chatHistory,
         pricing: pricingPayload(),
         billing: billingPayload(),
         control: {
@@ -762,6 +764,17 @@
     function setDebug(debug) {
       $('providerRequest').textContent = prettyJson(debug?.provider_request);
       $('providerResponse').textContent = prettyJson(debug?.provider_response);
+    }
+
+    function renderChatHistory() {
+      if (!chatHistory.length) {
+        $('output').textContent = 'Ответ появится здесь.';
+        return;
+      }
+      $('output').textContent = chatHistory
+        .filter((message) => message.role !== 'system')
+        .map((message) => `${message.role === 'user' ? 'Вы' : 'Модель'}: ${message.content}`)
+        .join('\n\n');
     }
 
     function setMetrics(metrics) {
@@ -928,7 +941,9 @@
       try {
         const payload = chatPayload();
         const data = await requestJson('/api/chat', payload);
-        $('output').textContent = data.text;
+        chatHistory = data.messages || chatHistory;
+        renderChatHistory();
+        $('prompt').value = '';
         setMetrics(data.metrics);
         setDebug(data.debug);
         setStatus(data.finish_reason ? `Готово: ${data.finish_reason}` : 'Готово');
@@ -942,6 +957,8 @@
 
     providerSelect.addEventListener('change', () => {
       resetTokenOverrideForProvider();
+      chatHistory = [];
+      renderChatHistory();
       applyProviderDefaults();
     });
     $('token').addEventListener('input', markTokenOverrideProvider);
@@ -957,7 +974,8 @@
     $('loadModels').addEventListener('click', loadModels);
     $('send').addEventListener('click', sendPrompt);
     $('clear').addEventListener('click', () => {
-      $('output').textContent = 'Ответ появится здесь.';
+      chatHistory = [];
+      renderChatHistory();
       setDebug(null);
       setMetrics(null);
     });

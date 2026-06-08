@@ -1,7 +1,7 @@
 use crate::{
     config::AppConfig,
     errors::AppError,
-    providers::{ModelInfo, ProviderClient, ReqwestProviderClient},
+    providers::{ModelInfo, ReqwestProviderClient},
     secrets::{SecretStore, get_config_profile_token},
 };
 
