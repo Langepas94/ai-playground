@@ -40,6 +40,8 @@ pub async fn serve(addr: SocketAddr) -> Result<(), AppError> {
         .route("/api/agents", get(agents))
         .route("/api/providers", get(providers))
         .route("/api/models", post(models))
+        .route("/api/agent/session", post(chat_session))
+        .route("/api/agent/chat", post(chat))
         .route("/api/chat/session", post(chat_session))
         .route("/api/chat", post(chat))
         .with_state(AppState {

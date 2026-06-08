@@ -226,6 +226,60 @@
       line-height: 1.5;
       font-size: 14px;
     }
+    .conversation {
+      min-height: 320px;
+      max-height: 560px;
+      padding: 16px;
+      overflow: auto;
+      display: grid;
+      align-content: start;
+      gap: 12px;
+      background: var(--output);
+      border-radius: 8px;
+    }
+    .conversation-empty {
+      margin: 0;
+      color: #d1d5db;
+      line-height: 1.5;
+      font-size: 14px;
+    }
+    .message {
+      max-width: min(78%, 720px);
+      display: grid;
+      gap: 5px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      line-height: 1.45;
+      font-size: 14px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      box-shadow: 0 1px 0 rgba(0, 0, 0, .08);
+    }
+    .message.user {
+      justify-self: end;
+      background: #d9f3f4;
+      color: #102126;
+    }
+    .message.assistant {
+      justify-self: start;
+      background: #ffffff;
+      color: #172033;
+    }
+    .message.error {
+      justify-self: start;
+      background: #fff1f2;
+      color: #8f1d2c;
+    }
+    .message-role {
+      color: inherit;
+      opacity: .62;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1.2;
+    }
+    .message-content {
+      min-width: 0;
+    }
     details.debug {
       margin-top: 12px;
       border: 1px solid var(--line);
@@ -490,7 +544,9 @@
           <div class="metric"><span>Токены</span><strong id="metricTokens">—</strong></div>
           <div class="metric"><span>Стоимость</span><strong id="metricCost">—</strong></div>
         </div>
-        <pre id="output">Ответ появится здесь.</pre>
+        <div id="conversation" class="conversation" aria-live="polite">
+          <p class="conversation-empty">Ответ появится здесь.</p>
+        </div>
         <details id="debugDetails" class="debug">
           <summary>JSON отладка</summary>
           <div class="debug-grid">
@@ -681,13 +737,23 @@
       return $('provider').value;
     }
 
+    function tokenSessionKey(provider = currentProvider()) {
+      return `ai_token_override:${provider}`;
+    }
+
     function resetTokenOverrideForProvider() {
-      $('token').value = '';
       tokenProvider = currentProvider();
+      $('token').value = sessionStorage.getItem(tokenSessionKey()) || '';
     }
 
     function markTokenOverrideProvider() {
       tokenProvider = currentProvider();
+      const token = $('token').value.trim();
+      if (token) {
+        sessionStorage.setItem(tokenSessionKey(), token);
+      } else {
+        sessionStorage.removeItem(tokenSessionKey());
+      }
     }
 
     function selectedModel() {
@@ -835,14 +901,30 @@
 
     function renderChatHistory() {
       updateAgentStatus();
-      if (!chatHistory.length) {
-        $('output').textContent = 'Ответ появится здесь.';
+      const visibleMessages = chatHistory.filter((message) => message.role !== 'system');
+      const conversation = $('conversation');
+      if (!visibleMessages.length) {
+        conversation.innerHTML = '<p class="conversation-empty">Ответ появится здесь.</p>';
         return;
       }
-      $('output').textContent = chatHistory
-        .filter((message) => message.role !== 'system')
-        .map((message) => `${message.role === 'user' ? 'Вы' : 'Модель'}: ${message.content}`)
-        .join('\n\n');
+      conversation.innerHTML = visibleMessages.map((message) => {
+        const isUser = message.role === 'user';
+        const role = isUser ? 'Вы' : selectedAgent()?.name || 'Агент';
+        const side = isUser ? 'user' : 'assistant';
+        return `<article class="message ${side}">
+          <span class="message-role">${escapeHtml(role)}</span>
+          <span class="message-content">${escapeHtml(message.content || '')}</span>
+        </article>`;
+      }).join('');
+      conversation.scrollTop = conversation.scrollHeight;
+    }
+
+    function renderConversationError(message) {
+      const conversation = $('conversation');
+      conversation.innerHTML = `<article class="message error">
+        <span class="message-role">Ошибка</span>
+        <span class="message-content">${escapeHtml(message)}</span>
+      </article>`;
     }
 
     function updateAgentStatus() {
@@ -855,7 +937,7 @@
     async function loadChatSession() {
       if (!selectedModel()) return;
       try {
-        const data = await requestJson('/api/chat/session', sessionPayload());
+        const data = await requestJson('/api/agent/session', sessionPayload());
         chatSessionId = data.session_id || null;
         forceNewSession = false;
         chatHistory = data.messages || [];
@@ -871,7 +953,7 @@
 
     async function startNewChatSession() {
       if (!selectedModel()) return;
-      const data = await requestJson('/api/chat/session', sessionPayload(true));
+      const data = await requestJson('/api/agent/session', sessionPayload(true));
       chatSessionId = data.session_id || null;
       forceNewSession = false;
       chatHistory = data.messages || [];
@@ -1044,12 +1126,11 @@
     async function sendPrompt() {
       $('send').disabled = true;
       setStatus('Жду ответ модели...');
-      $('output').textContent = '';
       setDebug(null);
       setMetrics(null);
       try {
         const payload = chatPayload();
-        const data = await requestJson('/api/chat', payload);
+        const data = await requestJson('/api/agent/chat', payload);
         chatSessionId = data.session_id || chatSessionId;
         forceNewSession = false;
         if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
@@ -1060,7 +1141,7 @@
         setDebug(data.debug);
         setStatus(data.finish_reason ? `Готово: ${data.finish_reason}` : 'Готово');
       } catch (error) {
-        $('output').textContent = error.message;
+        renderConversationError(error.message);
         setStatus(error.message, true);
       } finally {
         $('send').disabled = false;
