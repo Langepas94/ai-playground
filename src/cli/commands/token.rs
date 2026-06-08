@@ -1,16 +1,13 @@
 use std::io::{self, Write};
 
+use crate::cli::read_stdin_line;
 use crate::{
     config::AppConfig,
     errors::AppError,
     secrets::{SecretStore, delete_profile_token, set_profile_token},
 };
-use crate::cli::read_stdin_line;
 
-pub fn run_token_set(
-    profile_arg: Option<&str>,
-    secrets: &dyn SecretStore,
-) -> Result<(), AppError> {
+pub fn run_token_set(profile_arg: Option<&str>, secrets: &dyn SecretStore) -> Result<(), AppError> {
     let config = AppConfig::load()?;
     let (name, profile) = config.selected_profile(profile_arg)?;
     eprint!("Token for profile '{name}': ");

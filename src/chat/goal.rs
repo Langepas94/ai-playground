@@ -273,7 +273,11 @@ mod tests {
     /// Инструкция формата включает все required_fields
     #[test]
     fn goal_format_instruction_includes_all_required_fields() {
-        let fields = vec!["topic".to_string(), "audience".to_string(), "tone".to_string()];
+        let fields = vec![
+            "topic".to_string(),
+            "audience".to_string(),
+            "tone".to_string(),
+        ];
         let instruction = goal_format_instruction(&fields);
 
         assert!(instruction.contains("\"topic\""));
@@ -350,13 +354,17 @@ mod tests {
         });
 
         assert_eq!(control.format, ResponseFormat::JsonObject);
-        assert!(control
-            .format_instruction
-            .expect("format instruction")
-            .contains("Use concise values."));
-        assert!(control
-            .completion_instruction
-            .expect("completion instruction")
-            .contains("done=true"));
+        assert!(
+            control
+                .format_instruction
+                .expect("format instruction")
+                .contains("Use concise values.")
+        );
+        assert!(
+            control
+                .completion_instruction
+                .expect("completion instruction")
+                .contains("done=true")
+        );
     }
 }

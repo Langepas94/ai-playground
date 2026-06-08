@@ -1,11 +1,11 @@
+use crate::cli::args::ProfileUseArgs;
+use crate::cli::{collect_profile_input, profile_name_from_parts, select_profile_name};
 use crate::{
     config::AppConfig,
     errors::AppError,
     providers::validate_base_url,
     secrets::{SecretStore, delete_legacy_profile_token, get_config_profile_token},
 };
-use crate::cli::args::{ProfileCommand, ProfileUseArgs};
-use crate::cli::{collect_profile_input, profile_name_from_parts, select_profile_name};
 
 pub async fn run_profile_add(
     name: Option<String>,

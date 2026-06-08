@@ -11,10 +11,11 @@ use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 
 use crate::{
+    chat::ChatAgent,
     config::{AppConfig, ProfileConfig, token_ref},
     errors::AppError,
     providers::{
-        AnswerFormat, BillingLookup, BillingProvider, ChatMessage, ChatRequest, HttpDebugRequest,
+        AnswerFormat, BillingLookup, BillingProvider, ChatMessage, HttpDebugRequest,
         HttpDebugResponse, ModelPricing, ProviderKind, ReqwestProviderClient, ResponseControl,
         ResponseFormat, Role, validate_base_url,
     },
@@ -109,27 +110,28 @@ async fn chat(
         request.token_provider.as_deref(),
     )?;
     let control = request.control.clone().into_control();
-    let chat_request = ChatRequest {
-        model: profile.model.clone(),
-        messages: request.chat_messages(),
+    let mut agent = ChatAgent::new(
+        profile.clone(),
+        token,
+        request.initial_history(),
         control,
-        pricing: request
+        request
             .pricing
             .clone()
             .and_then(WebPricing::into_model_pricing),
-        billing: request
+        request
             .billing
             .clone()
             .and_then(WebBilling::into_billing_lookup),
-    };
-    let (response, provider_debug) = state
-        .client
-        .chat_completion_with_debug(&profile, &token, chat_request)
+    );
+    let (response, provider_debug) = agent
+        .respond_with_debug(&state.client, request.prompt.clone())
         .await?;
     Ok(Json(ChatWebResponse {
         text: response.text,
         finish_reason: response.finish_reason,
         metrics: response.metrics,
+        messages: agent.history().to_vec(),
         debug: ChatDebugView {
             provider_request: provider_debug.request,
             provider_response: provider_debug.response,
@@ -388,6 +390,7 @@ struct ChatWebRequest {
     model: String,
     system_prompt: Option<String>,
     prompt: String,
+    messages: Option<Vec<ChatMessage>>,
     control: WebResponseControl,
     pricing: Option<WebPricing>,
     billing: Option<WebBilling>,
@@ -407,18 +410,20 @@ impl ChatWebRequest {
         })
     }
 
-    fn chat_messages(&self) -> Vec<ChatMessage> {
-        let mut messages = Vec::new();
+    fn initial_history(&self) -> Vec<ChatMessage> {
+        let mut messages = self.messages.clone().unwrap_or_default();
         if let Some(system_prompt) = blank_to_none(self.system_prompt.clone()) {
-            messages.push(ChatMessage {
-                role: Role::System,
-                content: system_prompt,
-            });
+            let has_system = messages.iter().any(|message| message.role == Role::System);
+            if !has_system {
+                messages.insert(
+                    0,
+                    ChatMessage {
+                        role: Role::System,
+                        content: system_prompt,
+                    },
+                );
+            }
         }
-        messages.push(ChatMessage {
-            role: Role::User,
-            content: self.prompt.clone(),
-        });
         messages
     }
 }
@@ -549,6 +554,7 @@ struct ChatWebResponse {
     text: String,
     finish_reason: Option<String>,
     metrics: crate::providers::RequestMetrics,
+    messages: Vec<ChatMessage>,
     debug: ChatDebugView,
 }
 
@@ -715,18 +721,58 @@ mod tests {
             model: "deepseek-chat".to_string(),
             system_prompt: Some("Ты отвечаешь кратко.".to_string()),
             prompt: "Привет".to_string(),
+            messages: None,
             control: WebResponseControl::default(),
             pricing: None,
             billing: None,
         };
 
-        let messages = request.chat_messages();
+        let messages = request.initial_history();
 
-        assert_eq!(messages.len(), 2);
+        assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, Role::System);
         assert_eq!(messages[0].content, "Ты отвечаешь кратко.");
-        assert_eq!(messages[1].role, Role::User);
-        assert_eq!(messages[1].content, "Привет");
+    }
+
+    #[test]
+    fn web_chat_history_keeps_prior_messages_and_does_not_duplicate_system_prompt() {
+        let request = ChatWebRequest {
+            provider: "deepseek".to_string(),
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            token: String::new(),
+            token_provider: None,
+            model: "deepseek-chat".to_string(),
+            system_prompt: Some("Ты отвечаешь кратко.".to_string()),
+            prompt: "Продолжи".to_string(),
+            messages: Some(vec![
+                ChatMessage {
+                    role: Role::System,
+                    content: "Ты отвечаешь кратко.".to_string(),
+                },
+                ChatMessage {
+                    role: Role::User,
+                    content: "Привет".to_string(),
+                },
+                ChatMessage {
+                    role: Role::Assistant,
+                    content: "Здравствуйте.".to_string(),
+                },
+            ]),
+            control: WebResponseControl::default(),
+            pricing: None,
+            billing: None,
+        };
+
+        let messages = request.initial_history();
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.role == Role::System)
+                .count(),
+            1
+        );
     }
 
     /// Баг 2: WebPricing с только output ценой должен конвертироваться в Some(ModelPricing)
