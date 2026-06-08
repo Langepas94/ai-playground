@@ -18,12 +18,12 @@
 
 ## Основные модули
 
-- `src/cli.rs` - команды CLI, интерактивные промпты, выбор профилей.
+- `src/cli/` - команды CLI, интерактивные промпты, выбор профилей.
 - `src/config.rs` - TOML config, active profile, список профилей.
 - `src/secrets.rs` - keyring abstraction, provider-scoped токены и legacy fallback.
 - `src/providers/` - OpenAI-compatible request/response слой и provider specs.
-- `src/chat.rs` - ask/chat/compare сценарии.
-- `src/web.rs` - локальный Axum web UI и JSON API.
+- `src/chat/` - ask/chat/compare сценарии, local agent runtime, history и memory.
+- `src/web/` - локальный Axum web UI и JSON API.
 
 ## Поток запроса
 
@@ -35,7 +35,7 @@
 
 ## Где чаще всего менять
 
-- Новый CLI сценарий: `src/cli.rs`.
-- Новая ручка ответа: `src/providers/mod.rs`, `src/providers/openai_compatible.rs`, `src/cli.rs`, `src/web.rs`.
+- Новый CLI сценарий: `src/cli/args.rs`, `src/cli/commands/`, `src/cli/mod.rs`.
+- Новая ручка ответа: `src/providers/mod.rs`, `src/providers/openai_compatible.rs`, `src/cli/args.rs`, `src/cli/commands/`, `src/web/mod.rs`, `src/web/ui.html`.
 - Изменение хранения профилей: `src/config.rs` плюс тесты рядом.
 - Изменение токенов: `src/secrets.rs`, затем проверить web и CLI.

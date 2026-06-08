@@ -24,7 +24,7 @@ src/
   web/
     mod.rs        — Axum server + handlers + типы
     ui.html       — Web UI (HTML/CSS/JS), подключается через include_str!
-  chat.rs         — логика ask/chat/compare, ConversationGoal, GoalState
+  chat/           — ask/chat/compare, ConversationGoal, local agent runtime
   config.rs       — AppConfig / ProfileConfig (TOML)
   secrets.rs      — keyring, provider-scoped токены
   errors.rs       — AppError, ProviderHttpError
@@ -42,6 +42,7 @@ tests/http_mock.rs      — интеграционные тесты через w
 docs/
   architecture.md — обзор стека
   checks.md       — чеклист перед релизом
+  debugging.md    — маршруты расследования багов
 ```
 
 ## Рабочий процесс
@@ -71,5 +72,6 @@ docs/
 
 1. Поле в `ResponseControl` / `ChatRequest` (`providers/mod.rs`).
 2. Включить в payload (`providers/openai_compatible.rs`).
-3. Флаг в `AskArgs`/`ChatArgs` (`cli.rs`).
-4. Поле в JSON API и HTML (`web.rs`).
+3. Флаг в `AskArgs`/`ChatArgs` (`src/cli/args.rs`).
+4. Проброс в command handler (`src/cli/commands/` или `src/cli/mod.rs`).
+5. Поле в JSON API (`src/web/mod.rs`) и HTML (`src/web/ui.html`).

@@ -4,7 +4,7 @@
 
 ## Как работать в этом репозитории
 
-- Проект маленький: сначала читай `src/cli.rs`, `src/config.rs`, `src/secrets.rs`, `src/web.rs`, потом уже меняй код.
+- Проект маленький: сначала читай `src/README.md`, затем `src/cli/mod.rs`, `src/config.rs`, `src/secrets.rs`, `src/web/mod.rs`, потом уже меняй код.
 - Все shell-команды запускай через `rtk`.
 - Не трогай пользовательские незакоммиченные файлы вроде `.DS_Store`.
 - Для ручных правок используй `apply_patch`.
@@ -26,12 +26,13 @@ rtk cargo test
 
 | Файл/Директория | Ответственность |
 |-----------------|----------------|
+| `src/README.md` | Карта исходников: куда идти при баге, где границы модулей, какие инварианты нельзя ломать. |
 | `src/cli/mod.rs` | `run()` — точка входа CLI, dispatch команд, shared helpers (prompt, select_profile_name, request_pricing). |
 | `src/cli/args.rs` | Все `*Args` structs (clap), `ResponseControlArgs`, `PricingArgs`, `ConversationGoalArgs`. |
 | `src/cli/commands/` | По одному файлу на команду: `ask`, `chat`, `compare`, `setup`, `profile`, `token`, `models`, `doctor`, `config`. |
 | `src/web/mod.rs` | Axum server: `/api/providers`, `/api/models`, `/api/chat`. Типы запросов/ответов, тесты. |
 | `src/web/ui.html` | Web UI — HTML/CSS/JS. Подключается через `include_str!("ui.html")`. Редактируется как обычный файл с подсветкой. |
-| `src/chat.rs` | Логика `ask_once`, `interactive_chat` (REPL), `compare_*`, `ConversationGoal`, `GoalState`. |
+| `src/chat/` | Логика `ask_once`, `interactive_chat` (REPL), `compare_*`, `ConversationGoal`, `GoalState`, local agent runtime. |
 | `src/config.rs` | `AppConfig` (TOML): профили, активный профиль. Пути — `ai-playground` с legacy fallback на `aiteach`. |
 | `src/secrets.rs` | `KeyringSecretStore`: provider-scoped токены через keyring. Fallback-миграция из profile-scoped. |
 | `src/providers/mod.rs` | `ProviderKind`, `ProviderSpec`, `ProviderClient` trait, `ReqwestProviderClient`. Общие типы. |
@@ -44,6 +45,7 @@ rtk cargo test
 | `src/bin/ai.rs` | Точка входа бинарника `ai`. |
 | `crates/aiteach-compat/` | Legacy бинарник `aiteach`. |
 | `tests/http_mock.rs` | Интеграционные тесты через wiremock. |
+| `docs/debugging.md` | Практические маршруты расследования багов CLI/web/provider/config/token/session. |
 
 > `src/lib.rs` использует `#[path = "cli/mod.rs"]` и `#[path = "web/mod.rs"]` — это намеренно, так как рядом остались пустые `cli.rs` / `web.rs` (нельзя удалить через агента).
 
@@ -60,15 +62,17 @@ CLI/web  →  ProfileConfig + token  →  ReqwestProviderClient
 
 1. `src/providers/<name>.rs` — реализовать `pub fn spec() -> ProviderSpec` (и overrides если нужны).
 2. `src/providers/mod.rs` — добавить вариант в `ProviderKind`, `all()`, `Display`, `FromStr`, `spec()`.
-3. `src/web.rs` — провайдер появится автоматически через `ProviderKind::all()`.
+3. `src/web/mod.rs` — провайдер появится автоматически через `ProviderKind::all()`.
 4. Тесты в `tests/http_mock.rs` по образцу существующих.
 
 ## Как добавить новый параметр ответа
 
 1. `src/providers/mod.rs` — добавить поле в `ResponseControl` или `ChatRequest`.
 2. `src/providers/openai_compatible.rs` — включить поле в payload.
-3. `src/cli.rs` — добавить флаг в `AskArgs`/`ChatArgs`, пробросить в `ResponseControl`.
-4. `src/web.rs` — добавить поле в JSON API и HTML-форму.
+3. `src/cli/args.rs` — добавить флаг в `AskArgs`/`ChatArgs`.
+4. `src/cli/commands/` или `src/cli/mod.rs` — пробросить флаг в `ResponseControl`.
+5. `src/web/mod.rs` — добавить поле в JSON API.
+6. `src/web/ui.html` — добавить поле в HTML-форму.
 
 ## Инварианты
 
