@@ -650,7 +650,7 @@ mod tests {
             billing: None,
         });
 
-        assert_eq!(payload.max_tokens, Some(64));
+        assert_eq!(payload.max_tokens, None);
         assert_eq!(payload.max_completion_tokens, Some(128));
         assert_eq!(payload.temperature, Some(0.3));
         assert_eq!(payload.top_p, Some(0.9));
@@ -683,6 +683,49 @@ mod tests {
         assert!(payload.messages[0].content.contains("Artem"));
         assert!(payload.messages[1].content.contains("valid JSON object"));
         assert_eq!(payload.messages[3].role, Role::User);
+    }
+
+    #[test]
+    fn openai_payload_converts_legacy_max_tokens_to_max_completion_tokens() {
+        let payload = openai_compatible::chat_payload(ChatRequest {
+            model: "m".to_string(),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: "hello".to_string(),
+            }],
+            control: ResponseControl {
+                max_tokens: Some(64),
+                ..ResponseControl::uncontrolled()
+            },
+            pricing: None,
+            billing: None,
+        });
+
+        assert_eq!(payload.max_tokens, None);
+        assert_eq!(payload.max_completion_tokens, Some(64));
+    }
+
+    #[test]
+    fn non_openai_payload_keeps_legacy_max_tokens() {
+        let payload = openai_compatible::chat_payload_for_provider(
+            ProviderKind::OpenRouter,
+            ChatRequest {
+                model: "m".to_string(),
+                messages: vec![ChatMessage {
+                    role: Role::User,
+                    content: "hello".to_string(),
+                }],
+                control: ResponseControl {
+                    max_tokens: Some(64),
+                    ..ResponseControl::uncontrolled()
+                },
+                pricing: None,
+                billing: None,
+            },
+        );
+
+        assert_eq!(payload.max_tokens, Some(64));
+        assert_eq!(payload.max_completion_tokens, None);
     }
 
     #[test]
