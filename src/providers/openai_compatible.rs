@@ -462,7 +462,7 @@ pub fn chat_payload_for_provider(
 
 fn api_response_format(format: ResponseFormat) -> Option<OpenAiResponseFormat> {
     match format {
-        ResponseFormat::Text => None,
+        ResponseFormat::Text | ResponseFormat::Toon => None,
         ResponseFormat::JsonObject => Some(OpenAiResponseFormat {
             kind: "json_object",
         }),

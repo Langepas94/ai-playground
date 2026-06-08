@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use serde::Deserialize;
+
 use crate::{
     config::ProfileConfig,
     errors::AppError,
@@ -48,7 +50,7 @@ impl ConversationGoal {
         if !self.is_enabled() {
             return control;
         }
-        control.format = ResponseFormat::JsonObject;
+        control.format = ResponseFormat::Toon;
         control.format_instruction = Some(merge_instruction(
             control.format_instruction,
             goal_format_instruction(&self.required_fields),
@@ -73,6 +75,14 @@ pub struct GoalState {
     done_signal: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct GoalResponse {
+    #[serde(default)]
+    fields: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    done: bool,
+}
+
 impl GoalState {
     pub fn new(required_fields: Vec<String>) -> Self {
         Self {
@@ -83,15 +93,10 @@ impl GoalState {
     }
 
     pub fn update_from_response(&mut self, text: &str) -> Result<(), AppError> {
-        let value: serde_json::Value =
-            serde_json::from_str(text).map_err(|error| AppError::Json(error.to_string()))?;
-        self.done_signal = value
-            .get("done")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        let fields = value.get("fields").unwrap_or(&value);
+        let parsed = crate::toon_codec::from_str_or_json::<GoalResponse>(text)?;
+        self.done_signal = parsed.done;
         for field in &self.required_fields {
-            if let Some(field_value) = fields.get(field)
+            if let Some(field_value) = parsed.fields.get(field)
                 && is_filled(field_value)
             {
                 self.values.insert(field.clone(), field_value.clone());
@@ -194,13 +199,27 @@ pub async fn run_goal_once(
 // ── Private helpers ───────────────────────────────────────────────────────────
 
 pub(super) fn goal_format_instruction(required_fields: &[String]) -> String {
+    let mut fields = serde_json::Map::new();
+    for field in required_fields {
+        fields.insert(field.clone(), serde_json::Value::Null);
+    }
+    let shape = serde_json::json!({
+        "fields": fields,
+        "next_question": "string or null",
+        "done": false,
+    });
+    let toon_shape = crate::toon_codec::to_string(&shape).unwrap_or_else(|_| {
+        format!(
+            "fields:\n{}\nnext_question: string or null\ndone: false",
+            required_fields
+                .iter()
+                .map(|field| format!("  {field}: null"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    });
     format!(
-        "You are collecting a structured entity. Return only a JSON object with this shape: {{\"fields\":{{{}}},\"next_question\":\"string or null\",\"done\":boolean}}. Use null for unknown fields.",
-        required_fields
-            .iter()
-            .map(|field| format!("\"{field}\":null"))
-            .collect::<Vec<_>>()
-            .join(",")
+        "You are collecting a structured entity. Return only a TOON document with this shape:\n{toon_shape}\nUse null for unknown fields."
     )
 }
 
@@ -246,6 +265,17 @@ mod tests {
     }
 
     #[test]
+    fn state_stop_accepts_toon_response() {
+        let mut state = GoalState::new(vec!["topic".to_string(), "audience".to_string()]);
+        state
+            .update_from_response("fields:\n  topic: Rust\n  audience: junior\ndone: true")
+            .expect("update");
+
+        assert!(state.is_complete());
+        assert!(state.done_signal());
+    }
+
+    #[test]
     fn instruction_stop_trusts_done_signal() {
         let mut state = GoalState::new(vec!["topic".to_string(), "audience".to_string()]);
         state
@@ -280,10 +310,10 @@ mod tests {
         ];
         let instruction = goal_format_instruction(&fields);
 
-        assert!(instruction.contains("\"topic\""));
-        assert!(instruction.contains("\"audience\""));
-        assert!(instruction.contains("\"tone\""));
-        assert!(instruction.contains("\"done\":boolean"));
+        assert!(instruction.contains("topic: null"));
+        assert!(instruction.contains("audience: null"));
+        assert!(instruction.contains("tone: null"));
+        assert!(instruction.contains("done: false"));
     }
 
     /// merge_instruction добавляет к существующей через перенос строки
@@ -342,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn goal_control_forces_json_and_preserves_user_instruction() {
+    fn goal_control_forces_toon_and_preserves_user_instruction() {
         use crate::providers::ResponseFormat;
         let goal = ConversationGoal {
             required_fields: vec!["topic".to_string()],
@@ -353,7 +383,7 @@ mod tests {
             ..crate::providers::ResponseControl::uncontrolled()
         });
 
-        assert_eq!(control.format, ResponseFormat::JsonObject);
+        assert_eq!(control.format, ResponseFormat::Toon);
         assert!(
             control
                 .format_instruction
