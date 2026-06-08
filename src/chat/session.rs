@@ -1,55 +1,45 @@
 use std::io::{self, BufRead, Write};
 
 use crate::{
-    config::{AppConfig, ProfileConfig},
     errors::AppError,
-    providers::{
-        AnswerFormat, BillingLookup, ModelPricing, ProviderClient, ResponseControl, ResponseFormat,
-    },
-    secrets::{SecretStore, get_config_profile_token},
+    providers::{AnswerFormat, ResponseControl, ResponseFormat},
 };
 
 use super::{
-    ChatAgent, LocalSessionStore, format_request_metrics,
+    ChatAgent, ChatRuntime, LocalSessionStore, RequestOptions, SelectedProfile,
+    format_request_metrics,
     goal::{ConversationGoal, ConversationStopMode, GoalState},
     history::save_history,
     session_key,
 };
 
 pub async fn interactive_chat(
-    client: &dyn ProviderClient,
-    secrets: &dyn SecretStore,
-    config: &AppConfig,
-    profile_name: &str,
-    profile: &ProfileConfig,
+    runtime: ChatRuntime<'_>,
+    profile: SelectedProfile<'_>,
     mut control: ResponseControl,
-    pricing: Option<ModelPricing>,
-    billing: Option<BillingLookup>,
+    options: RequestOptions,
     mut goal: ConversationGoal,
 ) -> Result<(), AppError> {
-    let token =
-        get_config_profile_token(secrets, config, profile_name, profile)?.ok_or_else(|| {
-            AppError::MissingToken {
-                profile: profile_name.to_string(),
-            }
-        })?;
+    let token = crate::chat::resolve_profile_token(runtime, profile)?;
     let store = LocalSessionStore::new()?;
-    let session_key = session_key(profile_name, &profile.model);
+    let session_key = session_key(profile.name, &profile.config.model);
     let mut session = store.load_or_create_latest(&session_key)?;
     let mut memory = store.load_memory(&session.id)?;
     let mut agent = ChatAgent::new(
-        profile.clone(),
+        profile.config.clone(),
         token,
         session.messages.clone(),
         memory,
         control.clone(),
-        pricing,
-        billing,
+        options.pricing,
+        options.billing,
     );
     let mut goal_state = GoalState::new(goal.required_fields.clone());
     println!(
         "Chat started with profile '{profile_name}', model '{}', session '{}'.",
-        profile.model, session.id
+        profile.config.model,
+        session.id,
+        profile_name = profile.name
     );
     if !agent.history().is_empty() {
         println!("Loaded {} local history messages.", agent.history().len());
@@ -73,11 +63,11 @@ pub async fn interactive_chat(
         match line {
             "/exit" => break,
             "/profile" => {
-                println!("{profile_name}");
+                println!("{}", profile.name);
                 continue;
             }
             "/model" => {
-                println!("{}", profile.model);
+                println!("{}", profile.config.model);
                 continue;
             }
             "/clear" => {
@@ -90,7 +80,7 @@ pub async fn interactive_chat(
                 continue;
             }
             "/save" => {
-                let path = save_history(profile_name, agent.history())?;
+                let path = save_history(profile.name, agent.history())?;
                 println!("Saved to {}", path.display());
                 continue;
             }
@@ -282,7 +272,7 @@ pub async fn interactive_chat(
         eprintln!("Waiting for provider response...");
         let effective_control = goal.apply_to_control(control.clone());
         agent.set_control(effective_control);
-        let response = agent.respond(client, line.to_string()).await?;
+        let response = agent.respond(runtime.client, line.to_string()).await?;
         memory = agent.memory().clone();
         store.save_session(&session_key, &session.id, agent.history())?;
         store.save_memory(&session.id, &memory)?;
@@ -303,8 +293,8 @@ pub async fn interactive_chat(
         }
     }
 
-    if config.active_profile.as_deref() != Some(profile_name) {
-        println!("Session used non-active profile '{profile_name}'.");
+    if runtime.config.active_profile.as_deref() != Some(profile.name) {
+        println!("Session used non-active profile '{}'.", profile.name);
     }
     Ok(())
 }
