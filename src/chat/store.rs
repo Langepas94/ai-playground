@@ -34,6 +34,20 @@ struct StoredChatMessage {
     content: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredRequestMetrics {
+    elapsed_ms: u128,
+    usage: Option<TokenUsage>,
+    cost: Option<StoredRequestCost>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredRequestCost {
+    amount: f64,
+    currency: String,
+    source: String,
+}
+
 impl LocalSessionStore {
     pub fn new() -> Result<Self, AppError> {
         let dirs = ProjectDirs::from("dev", "ai-playground", "ai-playground").ok_or_else(|| {
@@ -115,12 +129,17 @@ impl LocalSessionStore {
         validate_session_id(session_id)?;
         let path = self.metrics_path(session_id);
         if !path.exists() {
+            let legacy_path = self.legacy_metrics_path(session_id);
+            if legacy_path.exists() {
+                return self.load_legacy_json_metrics(&legacy_path);
+            }
             return Ok(RequestMetrics::default());
         }
         let raw = fs::read_to_string(&path)
             .map_err(|error| config_error(path.clone(), format!("read failed: {error}")))?;
-        serde_json::from_str::<RequestMetrics>(&raw)
-            .map_err(|error| AppError::Json(error.to_string()))
+        stored_metrics_into_request(crate::toon_codec::from_str_or_json::<StoredRequestMetrics>(
+            &raw,
+        )?)
     }
 
     pub fn load_memory(&self, session_id: &str) -> Result<AgentMemory, AppError> {
@@ -219,13 +238,12 @@ impl LocalSessionStore {
         })?;
 
         let path = self.metrics_path(session_id);
-        let temp_path = path.with_extension("metrics.json.tmp");
+        let temp_path = path.with_extension("metrics.toon.tmp");
         {
             let mut file = fs::File::create(&temp_path).map_err(|error| {
                 config_error(temp_path.clone(), format!("create failed: {error}"))
             })?;
-            let raw = serde_json::to_string_pretty(metrics)
-                .map_err(|error| AppError::Json(error.to_string()))?;
+            let raw = crate::toon_codec::to_string(&stored_metrics_from_request(metrics))?;
             writeln!(file, "{raw}").map_err(|error| {
                 config_error(temp_path.clone(), format!("write failed: {error}"))
             })?;
@@ -258,6 +276,11 @@ impl LocalSessionStore {
 
     fn metrics_path(&self, session_id: &str) -> PathBuf {
         self.sessions_dir()
+            .join(format!("{session_id}.metrics.toon"))
+    }
+
+    fn legacy_metrics_path(&self, session_id: &str) -> PathBuf {
+        self.sessions_dir()
             .join(format!("{session_id}.metrics.json"))
     }
 
@@ -289,6 +312,13 @@ impl LocalSessionStore {
             messages,
             metrics: self.load_metrics(session_id)?,
         })
+    }
+
+    fn load_legacy_json_metrics(&self, path: &Path) -> Result<RequestMetrics, AppError> {
+        let raw = fs::read_to_string(path)
+            .map_err(|error| config_error(path, format!("read failed: {error}")))?;
+        serde_json::from_str::<RequestMetrics>(&raw)
+            .map_err(|error| AppError::Json(error.to_string()))
     }
 
     fn index_path(&self, profile_key: &str) -> PathBuf {
@@ -326,6 +356,44 @@ fn stored_messages_into_chat(
         .collect()
 }
 
+fn stored_metrics_from_request(metrics: &RequestMetrics) -> StoredRequestMetrics {
+    StoredRequestMetrics {
+        elapsed_ms: metrics.elapsed_ms,
+        usage: metrics.usage.clone(),
+        cost: metrics.cost.as_ref().map(|cost| StoredRequestCost {
+            amount: cost.amount,
+            currency: cost.currency.clone(),
+            source: cost.source.to_string(),
+        }),
+    }
+}
+
+fn stored_metrics_into_request(metrics: StoredRequestMetrics) -> Result<RequestMetrics, AppError> {
+    Ok(RequestMetrics {
+        elapsed_ms: metrics.elapsed_ms,
+        usage: metrics.usage,
+        cost: metrics
+            .cost
+            .map(|cost| {
+                Ok::<RequestCost, AppError>(RequestCost {
+                    amount: cost.amount,
+                    currency: cost.currency,
+                    source: parse_cost_source(&cost.source)?,
+                })
+            })
+            .transpose()?,
+    })
+}
+
+fn parse_cost_source(value: &str) -> Result<crate::providers::CostSource, AppError> {
+    match value {
+        "provider-reported" => Ok(crate::providers::CostSource::ProviderReported),
+        "configured-pricing" => Ok(crate::providers::CostSource::ConfiguredPricing),
+        "billing-api" => Ok(crate::providers::CostSource::BillingApi),
+        other => Err(AppError::Json(format!("unsupported cost source: {other}"))),
+    }
+}
+
 pub fn add_request_metrics(total: &RequestMetrics, request: &RequestMetrics) -> RequestMetrics {
     RequestMetrics {
         elapsed_ms: total.elapsed_ms.saturating_add(request.elapsed_ms),
@@ -347,6 +415,30 @@ fn add_token_usage(total: Option<&TokenUsage>, request: Option<&TokenUsage>) -> 
             cache_miss_input_tokens: add_optional_u32(
                 total.cache_miss_input_tokens,
                 request.cache_miss_input_tokens,
+            ),
+            input_audio_tokens: add_optional_u32(
+                total.input_audio_tokens,
+                request.input_audio_tokens,
+            ),
+            output_reasoning_tokens: add_optional_u32(
+                total.output_reasoning_tokens,
+                request.output_reasoning_tokens,
+            ),
+            output_visible_tokens: add_optional_u32(
+                total.output_visible_tokens,
+                request.output_visible_tokens,
+            ),
+            output_audio_tokens: add_optional_u32(
+                total.output_audio_tokens,
+                request.output_audio_tokens,
+            ),
+            accepted_prediction_output_tokens: add_optional_u32(
+                total.accepted_prediction_output_tokens,
+                request.accepted_prediction_output_tokens,
+            ),
+            rejected_prediction_output_tokens: add_optional_u32(
+                total.rejected_prediction_output_tokens,
+                request.rejected_prediction_output_tokens,
             ),
         }),
         (Some(total), None) => Some(total.clone()),
@@ -485,6 +577,7 @@ mod tests {
                 total_tokens: 30,
                 cache_hit_input_tokens: Some(4),
                 cache_miss_input_tokens: Some(6),
+                ..TokenUsage::default()
             }),
             cost: Some(RequestCost {
                 amount: 0.00042,
@@ -511,6 +604,9 @@ mod tests {
                 total_tokens: 15,
                 cache_hit_input_tokens: Some(3),
                 cache_miss_input_tokens: None,
+                output_reasoning_tokens: Some(4),
+                output_visible_tokens: Some(1),
+                ..TokenUsage::default()
             }),
             cost: Some(RequestCost {
                 amount: 0.001,
@@ -526,6 +622,9 @@ mod tests {
                 total_tokens: 18,
                 cache_hit_input_tokens: Some(2),
                 cache_miss_input_tokens: Some(5),
+                output_reasoning_tokens: Some(6),
+                output_visible_tokens: Some(5),
+                ..TokenUsage::default()
             }),
             cost: Some(RequestCost {
                 amount: 0.002,
@@ -545,6 +644,9 @@ mod tests {
                 total_tokens: 33,
                 cache_hit_input_tokens: Some(5),
                 cache_miss_input_tokens: Some(5),
+                output_reasoning_tokens: Some(10),
+                output_visible_tokens: Some(6),
+                ..TokenUsage::default()
             })
         );
         assert_eq!(

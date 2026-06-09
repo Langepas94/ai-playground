@@ -329,13 +329,19 @@ pub struct ChatRequest {
     pub billing: Option<BillingLookup>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TokenUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub total_tokens: u32,
     pub cache_hit_input_tokens: Option<u32>,
     pub cache_miss_input_tokens: Option<u32>,
+    pub input_audio_tokens: Option<u32>,
+    pub output_reasoning_tokens: Option<u32>,
+    pub output_visible_tokens: Option<u32>,
+    pub output_audio_tokens: Option<u32>,
+    pub accepted_prediction_output_tokens: Option<u32>,
+    pub rejected_prediction_output_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]

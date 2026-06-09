@@ -413,6 +413,8 @@
             <summary>Подключение</summary>
             <div class="panel-body">
               <label>API token override<input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="Пусто = взять из keychain"></label>
+              <button id="saveToken" class="secondary" type="button">Сохранить токен</button>
+              <div id="tokenStatus" class="hint">keychain: проверяется</div>
               <label>Base URL<input id="baseUrl" spellcheck="false"></label>
               <label>Custom model id<input id="customModel" spellcheck="false" placeholder="Если нужной модели нет в списке"></label>
             </div>
@@ -755,16 +757,51 @@
 
     function resetTokenOverrideForProvider() {
       tokenProvider = currentProvider();
-      $('token').value = sessionStorage.getItem(tokenSessionKey()) || '';
+      $('token').value = '';
+      refreshTokenStatus();
     }
 
     function markTokenOverrideProvider() {
       tokenProvider = currentProvider();
       const token = $('token').value.trim();
       if (token) {
-        sessionStorage.setItem(tokenSessionKey(), token);
+        $('tokenStatus').textContent = 'override: будет сохранен в keychain после запроса';
       } else {
-        sessionStorage.removeItem(tokenSessionKey());
+        refreshTokenStatus();
+      }
+    }
+
+    async function refreshTokenStatus() {
+      if (!$('provider').value || !$('baseUrl').value.trim()) return;
+      if ($('token').value.trim()) {
+        $('tokenStatus').textContent = 'override: будет сохранен в keychain после запроса';
+        return;
+      }
+      $('tokenStatus').textContent = 'keychain: проверяется';
+      try {
+        const data = await requestJson('/api/token/status', providerPayload());
+        $('tokenStatus').textContent = data.saved ? 'keychain: токен сохранен' : 'keychain: токен не найден';
+      } catch {
+        $('tokenStatus').textContent = 'keychain: статус недоступен';
+      }
+    }
+
+    async function saveTokenOverride() {
+      if (!$('token').value.trim()) {
+        setStatus('Вставьте токен перед сохранением', true);
+        return;
+      }
+      $('saveToken').disabled = true;
+      setStatus('Сохраняю токен...');
+      try {
+        await requestJson('/api/token/save', providerPayload());
+        $('token').value = '';
+        await refreshTokenStatus();
+        setStatus('Токен сохранен');
+      } catch (error) {
+        setStatus(error.message, true);
+      } finally {
+        $('saveToken').disabled = false;
       }
     }
 
@@ -1006,15 +1043,33 @@
 
     function tokenLines(usage) {
       const rows = [
-        ['input', usage.input_tokens],
-        ['output', usage.output_tokens],
+        ['prompt', usage.input_tokens],
+        ['completion', usage.output_tokens],
         ['total', usage.total_tokens]
       ];
       if (usage.cache_hit_input_tokens !== null && usage.cache_hit_input_tokens !== undefined) {
-        rows.push(['cache hit', usage.cache_hit_input_tokens]);
+        rows.push(['prompt cached', usage.cache_hit_input_tokens]);
       }
       if (usage.cache_miss_input_tokens !== null && usage.cache_miss_input_tokens !== undefined) {
-        rows.push(['cache miss', usage.cache_miss_input_tokens]);
+        rows.push(['prompt uncached', usage.cache_miss_input_tokens]);
+      }
+      if (usage.input_audio_tokens !== null && usage.input_audio_tokens !== undefined) {
+        rows.push(['prompt audio', usage.input_audio_tokens]);
+      }
+      if (usage.output_visible_tokens !== null && usage.output_visible_tokens !== undefined) {
+        rows.push(['visible output', usage.output_visible_tokens]);
+      }
+      if (usage.output_reasoning_tokens !== null && usage.output_reasoning_tokens !== undefined) {
+        rows.push(['reasoning', usage.output_reasoning_tokens]);
+      }
+      if (usage.output_audio_tokens !== null && usage.output_audio_tokens !== undefined) {
+        rows.push(['output audio', usage.output_audio_tokens]);
+      }
+      if (usage.accepted_prediction_output_tokens !== null && usage.accepted_prediction_output_tokens !== undefined) {
+        rows.push(['accepted prediction', usage.accepted_prediction_output_tokens]);
+      }
+      if (usage.rejected_prediction_output_tokens !== null && usage.rejected_prediction_output_tokens !== undefined) {
+        rows.push(['rejected prediction', usage.rejected_prediction_output_tokens]);
       }
       return `<span class="metric-lines">${rows.map(([label, value]) => `<span class="metric-line"><em>${label}</em><b>${value}</b></span>`).join('')}</span>`;
     }
@@ -1119,6 +1174,7 @@
       providerSelect.innerHTML = providers.map((item) => `<option value="${item.id}">${item.name}</option>`).join('');
       resetTokenOverrideForProvider();
       applyProviderDefaults();
+      await refreshTokenStatus();
       await loadChatSession();
       setStatus('Готово');
     }
@@ -1135,6 +1191,7 @@
         persistModelPricing();
         $('customModel').value = '';
         await loadChatSession();
+        await refreshTokenStatus();
         setStatus(data.models.length ? `Загружено моделей: ${data.models.length}; выбрана ${$('model').value}` : 'Провайдер вернул пустой список моделей');
       } catch (error) {
         setStatus(error.message, true);
@@ -1159,6 +1216,7 @@
         $('prompt').value = '';
         setMetrics(data.metrics);
         setSessionMetrics(data.session_metrics);
+        await refreshTokenStatus();
         setDebug(data.debug);
         setStatus(data.finish_reason ? `Готово: ${data.finish_reason}` : 'Готово');
       } catch (error) {
@@ -1175,9 +1233,11 @@
       loadChatSession();
     });
     $('token').addEventListener('input', markTokenOverrideProvider);
+    $('saveToken').addEventListener('click', saveTokenOverride);
     $('agentMode').addEventListener('change', () => { chatSessionId = null; chatHistory = []; renderChatHistory(); loadChatSession(); });
     $('model').addEventListener('change', () => { applySelectedModelPricing(); persistSelectedModel(); loadChatSession(); });
     $('customModel').addEventListener('input', () => { applySelectedModelPricing(); persistSelectedModel(); loadChatSession(); });
+    $('baseUrl').addEventListener('input', refreshTokenStatus);
     ['priceInput', 'priceOutput', 'priceCacheHitInput', 'priceCacheMissInput', 'priceCurrency'].forEach((id) => {
       $(id).addEventListener('input', saveCurrentPricingOverride);
     });
