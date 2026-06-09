@@ -25,16 +25,16 @@
       color: var(--text);
     }
     main {
-      width: min(1480px, calc(100vw - 32px));
+      width: min(1680px, calc(100vw - 28px));
       margin: 0 auto;
-      padding: 24px 0 32px;
+      padding: 16px 0 20px;
     }
     header {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 16px;
-      margin-bottom: 18px;
+      margin-bottom: 12px;
     }
     h1 {
       margin: 0;
@@ -49,30 +49,49 @@
       text-align: right;
     }
     .layout {
+      min-height: calc(100vh - 86px);
       display: grid;
-      grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
-      gap: 16px;
-      align-items: start;
+      grid-template-columns: minmax(0, 1fr) minmax(330px, 390px);
+      gap: 14px;
+      align-items: stretch;
     }
     section {
       background: var(--panel);
       border: 1px solid var(--line);
       border-radius: 8px;
-      padding: 16px;
     }
     .controls {
+      grid-column: 2;
       display: grid;
-      gap: 14px;
+      grid-template-rows: auto 1fr;
+      min-height: 0;
+      max-height: calc(100vh - 86px);
+      overflow: hidden;
+    }
+    .prompt {
+      grid-column: 1;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      min-height: 0;
+      max-height: calc(100vh - 86px);
+      overflow: hidden;
+    }
+    .chat-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
     }
     .group {
       display: grid;
       gap: 10px;
-      padding-bottom: 14px;
+      padding: 14px;
       border-bottom: 1px solid var(--line);
     }
     .group:last-child {
       border-bottom: 0;
-      padding-bottom: 0;
     }
     h2 {
       margin: 0;
@@ -105,8 +124,8 @@
       line-height: 1.45;
     }
     #prompt {
-      min-height: 180px;
-      max-height: 34vh;
+      min-height: 58px;
+      max-height: 18vh;
     }
     #systemPrompt {
       min-height: 64px;
@@ -140,7 +159,7 @@
     }
     details.panel summary {
       cursor: pointer;
-      padding: 11px 12px;
+      padding: 9px 12px;
       color: var(--text);
       font-weight: 650;
       list-style-position: inside;
@@ -162,13 +181,73 @@
       flex-wrap: wrap;
       align-items: center;
     }
+    .composer {
+      display: grid;
+      gap: 10px;
+      padding: 10px 14px 12px;
+      border-top: 1px solid var(--line);
+      background: #ffffff;
+    }
+    .composer-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .composer-title {
+      margin: 0;
+      font-size: 13px;
+      color: var(--muted);
+      font-weight: 650;
+    }
+    .inspector-tabs {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 4px;
+      padding: 8px;
+      border-bottom: 1px solid var(--line);
+      background: #f9fbfc;
+    }
+    .tab-button {
+      min-height: 34px;
+      padding: 6px 8px;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }
+    .tab-button.active {
+      border-color: #c8d6d9;
+      background: #ffffff;
+      color: var(--accent-dark);
+    }
+    .inspector-pane {
+      min-height: 0;
+      overflow: auto;
+      display: none;
+    }
+    .inspector-pane.active {
+      display: block;
+    }
     .agent-panel {
       display: grid;
       gap: 10px;
       border: 1px solid var(--line);
-      border-radius: 8px;
+      border-radius: 6px;
       padding: 12px;
       background: #f8fbfb;
+    }
+    .chat-header .agent-panel {
+      width: min(620px, 100%);
+      grid-template-columns: minmax(150px, 210px) minmax(0, 1fr);
+      align-items: end;
+      padding: 8px;
+    }
+    .chat-header .agent-panel label {
+      min-width: 0;
     }
     .agent-status {
       display: grid;
@@ -227,15 +306,15 @@
       font-size: 14px;
     }
     .conversation {
-      min-height: 320px;
-      max-height: 560px;
-      padding: 16px;
+      min-height: 0;
+      height: 100%;
+      padding: 18px;
       overflow: auto;
       display: grid;
       align-content: start;
       gap: 12px;
       background: var(--output);
-      border-radius: 8px;
+      border-radius: 0;
     }
     .conversation-empty {
       margin: 0;
@@ -244,11 +323,11 @@
       font-size: 14px;
     }
     .message {
-      max-width: min(78%, 720px);
+      max-width: min(78%, 820px);
       display: grid;
       gap: 5px;
       padding: 10px 12px;
-      border-radius: 8px;
+      border-radius: 7px;
       line-height: 1.45;
       font-size: 14px;
       white-space: pre-wrap;
@@ -280,12 +359,7 @@
     .message-content {
       min-width: 0;
     }
-    details.debug {
-      margin-top: 12px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #fff;
-    }
+    details.debug { border: 0; background: #fff; }
     details.debug summary {
       cursor: pointer;
       padding: 12px 14px;
@@ -316,9 +390,10 @@
     }
     .metrics {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: 1fr;
       gap: 8px;
-      margin: 12px 0 10px;
+      margin: 0;
+      padding: 14px;
     }
     .metric {
       display: grid;
@@ -383,11 +458,22 @@
       opacity: .58;
     }
     .error { color: var(--danger); }
-    @media (max-width: 900px) {
-      main { width: min(100vw - 20px, 720px); padding-top: 14px; }
+    @media (max-width: 980px) {
+      main { width: min(100vw - 20px, 760px); padding-top: 14px; }
       header { align-items: flex-start; flex-direction: column; }
       .status { text-align: left; }
-      .layout { grid-template-columns: 1fr; }
+      .layout { min-height: auto; grid-template-columns: 1fr; }
+      .controls,
+      .prompt {
+        grid-column: auto;
+        max-height: none;
+      }
+      .prompt {
+        min-height: 72vh;
+      }
+      .conversation {
+        min-height: 52vh;
+      }
       .row { grid-template-columns: 1fr; }
       .metrics { grid-template-columns: 1fr; }
     }
@@ -401,123 +487,9 @@
     </header>
 
     <div class="layout">
-      <section class="controls">
-        <div class="group">
-          <h2>Провайдер</h2>
-          <label>Provider<select id="provider"></select></label>
-          <label>Model<select id="model"></select></label>
-          <div class="actions">
-            <button id="loadModels" class="secondary" type="button">Загрузить модели</button>
-          </div>
-          <details class="panel">
-            <summary>Подключение</summary>
-            <div class="panel-body">
-              <label>API token override<input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="Пусто = взять из keychain"></label>
-              <button id="saveToken" class="secondary" type="button">Сохранить токен</button>
-              <div id="tokenStatus" class="hint">keychain: проверяется</div>
-              <label>Base URL<input id="baseUrl" spellcheck="false"></label>
-              <label>Custom model id<input id="customModel" spellcheck="false" placeholder="Если нужной модели нет в списке"></label>
-            </div>
-          </details>
-        </div>
-
-        <div class="group">
-          <h2>Основные параметры</h2>
-          <div id="parameterWarnings" class="warnings"></div>
-          <div class="row">
-            <label>max_tokens<input id="maxTokens" type="number" min="1" step="1" value="1024"></label>
-            <label>temperature<input id="temperature" type="number" min="0" max="2" step="0.1" value="1"></label>
-          </div>
-          <div class="row">
-            <label>top_p<input id="topP" type="number" min="0" max="1" step="0.05" value="1"></label>
-            <label>answer_format<select id="answerFormat"><option value="natural">natural</option><option value="bullets">bullets</option><option value="numbered">numbered</option><option value="short">short</option><option value="steps">steps</option><option value="table">table</option></select></label>
-          </div>
-          <details class="panel">
-            <summary>Цена</summary>
-            <div class="panel-body">
-              <div class="row">
-                <label>input / 1M<input id="priceInput" type="number" min="0" step="0.000001" placeholder="Например 0.07"></label>
-                <label>output / 1M<input id="priceOutput" type="number" min="0" step="0.000001" placeholder="Например 1.10"></label>
-              </div>
-              <div class="row">
-                <label>cache hit input / 1M<input id="priceCacheHitInput" type="number" min="0" step="0.000001"></label>
-                <label>cache miss input / 1M<input id="priceCacheMissInput" type="number" min="0" step="0.000001"></label>
-              </div>
-              <div class="row">
-                <label>currency<input id="priceCurrency" value="USD" spellcheck="false"></label>
-                <label>USD→RUB<input id="rubRate" type="number" min="0" step="0.1" placeholder="Курс, напр. 90"></label>
-              </div>
-            </div>
-          </details>
-          <details class="panel">
-            <summary>Billing API</summary>
-            <div class="panel-body">
-              <label>OpenAI Admin API key<input id="openaiAdminToken" type="password" autocomplete="off" spellcheck="false" placeholder="Для /organization/costs"></label>
-              <label>poll seconds<input id="openaiCostPollSeconds" type="number" min="0" step="1" value="20"></label>
-            </div>
-          </details>
-          <details class="panel">
-            <summary>Расширенные параметры</summary>
-            <div class="panel-body">
-              <div class="row">
-                <label>response_format<select id="responseFormat"><option value="text">text</option><option value="json-object">json_object</option><option value="toon">toon</option></select></label>
-                <label>max_completion_tokens<input id="maxCompletionTokens" type="number" min="1" step="1"></label>
-              </div>
-              <div class="row">
-                <label>top_k<input id="topK" type="number" min="0" step="1"></label>
-                <label>min_p<input id="minP" type="number" min="0" max="1" step="0.01"></label>
-              </div>
-              <div class="row">
-                <label>top_a<input id="topA" type="number" min="0" max="1" step="0.01"></label>
-                <label>seed<input id="seed" type="number" step="1"></label>
-              </div>
-              <div class="row">
-                <label>presence_penalty<input id="presencePenalty" type="number" min="-2" max="2" step="0.1" value="0"></label>
-                <label>frequency_penalty<input id="frequencyPenalty" type="number" min="-2" max="2" step="0.1" value="0"></label>
-              </div>
-              <label>repetition_penalty<input id="repetitionPenalty" type="number" min="0" step="0.05"></label>
-              <label>stop sequences<textarea id="stop" placeholder="Одна stop sequence на строку"></textarea></label>
-              <div class="row">
-                <label>reasoning_effort<select id="reasoningEffort"><option value="" selected>provider default</option><option value="none">none</option><option value="minimal">minimal</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select></label>
-                <label>verbosity<select id="verbosity"><option value="" selected>provider default</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></label>
-              </div>
-              <div class="row">
-                <label>n<input id="n" type="number" min="1" step="1" value="1"></label>
-                <label>top_logprobs<input id="topLogprobs" type="number" min="0" max="20" step="1"></label>
-              </div>
-              <div class="row">
-                <label>service_tier<select id="serviceTier"><option value="">provider default</option><option value="auto">auto</option><option value="default">default</option><option value="flex">flex</option><option value="priority">priority</option></select></label>
-                <label>user<input id="user" spellcheck="false"></label>
-              </div>
-              <label class="inline"><input id="includeReasoning" type="checkbox"> include_reasoning</label>
-              <label class="inline"><input id="logprobs" type="checkbox"> logprobs</label>
-              <label class="inline"><input id="store" type="checkbox"> store</label>
-              <label class="inline"><input id="parallelToolCalls" type="checkbox"> parallel_tool_calls</label>
-            </div>
-          </details>
-        </div>
-
-        <div class="group">
-          <details class="panel">
-            <summary>Формат и JSON</summary>
-            <div class="panel-body">
-              <div class="row">
-                <label>answer_prefix<input id="answerPrefix"></label>
-                <label>answer_suffix<input id="answerSuffix"></label>
-              </div>
-              <label>address_as<input id="addressAs"></label>
-              <label class="inline"><input id="quoteQuestion" type="checkbox"> quote_question</label>
-              <label>format_instruction<textarea id="formatInstruction"></textarea></label>
-              <label>completion_instruction<textarea id="completionInstruction"></textarea></label>
-              <label>extra API parameters<textarea id="extraParams" placeholder='{"web_search_options": {}, "metadata": {"source": "ai-playground"}}'></textarea></label>
-            </div>
-          </details>
-        </div>
-      </section>
-
       <section class="prompt">
-        <div class="group">
-          <h2>Агент и история</h2>
+        <div class="chat-header">
+          <h2>Диалог</h2>
           <div class="agent-panel">
             <label>agent<select id="agentMode"></select></label>
             <div class="agent-status">
@@ -527,8 +499,17 @@
             </div>
           </div>
         </div>
-        <div class="group">
-          <h2>Промпт</h2>
+        <div id="conversation" class="conversation" aria-live="polite">
+          <p class="conversation-empty">Ответ появится здесь.</p>
+        </div>
+        <div class="composer">
+          <div class="composer-top">
+            <p class="composer-title">Новый запрос</p>
+            <div class="send-row">
+              <button id="send" type="button">Отправить</button>
+              <button id="clear" class="secondary" type="button">Новая сессия</button>
+            </div>
+          </div>
           <label><textarea id="prompt" placeholder="Введите запрос к модели"></textarea></label>
           <details class="panel">
             <summary>System prompt</summary>
@@ -536,33 +517,154 @@
               <label>system_prompt<textarea id="systemPrompt" placeholder="Необязательная системная инструкция для модели"></textarea></label>
             </div>
           </details>
-          <div class="send-row">
-            <button id="send" type="button">Отправить</button>
-            <button id="clear" class="secondary" type="button">Новая сессия</button>
+        </div>
+      </section>
+
+      <section class="controls">
+        <div class="inspector-tabs" role="tablist" aria-label="Inspector">
+          <button class="tab-button active" type="button" data-tab="profile">Профиль</button>
+          <button class="tab-button" type="button" data-tab="params">Параметры</button>
+          <button class="tab-button" type="button" data-tab="metrics">Метрики</button>
+          <button class="tab-button" type="button" data-tab="debug">Debug</button>
+        </div>
+
+        <div id="tab-profile" class="inspector-pane active">
+          <div class="group">
+            <h2>Провайдер</h2>
+            <label>Provider<select id="provider"></select></label>
+            <label>Model<select id="model"></select></label>
+            <div class="actions">
+              <button id="loadModels" class="secondary" type="button">Загрузить модели</button>
+            </div>
+            <details class="panel" open>
+              <summary>Подключение</summary>
+              <div class="panel-body">
+                <label>API token override<input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="Пусто = взять из keychain"></label>
+                <button id="saveToken" class="secondary" type="button">Сохранить токен</button>
+                <div id="tokenStatus" class="hint">keychain: проверяется</div>
+                <label>Base URL<input id="baseUrl" spellcheck="false"></label>
+                <label>Custom model id<input id="customModel" spellcheck="false" placeholder="Если нужной модели нет в списке"></label>
+              </div>
+            </details>
           </div>
         </div>
-        <div id="metrics" class="metrics">
-          <div class="metric"><span>Время</span><strong id="metricTime">—</strong></div>
-          <div class="metric"><span>Токены</span><strong id="metricTokens">—</strong></div>
-          <div class="metric"><span>Стоимость</span><strong id="metricCost">—</strong></div>
-          <div class="metric"><span>Диалог</span><strong id="metricSession">—</strong></div>
-        </div>
-        <div id="conversation" class="conversation" aria-live="polite">
-          <p class="conversation-empty">Ответ появится здесь.</p>
-        </div>
-        <details id="debugDetails" class="debug">
-          <summary>JSON отладка</summary>
-          <div class="debug-grid">
-            <div class="debug-item">
-              <h3>Запрос к provider API</h3>
-              <pre id="providerRequest">{}</pre>
+
+        <div id="tab-params" class="inspector-pane">
+          <div class="group">
+            <h2>Основные параметры</h2>
+            <div id="parameterWarnings" class="warnings"></div>
+            <div class="row">
+              <label>max_tokens<input id="maxTokens" type="number" min="1" step="1" value="1024"></label>
+              <label>temperature<input id="temperature" type="number" min="0" max="2" step="0.1" value="1"></label>
             </div>
-            <div class="debug-item">
-              <h3>Ответ provider API</h3>
-              <pre id="providerResponse">{}</pre>
+            <div class="row">
+              <label>top_p<input id="topP" type="number" min="0" max="1" step="0.05" value="1"></label>
+              <label>answer_format<select id="answerFormat"><option value="natural">natural</option><option value="bullets">bullets</option><option value="numbered">numbered</option><option value="short">short</option><option value="steps">steps</option><option value="table">table</option></select></label>
             </div>
+            <details class="panel">
+              <summary>Цена</summary>
+              <div class="panel-body">
+                <div class="row">
+                  <label>input / 1M<input id="priceInput" type="number" min="0" step="0.000001" placeholder="Например 0.07"></label>
+                  <label>output / 1M<input id="priceOutput" type="number" min="0" step="0.000001" placeholder="Например 1.10"></label>
+                </div>
+                <div class="row">
+                  <label>cache hit input / 1M<input id="priceCacheHitInput" type="number" min="0" step="0.000001"></label>
+                  <label>cache miss input / 1M<input id="priceCacheMissInput" type="number" min="0" step="0.000001"></label>
+                </div>
+                <div class="row">
+                  <label>currency<input id="priceCurrency" value="USD" spellcheck="false"></label>
+                  <label>USD→RUB<input id="rubRate" type="number" min="0" step="0.1" placeholder="Курс, напр. 90"></label>
+                </div>
+              </div>
+            </details>
+            <details class="panel">
+              <summary>Billing API</summary>
+              <div class="panel-body">
+                <label>OpenAI Admin API key<input id="openaiAdminToken" type="password" autocomplete="off" spellcheck="false" placeholder="Для /organization/costs"></label>
+                <label>poll seconds<input id="openaiCostPollSeconds" type="number" min="0" step="1" value="20"></label>
+              </div>
+            </details>
+            <details class="panel">
+              <summary>Расширенные параметры</summary>
+              <div class="panel-body">
+                <div class="row">
+                  <label>response_format<select id="responseFormat"><option value="text">text</option><option value="json-object">json_object</option><option value="toon">toon</option></select></label>
+                  <label>max_completion_tokens<input id="maxCompletionTokens" type="number" min="1" step="1"></label>
+                </div>
+                <div class="row">
+                  <label>top_k<input id="topK" type="number" min="0" step="1"></label>
+                  <label>min_p<input id="minP" type="number" min="0" max="1" step="0.01"></label>
+                </div>
+                <div class="row">
+                  <label>top_a<input id="topA" type="number" min="0" max="1" step="0.01"></label>
+                  <label>seed<input id="seed" type="number" step="1"></label>
+                </div>
+                <div class="row">
+                  <label>presence_penalty<input id="presencePenalty" type="number" min="-2" max="2" step="0.1" value="0"></label>
+                  <label>frequency_penalty<input id="frequencyPenalty" type="number" min="-2" max="2" step="0.1" value="0"></label>
+                </div>
+                <label>repetition_penalty<input id="repetitionPenalty" type="number" min="0" step="0.05"></label>
+                <label>stop sequences<textarea id="stop" placeholder="Одна stop sequence на строку"></textarea></label>
+                <div class="row">
+                  <label>reasoning_effort<select id="reasoningEffort"><option value="" selected>provider default</option><option value="none">none</option><option value="minimal">minimal</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select></label>
+                  <label>verbosity<select id="verbosity"><option value="" selected>provider default</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></label>
+                </div>
+                <div class="row">
+                  <label>n<input id="n" type="number" min="1" step="1" value="1"></label>
+                  <label>top_logprobs<input id="topLogprobs" type="number" min="0" max="20" step="1"></label>
+                </div>
+                <div class="row">
+                  <label>service_tier<select id="serviceTier"><option value="">provider default</option><option value="auto">auto</option><option value="default">default</option><option value="flex">flex</option><option value="priority">priority</option></select></label>
+                  <label>user<input id="user" spellcheck="false"></label>
+                </div>
+                <label class="inline"><input id="includeReasoning" type="checkbox"> include_reasoning</label>
+                <label class="inline"><input id="logprobs" type="checkbox"> logprobs</label>
+                <label class="inline"><input id="store" type="checkbox"> store</label>
+                <label class="inline"><input id="parallelToolCalls" type="checkbox"> parallel_tool_calls</label>
+              </div>
+            </details>
+            <details class="panel">
+              <summary>Формат и JSON</summary>
+              <div class="panel-body">
+                <div class="row">
+                  <label>answer_prefix<input id="answerPrefix"></label>
+                  <label>answer_suffix<input id="answerSuffix"></label>
+                </div>
+                <label>address_as<input id="addressAs"></label>
+                <label class="inline"><input id="quoteQuestion" type="checkbox"> quote_question</label>
+                <label>format_instruction<textarea id="formatInstruction"></textarea></label>
+                <label>completion_instruction<textarea id="completionInstruction"></textarea></label>
+                <label>extra API parameters<textarea id="extraParams" placeholder='{"web_search_options": {}, "metadata": {"source": "ai-playground"}}'></textarea></label>
+              </div>
+            </details>
           </div>
-        </details>
+        </div>
+
+        <div id="tab-metrics" class="inspector-pane">
+          <div id="metrics" class="metrics">
+            <div class="metric"><span>Время запроса</span><strong id="metricTime">—</strong></div>
+            <div class="metric"><span>Токены запроса</span><strong id="metricTokens">—</strong></div>
+            <div class="metric"><span>Стоимость запроса</span><strong id="metricCost">—</strong></div>
+            <div class="metric"><span>Токены диалога</span><strong id="metricSession">—</strong></div>
+          </div>
+        </div>
+
+        <div id="tab-debug" class="inspector-pane">
+          <details id="debugDetails" class="debug" open>
+            <summary>JSON отладка</summary>
+            <div class="debug-grid">
+              <div class="debug-item">
+                <h3>Запрос к provider API</h3>
+                <pre id="providerRequest">{}</pre>
+              </div>
+              <div class="debug-item">
+                <h3>Ответ provider API</h3>
+                <pre id="providerResponse">{}</pre>
+              </div>
+            </div>
+          </details>
+        </div>
       </section>
     </div>
   </main>
@@ -618,6 +720,15 @@
     function setStatus(text, isError = false) {
       status.textContent = text;
       status.className = isError ? 'status error' : 'status';
+    }
+
+    function selectInspectorTab(name) {
+      document.querySelectorAll('.tab-button').forEach((button) => {
+        button.classList.toggle('active', button.dataset.tab === name);
+      });
+      document.querySelectorAll('.inspector-pane').forEach((pane) => {
+        pane.classList.toggle('active', pane.id === `tab-${name}`);
+      });
     }
 
     function numberValue(id) {
@@ -1231,6 +1342,9 @@
       resetTokenOverrideForProvider();
       applyProviderDefaults();
       loadChatSession();
+    });
+    document.querySelectorAll('.tab-button').forEach((button) => {
+      button.addEventListener('click', () => selectInspectorTab(button.dataset.tab));
     });
     $('token').addEventListener('input', markTokenOverrideProvider);
     $('saveToken').addEventListener('click', saveTokenOverride);

@@ -14,6 +14,8 @@
 | `GET` | `/` | Отдать UI |
 | `GET` | `/api/agents` | Список локальных агентов |
 | `GET` | `/api/providers` | Список providers и ограничения параметров |
+| `POST` | `/api/token/status` | Проверить наличие сохраненного токена для provider |
+| `POST` | `/api/token/save` | Сохранить token override для provider |
 | `POST` | `/api/models` | Загрузить модели provider |
 | `POST` | `/api/chat/session` | Открыть или создать web chat session |
 | `POST` | `/api/chat` | Отправить prompt через `ChatAgent` |
@@ -29,7 +31,7 @@ ChatWebRequest
   -> resolve_web_token()
   -> load/create LocalSessionStore session
   -> ChatAgent::respond_with_debug()
-  -> save session + memory
+  -> save session + memory + metrics
   -> ChatWebResponse
 ```
 
@@ -37,7 +39,9 @@ ChatWebRequest
 
 - UI не видит provider/model defaults: `providers()` handler и `applyProviderDefaults()` в `ui.html`.
 - Токен из web не используется: `resolve_web_token()`.
+- Статус/сохранение токена в web: `token_status()`, `token_save()`, `web_token_present()`.
 - Сессия web не продолжается: `chat_session()`, `chat()`, `LocalSessionStore`.
+- Метрики запроса/диалога неверные: `TokenUsage`, `add_request_metrics()`, `setMetrics()`, `setSessionMetrics()`.
 - Debug JSON странный: `ChatDebugView` и provider debug в `ChatAgent`.
 - Ошибка приходит без понятного текста: `WebError::into_response()`.
 
@@ -47,3 +51,4 @@ ChatWebRequest
 - Токен из формы можно сохранять только для текущего provider.
 - Debug view должен редактировать секреты.
 - Web API не должен обходить `ProviderClient` или `ChatAgent`.
+- UI разделяет метрики последнего запроса и накопленные метрики диалога.
