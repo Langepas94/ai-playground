@@ -156,10 +156,28 @@ pub fn format_request_metrics(metrics: &RequestMetrics) -> String {
         .usage
         .as_ref()
         .map(|u| {
-            format!(
-                "tokens: input={} output={} total={}",
-                u.input_tokens, u.output_tokens, u.total_tokens
-            )
+            let mut parts = vec![
+                format!("prompt={}", u.input_tokens),
+                format!("completion={}", u.output_tokens),
+                format!("total={}", u.total_tokens),
+            ];
+            push_optional_metric(&mut parts, "prompt_cached", u.cache_hit_input_tokens);
+            push_optional_metric(&mut parts, "prompt_uncached", u.cache_miss_input_tokens);
+            push_optional_metric(&mut parts, "prompt_audio", u.input_audio_tokens);
+            push_optional_metric(&mut parts, "visible_output", u.output_visible_tokens);
+            push_optional_metric(&mut parts, "reasoning", u.output_reasoning_tokens);
+            push_optional_metric(&mut parts, "output_audio", u.output_audio_tokens);
+            push_optional_metric(
+                &mut parts,
+                "accepted_prediction",
+                u.accepted_prediction_output_tokens,
+            );
+            push_optional_metric(
+                &mut parts,
+                "rejected_prediction",
+                u.rejected_prediction_output_tokens,
+            );
+            format!("tokens: {}", parts.join(" "))
         })
         .unwrap_or_else(|| "tokens: unavailable".to_string());
     let cost = metrics
@@ -168,4 +186,10 @@ pub fn format_request_metrics(metrics: &RequestMetrics) -> String {
         .map(|c| format!("cost: {:.8} {} ({})", c.amount, c.currency, c.source))
         .unwrap_or_else(|| "cost: unavailable".to_string());
     format!("time: {} ms\n{usage}\n{cost}", metrics.elapsed_ms)
+}
+
+fn push_optional_metric(parts: &mut Vec<String>, label: &str, value: Option<u32>) {
+    if let Some(value) = value {
+        parts.push(format!("{label}={value}"));
+    }
 }

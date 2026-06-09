@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "ai-playground"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -35,7 +35,7 @@ dependencies = [
 
 [[package]]
 name = "aiteach"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "ai-playground",
  "anyhow",
