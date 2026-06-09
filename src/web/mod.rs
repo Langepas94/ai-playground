@@ -42,6 +42,8 @@ pub async fn serve(addr: SocketAddr) -> Result<(), AppError> {
         .route("/", get(index))
         .route("/api/agents", get(agents))
         .route("/api/providers", get(providers))
+        .route("/api/token/status", post(token_status))
+        .route("/api/token/save", post(token_save))
         .route("/api/models", post(models))
         .route("/api/agent/session", post(chat_session))
         .route("/api/agent/chat", post(chat))
@@ -118,6 +120,41 @@ async fn models(
     Ok(Json(ModelsResponse {
         models: models.into_iter().map(ModelView::from).collect(),
     }))
+}
+
+async fn token_status(
+    State(state): State<AppState>,
+    Json(request): Json<ModelsRequest>,
+) -> Result<Json<TokenStatusResponse>, WebError> {
+    let profile = request.profile()?;
+    validate_base_url(&profile.provider.to_string(), &profile.base_url)?;
+    Ok(Json(TokenStatusResponse {
+        saved: web_token_present(
+            state.secrets.as_ref(),
+            &profile,
+            &request.token,
+            request.token_provider.as_deref(),
+        )?,
+    }))
+}
+
+async fn token_save(
+    State(state): State<AppState>,
+    Json(request): Json<ModelsRequest>,
+) -> Result<Json<TokenStatusResponse>, WebError> {
+    let profile = request.profile()?;
+    validate_base_url(&profile.provider.to_string(), &profile.base_url)?;
+    if request.token.trim().is_empty() {
+        return Err(AppError::InvalidInput("API token is empty".to_string()).into());
+    }
+    if !token_override_belongs_to_provider(&profile, request.token_provider.as_deref())? {
+        return Err(AppError::InvalidInput(
+            "Token override belongs to another provider".to_string(),
+        )
+        .into());
+    }
+    set_profile_token(state.secrets.as_ref(), &profile, request.token.trim())?;
+    Ok(Json(TokenStatusResponse { saved: true }))
 }
 
 async fn chat(
@@ -467,6 +504,11 @@ struct ModelsResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct TokenStatusResponse {
+    saved: bool,
+}
+
+#[derive(Debug, Serialize)]
 struct ModelView {
     id: String,
     pricing: Option<ModelPricing>,
@@ -721,6 +763,32 @@ fn resolve_web_token(
     Err(AppError::InvalidInput(
         "API token is required. Save it with `ai token set --profile <name>` or paste it once in the web UI.".to_string(),
     ))
+}
+
+fn web_token_present(
+    secrets: &dyn SecretStore,
+    profile: &ProfileConfig,
+    token_override: &str,
+    token_provider: Option<&str>,
+) -> Result<bool, AppError> {
+    if !token_override.trim().is_empty()
+        && token_override_belongs_to_provider(profile, token_provider)?
+    {
+        return Ok(true);
+    }
+    if secrets.get_token(&token_ref(&profile.provider))?.is_some() {
+        return Ok(true);
+    }
+    let config = AppConfig::load()?;
+    for (name, candidate) in &config.profiles {
+        if candidate.provider != profile.provider {
+            continue;
+        }
+        if get_config_profile_token(secrets, &config, name, candidate)?.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn token_override_belongs_to_provider(

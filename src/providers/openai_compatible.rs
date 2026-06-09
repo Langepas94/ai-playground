@@ -359,11 +359,21 @@ struct OpenAiUsage {
     prompt_cache_hit_tokens: Option<u32>,
     prompt_cache_miss_tokens: Option<u32>,
     prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
+    completion_tokens_details: Option<OpenAiCompletionTokensDetails>,
 }
 
 #[derive(Debug, Deserialize)]
 struct OpenAiPromptTokensDetails {
     cached_tokens: Option<u32>,
+    audio_tokens: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiCompletionTokensDetails {
+    reasoning_tokens: Option<u32>,
+    audio_tokens: Option<u32>,
+    accepted_prediction_tokens: Option<u32>,
+    rejected_prediction_tokens: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -530,6 +540,10 @@ fn parse_chat_response(
 fn token_usage(usage: &OpenAiUsage) -> TokenUsage {
     let input_tokens = usage.prompt_tokens.unwrap_or_default();
     let output_tokens = usage.completion_tokens.unwrap_or_default();
+    let output_reasoning_tokens = usage
+        .completion_tokens_details
+        .as_ref()
+        .and_then(|details| details.reasoning_tokens);
     TokenUsage {
         input_tokens,
         output_tokens,
@@ -538,6 +552,25 @@ fn token_usage(usage: &OpenAiUsage) -> TokenUsage {
             .unwrap_or_else(|| input_tokens.saturating_add(output_tokens)),
         cache_hit_input_tokens: cache_hit_input_tokens(usage),
         cache_miss_input_tokens: usage.prompt_cache_miss_tokens,
+        input_audio_tokens: usage
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|details| details.audio_tokens),
+        output_reasoning_tokens,
+        output_visible_tokens: output_reasoning_tokens
+            .map(|reasoning_tokens| output_tokens.saturating_sub(reasoning_tokens)),
+        output_audio_tokens: usage
+            .completion_tokens_details
+            .as_ref()
+            .and_then(|details| details.audio_tokens),
+        accepted_prediction_output_tokens: usage
+            .completion_tokens_details
+            .as_ref()
+            .and_then(|details| details.accepted_prediction_tokens),
+        rejected_prediction_output_tokens: usage
+            .completion_tokens_details
+            .as_ref()
+            .and_then(|details| details.rejected_prediction_tokens),
     }
 }
 
@@ -766,12 +799,52 @@ mod tests {
                 total_tokens: 14,
                 cache_hit_input_tokens: None,
                 cache_miss_input_tokens: None,
+                ..TokenUsage::default()
             })
         );
         let cost = response.metrics.cost.expect("provider-reported cost");
         assert_eq!(cost.amount, 0.00014);
         assert_eq!(cost.currency, "credits");
         assert_eq!(cost.source, CostSource::ProviderReported);
+    }
+
+    #[test]
+    fn chat_response_parses_token_usage_details() {
+        let raw = r#"{
+            "choices": [{
+                "message": { "content": "hello" },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 51,
+                "completion_tokens": 1539,
+                "total_tokens": 1590,
+                "prompt_tokens_details": {
+                    "cached_tokens": 10,
+                    "audio_tokens": 2
+                },
+                "completion_tokens_details": {
+                    "reasoning_tokens": 1344,
+                    "audio_tokens": 3,
+                    "accepted_prediction_tokens": 4,
+                    "rejected_prediction_tokens": 5
+                }
+            }
+        }"#;
+
+        let response = parse_chat_response(spec(), raw, 123, None).expect("parse response");
+        let usage = response.metrics.usage.expect("usage");
+
+        assert_eq!(usage.input_tokens, 51);
+        assert_eq!(usage.output_tokens, 1539);
+        assert_eq!(usage.total_tokens, 1590);
+        assert_eq!(usage.cache_hit_input_tokens, Some(10));
+        assert_eq!(usage.input_audio_tokens, Some(2));
+        assert_eq!(usage.output_reasoning_tokens, Some(1344));
+        assert_eq!(usage.output_visible_tokens, Some(195));
+        assert_eq!(usage.output_audio_tokens, Some(3));
+        assert_eq!(usage.accepted_prediction_output_tokens, Some(4));
+        assert_eq!(usage.rejected_prediction_output_tokens, Some(5));
     }
 
     #[test]

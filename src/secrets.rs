@@ -1,6 +1,8 @@
-use std::{collections::HashMap, sync::Mutex};
+use std::{collections::HashMap, fs, path::PathBuf, sync::Mutex};
 
+use directories::ProjectDirs;
 use keyring::Entry;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     config::{AppConfig, ProfileConfig, legacy_token_ref, token_ref},
@@ -19,51 +21,147 @@ pub trait SecretStore: Send + Sync {
 #[derive(Debug, Default)]
 pub struct KeyringSecretStore;
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct StoredSecrets {
+    tokens: HashMap<String, String>,
+}
+
 impl SecretStore for KeyringSecretStore {
     fn set_token(&self, token_ref: &str, token: &str) -> Result<(), AppError> {
-        Entry::new(SERVICE, token_ref)
-            .map_err(|error| AppError::Secret(error.to_string()))?
-            .set_password(token)
+        let keyring_result = Entry::new(SERVICE, token_ref)
             .map_err(|error| AppError::Secret(error.to_string()))
+            .and_then(|entry| {
+                entry
+                    .set_password(token)
+                    .map_err(|error| AppError::Secret(error.to_string()))
+            });
+        set_fallback_token(token_ref, token)?;
+        keyring_result.or(Ok(()))
     }
 
     fn get_token(&self, token_ref: &str) -> Result<Option<String>, AppError> {
+        let keyring_token = self.get_keyring_token(token_ref).ok().flatten();
+        if let Some(token) = keyring_token {
+            return Ok(Some(token));
+        }
+        get_fallback_token(token_ref)
+    }
+
+    fn delete_token(&self, token_ref: &str) -> Result<(), AppError> {
+        let _ = delete_keyring_token(SERVICE, token_ref);
+        let _ = delete_keyring_token(LEGACY_SERVICE, token_ref);
+        delete_fallback_token(token_ref)
+    }
+}
+
+impl KeyringSecretStore {
+    fn get_keyring_token(&self, token_ref: &str) -> Result<Option<String>, AppError> {
         match Entry::new(SERVICE, token_ref)
             .map_err(|error| AppError::Secret(error.to_string()))?
             .get_password()
         {
             Ok(token) => Ok(Some(token)),
-            Err(keyring::Error::NoEntry) => match Entry::new(LEGACY_SERVICE, token_ref)
-                .map_err(|error| AppError::Secret(error.to_string()))?
-                .get_password()
-            {
-                Ok(token) => {
-                    self.set_token(token_ref, &token)?;
-                    Ok(Some(token))
-                }
-                Err(keyring::Error::NoEntry) => Ok(None),
-                Err(error) => Err(AppError::Secret(error.to_string())),
-            },
+            Err(keyring::Error::NoEntry) => self.get_legacy_keyring_token(token_ref),
             Err(error) => Err(AppError::Secret(error.to_string())),
         }
     }
 
-    fn delete_token(&self, token_ref: &str) -> Result<(), AppError> {
-        match Entry::new(SERVICE, token_ref)
-            .map_err(|error| AppError::Secret(error.to_string()))?
-            .delete_credential()
-        {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(AppError::Secret(error.to_string())),
-        }?;
+    fn get_legacy_keyring_token(&self, token_ref: &str) -> Result<Option<String>, AppError> {
         match Entry::new(LEGACY_SERVICE, token_ref)
             .map_err(|error| AppError::Secret(error.to_string()))?
-            .delete_credential()
+            .get_password()
         {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Ok(token) => {
+                self.set_token(token_ref, &token)?;
+                Ok(Some(token))
+            }
+            Err(keyring::Error::NoEntry) => Ok(None),
             Err(error) => Err(AppError::Secret(error.to_string())),
         }
     }
+}
+
+fn delete_keyring_token(service: &str, token_ref: &str) -> Result<(), AppError> {
+    match Entry::new(service, token_ref)
+        .map_err(|error| AppError::Secret(error.to_string()))?
+        .delete_credential()
+    {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(AppError::Secret(error.to_string())),
+    }
+}
+
+fn fallback_secret_path() -> Result<PathBuf, AppError> {
+    let dirs = ProjectDirs::from("dev", "ai-playground", "ai-playground").ok_or_else(|| {
+        AppError::Config {
+            path: PathBuf::from("<unknown>"),
+            message: "Could not resolve data directory".to_string(),
+        }
+    })?;
+    Ok(dirs.data_local_dir().join("secrets.toon"))
+}
+
+fn load_fallback_secrets() -> Result<StoredSecrets, AppError> {
+    let path = fallback_secret_path()?;
+    if !path.exists() {
+        return Ok(StoredSecrets::default());
+    }
+    let raw = fs::read_to_string(&path).map_err(|error| AppError::Config {
+        path: path.clone(),
+        message: format!("read failed: {error}"),
+    })?;
+    crate::toon_codec::from_str_or_json::<StoredSecrets>(&raw)
+}
+
+fn save_fallback_secrets(secrets: &StoredSecrets) -> Result<(), AppError> {
+    let path = fallback_secret_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| AppError::Config {
+            path: parent.to_path_buf(),
+            message: format!("could not create directory: {error}"),
+        })?;
+    }
+    let raw = crate::toon_codec::to_string(secrets)?;
+    fs::write(&path, raw).map_err(|error| AppError::Config {
+        path: path.clone(),
+        message: format!("write failed: {error}"),
+    })?;
+    set_owner_read_write(&path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_owner_read_write(path: &PathBuf) -> Result<(), AppError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let permissions = fs::Permissions::from_mode(0o600);
+    fs::set_permissions(path, permissions).map_err(|error| AppError::Config {
+        path: path.clone(),
+        message: format!("could not set secret file permissions: {error}"),
+    })
+}
+
+#[cfg(not(unix))]
+fn set_owner_read_write(_path: &PathBuf) -> Result<(), AppError> {
+    Ok(())
+}
+
+fn set_fallback_token(token_ref: &str, token: &str) -> Result<(), AppError> {
+    let mut secrets = load_fallback_secrets()?;
+    secrets
+        .tokens
+        .insert(token_ref.to_string(), token.to_string());
+    save_fallback_secrets(&secrets)
+}
+
+fn get_fallback_token(token_ref: &str) -> Result<Option<String>, AppError> {
+    Ok(load_fallback_secrets()?.tokens.get(token_ref).cloned())
+}
+
+fn delete_fallback_token(token_ref: &str) -> Result<(), AppError> {
+    let mut secrets = load_fallback_secrets()?;
+    secrets.tokens.remove(token_ref);
+    save_fallback_secrets(&secrets)
 }
 
 #[derive(Debug, Default)]
