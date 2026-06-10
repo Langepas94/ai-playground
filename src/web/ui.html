@@ -81,7 +81,7 @@
       align-items: center;
       justify-content: space-between;
       gap: 12px;
-      padding: 12px 14px;
+      padding: 10px 14px;
       border-bottom: 1px solid var(--line);
     }
     .group {
@@ -124,7 +124,7 @@
       line-height: 1.45;
     }
     #prompt {
-      min-height: 58px;
+      min-height: 52px;
       max-height: 18vh;
     }
     #systemPrompt {
@@ -188,18 +188,24 @@
       border-top: 1px solid var(--line);
       background: #ffffff;
     }
-    .composer-top {
-      display: flex;
-      justify-content: space-between;
+    .prompt-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
       gap: 10px;
-      flex-wrap: wrap;
-      align-items: center;
+      align-items: stretch;
     }
-    .composer-title {
-      margin: 0;
-      font-size: 13px;
-      color: var(--muted);
-      font-weight: 650;
+    .prompt-row label {
+      min-width: 0;
+    }
+    .prompt-row .send-row {
+      align-content: stretch;
+      flex-direction: column;
+      flex-wrap: nowrap;
+      justify-content: stretch;
+    }
+    .prompt-row .send-row button {
+      height: 100%;
+      min-width: 132px;
     }
     .inspector-tabs {
       display: grid;
@@ -240,19 +246,16 @@
       padding: 12px;
       background: #f8fbfb;
     }
-    .chat-header .agent-panel {
-      width: min(620px, 100%);
-      grid-template-columns: minmax(150px, 210px) minmax(0, 1fr);
-      align-items: end;
-      padding: 8px;
-    }
-    .chat-header .agent-panel label {
-      min-width: 0;
-    }
     .agent-status {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 8px;
+    }
+    .session-strip {
+      width: min(460px, 70%);
+    }
+    .session-strip span {
+      padding: 6px 8px;
     }
     .agent-status span {
       display: grid;
@@ -468,6 +471,20 @@
         grid-column: auto;
         max-height: none;
       }
+      .chat-header {
+        align-items: stretch;
+        flex-direction: column;
+      }
+      .session-strip {
+        width: 100%;
+      }
+      .prompt-row {
+        grid-template-columns: 1fr;
+      }
+      .prompt-row .send-row {
+        flex-direction: row;
+        flex-wrap: wrap;
+      }
       .prompt {
         min-height: 72vh;
       }
@@ -490,33 +507,23 @@
       <section class="prompt">
         <div class="chat-header">
           <h2>Диалог</h2>
-          <div class="agent-panel">
-            <label>agent<select id="agentMode"></select></label>
-            <div class="agent-status">
-              <span>Сессия<strong id="sessionLabel">—</strong></span>
-              <span>История<strong id="historyLabel">0 сообщений</strong></span>
-              <span>Хранилище<strong id="storageLabel">—</strong></span>
-            </div>
+          <div class="agent-status session-strip">
+            <span>Сессия<strong id="sessionLabel">—</strong></span>
+            <span>История<strong id="historyLabel">0 сообщений</strong></span>
+            <span>Хранилище<strong id="storageLabel">—</strong></span>
           </div>
         </div>
         <div id="conversation" class="conversation" aria-live="polite">
           <p class="conversation-empty">Ответ появится здесь.</p>
         </div>
         <div class="composer">
-          <div class="composer-top">
-            <p class="composer-title">Новый запрос</p>
+          <div class="prompt-row">
+            <label><textarea id="prompt" placeholder="Введите запрос к модели"></textarea></label>
             <div class="send-row">
               <button id="send" type="button">Отправить</button>
               <button id="clear" class="secondary" type="button">Новая сессия</button>
             </div>
           </div>
-          <label><textarea id="prompt" placeholder="Введите запрос к модели"></textarea></label>
-          <details class="panel">
-            <summary>System prompt</summary>
-            <div class="panel-body">
-              <label>system_prompt<textarea id="systemPrompt" placeholder="Необязательная системная инструкция для модели"></textarea></label>
-            </div>
-          </details>
         </div>
       </section>
 
@@ -531,6 +538,7 @@
         <div id="tab-profile" class="inspector-pane active">
           <div class="group">
             <h2>Провайдер</h2>
+            <label>agent<select id="agentMode"></select></label>
             <label>Provider<select id="provider"></select></label>
             <label>Model<select id="model"></select></label>
             <div class="actions">
@@ -553,8 +561,14 @@
           <div class="group">
             <h2>Основные параметры</h2>
             <div id="parameterWarnings" class="warnings"></div>
+            <details class="panel">
+              <summary>System prompt</summary>
+              <div class="panel-body">
+                <label>system_prompt<textarea id="systemPrompt" placeholder="Необязательная системная инструкция для модели"></textarea></label>
+              </div>
+            </details>
             <div class="row">
-              <label>max_tokens<input id="maxTokens" type="number" min="1" step="1" value="1024"></label>
+              <label>max_tokens<input id="maxTokens" type="number" min="1" step="1" placeholder="Пусто = без лимита"></label>
               <label>temperature<input id="temperature" type="number" min="0" max="2" step="0.1" value="1"></label>
             </div>
             <div class="row">
@@ -590,7 +604,7 @@
               <div class="panel-body">
                 <div class="row">
                   <label>response_format<select id="responseFormat"><option value="text">text</option><option value="json-object">json_object</option><option value="toon">toon</option></select></label>
-                  <label>max_completion_tokens<input id="maxCompletionTokens" type="number" min="1" step="1"></label>
+                  <label>max_completion_tokens<input id="maxCompletionTokens" type="number" min="1" step="1" placeholder="Пусто = без лимита"></label>
                 </div>
                 <div class="row">
                   <label>top_k<input id="topK" type="number" min="0" step="1"></label>
@@ -783,10 +797,8 @@
     function applyTokenLimitDefaults(selected) {
       if (selected.id === 'openai-compatible') {
         if ($('maxTokens').value.trim() === $('maxTokens').defaultValue) $('maxTokens').value = '';
-        if (!$('maxCompletionTokens').value.trim()) $('maxCompletionTokens').value = $('maxTokens').defaultValue;
         return;
       }
-      if (!$('maxTokens').value.trim()) $('maxTokens').value = $('maxTokens').defaultValue;
       if ($('maxCompletionTokens').value.trim() === $('maxTokens').defaultValue) $('maxCompletionTokens').value = '';
     }
 
