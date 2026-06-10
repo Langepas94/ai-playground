@@ -1441,9 +1441,9 @@
         badge.title = `Максимальный контекст: ${ctx.toLocaleString()} токенов`;
         badge.style.color = '';
       } else {
-        badge.textContent = '— загрузите модели';
+        badge.textContent = '—';
         badge.style.color = '#aaa';
-        badge.title = '';
+        badge.title = 'Данные недоступны для этого провайдера';
       }
     }
 
@@ -1479,6 +1479,7 @@
       updateProviderDocLink();
       await refreshTokenStatus();
       await loadChatSession();
+      await loadModels().catch(() => {}); // автозагрузка; ошибка не критична
       setStatus('Готово');
     }
 
@@ -1633,6 +1634,7 @@
       applyProviderDefaults();
       updateProviderDocLink();
       loadChatSession();
+      loadModels().catch(() => {});
     });
     document.querySelectorAll('.tab-button').forEach((button) => {
       button.addEventListener('click', () => selectInspectorTab(button.dataset.tab));
