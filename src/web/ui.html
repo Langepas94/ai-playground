@@ -423,6 +423,16 @@
     .message-content {
       min-width: 0;
     }
+    .context-badge {
+      font-size: 11px;
+      color: #555;
+      background: #f0f4ff;
+      border: 1px solid #c8d8f8;
+      border-radius: 10px;
+      padding: 2px 9px;
+      white-space: nowrap;
+      align-self: center;
+    }
     .debug-doc-row {
       display: flex;
       align-items: center;
@@ -618,6 +628,7 @@
             <label>agent<select id="agentMode"></select></label>
             <label>Provider<select id="provider"></select></label>
             <label>Model<select id="model"></select></label>
+            <div id="contextWindowBadge" class="context-badge" style="display:none"></div>
             <div class="actions">
               <button id="loadModels" class="secondary" type="button">Загрузить модели</button>
             </div>
@@ -771,6 +782,7 @@
     let agents = [];
     let providers = [];
     let modelPricingById = new Map();
+    let modelContextById = new Map();
     let userPricingOverrides = new Map();
     let currentConstraints = new Map();
     let chatHistory = [];
@@ -1330,6 +1342,7 @@
       $('customModel').value = '';
       // Reset maps for new provider, then restore from cache
       modelPricingById = new Map();
+      modelContextById = new Map();
       userPricingOverrides = new Map();
       restoreModelPricing();
       restoreUserOverrides();
@@ -1342,17 +1355,38 @@
     function setModelOptions(models, selectedModel) {
       const normalized = models.map((model) => typeof model === 'string' ? { id: model, pricing: null } : model).filter((model) => model?.id);
       const uniqueModels = [...new Map(normalized.map((model) => [model.id, model])).values()];
-      // Merge API pricing INTO existing map (preserves localStorage-restored pricing)
+      // Merge API pricing and context_length INTO existing maps
       for (const model of uniqueModels) {
         if (model.pricing) modelPricingById.set(model.id, model.pricing);
+        if (model.context_length != null) modelContextById.set(model.id, model.context_length);
       }
       $('model').innerHTML = uniqueModels.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.id)}</option>`).join('');
       if (selectedModel && uniqueModels.some((model) => model.id === selectedModel)) {
         $('model').value = selectedModel;
       }
       applySelectedModelPricing();
+      updateContextBadge();
       persistModelPricing();
       persistModelList();
+    }
+
+    function updateContextBadge() {
+      const model = selectedModel();
+      const ctx = modelContextById.get(model);
+      const badge = $('contextWindowBadge');
+      if (ctx) {
+        badge.style.display = '';
+        badge.textContent = `ctx ${formatTokenCount(ctx)}`;
+        badge.title = `Максимальный контекст модели: ${ctx.toLocaleString()} токенов`;
+      } else {
+        badge.style.display = 'none';
+      }
+    }
+
+    function formatTokenCount(n) {
+      if (n >= 1_000_000) return (n / 1_000_000).toLocaleString(undefined, { maximumFractionDigits: 1 }) + 'M';
+      if (n >= 1_000) return (n / 1_000).toLocaleString(undefined, { maximumFractionDigits: 0 }) + 'k';
+      return n.toString();
     }
 
     function escapeHtml(value) {
@@ -1521,8 +1555,8 @@
     $('token').addEventListener('input', markTokenOverrideProvider);
     $('saveToken').addEventListener('click', saveTokenOverride);
     $('agentMode').addEventListener('change', () => { chatSessionId = null; chatHistory = []; renderChatHistory(); loadChatSession(); });
-    $('model').addEventListener('change', () => { applySelectedModelPricing(); persistSelectedModel(); loadChatSession(); });
-    $('customModel').addEventListener('input', () => { applySelectedModelPricing(); persistSelectedModel(); loadChatSession(); });
+    $('model').addEventListener('change', () => { applySelectedModelPricing(); updateContextBadge(); persistSelectedModel(); loadChatSession(); });
+    $('customModel').addEventListener('input', () => { applySelectedModelPricing(); updateContextBadge(); persistSelectedModel(); loadChatSession(); });
     $('baseUrl').addEventListener('input', refreshTokenStatus);
     ['priceInput', 'priceOutput', 'priceCacheHitInput', 'priceCacheMissInput', 'priceCurrency'].forEach((id) => {
       $(id).addEventListener('input', saveCurrentPricingOverride);

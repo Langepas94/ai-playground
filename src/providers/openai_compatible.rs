@@ -385,6 +385,9 @@ struct ModelsResponse {
 struct ModelEntry {
     id: String,
     pricing: Option<ModelEntryPricing>,
+    /// OpenRouter uses `context_length`, OpenAI uses `context_window`.
+    #[serde(alias = "context_window")]
+    context_length: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -739,8 +742,9 @@ fn parse_models_response(spec: ProviderSpec, raw: &str) -> Result<Vec<ModelInfo>
         .data
         .into_iter()
         .map(|model| ModelInfo {
-            pricing: model.pricing.and_then(model_pricing_from_entry),
             id: model.id,
+            pricing: model.pricing.and_then(model_pricing_from_entry),
+            context_length: model.context_length,
         })
         .collect())
 }

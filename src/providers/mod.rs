@@ -357,6 +357,8 @@ pub struct ModelPricing {
 pub struct ModelInfo {
     pub id: String,
     pub pricing: Option<ModelPricing>,
+    /// Maximum context window in tokens, when reported by the provider.
+    pub context_length: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
