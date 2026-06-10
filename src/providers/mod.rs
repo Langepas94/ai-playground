@@ -456,15 +456,26 @@ pub trait ProviderClient: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct ReqwestProviderClient {
     client: Client,
+    gigachat_tokens: gigachat::GigaChatTokenCache,
+    gigachat_oauth_url: String,
 }
 
 impl ReqwestProviderClient {
     pub fn new() -> Result<Self, AppError> {
+        Self::new_with_gigachat_oauth_url(gigachat::default_oauth_url())
+    }
+
+    #[doc(hidden)]
+    pub fn new_with_gigachat_oauth_url(gigachat_oauth_url: String) -> Result<Self, AppError> {
         let builder = Client::builder().timeout(std::time::Duration::from_secs(300));
         let client = add_extra_root_certificates(builder)?
             .build()
             .map_err(AppError::from)?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            gigachat_tokens: gigachat::GigaChatTokenCache::default(),
+            gigachat_oauth_url,
+        })
     }
 }
 
@@ -511,8 +522,15 @@ impl ProviderClient for ReqwestProviderClient {
         token: &str,
     ) -> Result<Vec<String>, AppError> {
         let spec = profile.provider.spec();
-        let token = self.bearer_token(profile, token).await?;
-        openai_compatible::list_models(&self.client, spec, profile, &token).await
+        let access_token = self.bearer_token(profile, token).await?;
+        let result =
+            openai_compatible::list_models(&self.client, spec, profile, &access_token).await;
+        if self.should_refresh_gigachat_token(profile, token, &result) {
+            let access_token = self.refresh_bearer_token(profile, token).await?;
+            return openai_compatible::list_models(&self.client, spec, profile, &access_token)
+                .await;
+        }
+        result
     }
 
     async fn chat_completion(
@@ -522,8 +540,27 @@ impl ProviderClient for ReqwestProviderClient {
         request: ChatRequest,
     ) -> Result<ChatResponse, AppError> {
         let spec = profile.provider.spec();
-        let token = self.bearer_token(profile, token).await?;
-        openai_compatible::chat_completion(&self.client, spec, profile, &token, request).await
+        let access_token = self.bearer_token(profile, token).await?;
+        let result = openai_compatible::chat_completion(
+            &self.client,
+            spec,
+            profile,
+            &access_token,
+            request.clone(),
+        )
+        .await;
+        if self.should_refresh_gigachat_token(profile, token, &result) {
+            let access_token = self.refresh_bearer_token(profile, token).await?;
+            return openai_compatible::chat_completion(
+                &self.client,
+                spec,
+                profile,
+                &access_token,
+                request,
+            )
+            .await;
+        }
+        result
     }
 
     async fn chat_completion_with_debug(
@@ -533,18 +570,80 @@ impl ProviderClient for ReqwestProviderClient {
         request: ChatRequest,
     ) -> Result<(ChatResponse, ProviderExchangeDebug), AppError> {
         let spec = profile.provider.spec();
-        let token = self.bearer_token(profile, token).await?;
-        openai_compatible::chat_completion_with_debug(&self.client, spec, profile, &token, request)
-            .await
+        let access_token = self.bearer_token(profile, token).await?;
+        let result = openai_compatible::chat_completion_with_debug(
+            &self.client,
+            spec,
+            profile,
+            &access_token,
+            request.clone(),
+        )
+        .await;
+        if self.should_refresh_gigachat_token(profile, token, &result) {
+            let access_token = self.refresh_bearer_token(profile, token).await?;
+            return openai_compatible::chat_completion_with_debug(
+                &self.client,
+                spec,
+                profile,
+                &access_token,
+                request,
+            )
+            .await;
+        }
+        result
     }
 }
 
 impl ReqwestProviderClient {
     async fn bearer_token(&self, profile: &ProfileConfig, token: &str) -> Result<String, AppError> {
         match profile.provider {
-            ProviderKind::GigaChat => gigachat::bearer_token(&self.client, token).await,
+            ProviderKind::GigaChat => {
+                gigachat::bearer_token(
+                    &self.client,
+                    token,
+                    &self.gigachat_tokens,
+                    &self.gigachat_oauth_url,
+                )
+                .await
+            }
             _ => Ok(token.to_string()),
         }
+    }
+
+    async fn refresh_bearer_token(
+        &self,
+        profile: &ProfileConfig,
+        token: &str,
+    ) -> Result<String, AppError> {
+        match profile.provider {
+            ProviderKind::GigaChat => {
+                let key = gigachat::cache_key(token);
+                self.gigachat_tokens.invalidate(&key);
+                gigachat::refresh_bearer_token(
+                    &self.client,
+                    token,
+                    &self.gigachat_tokens,
+                    &self.gigachat_oauth_url,
+                )
+                .await
+            }
+            _ => Ok(token.to_string()),
+        }
+    }
+
+    fn should_refresh_gigachat_token<T>(
+        &self,
+        profile: &ProfileConfig,
+        stored_token: &str,
+        result: &Result<T, AppError>,
+    ) -> bool {
+        profile.provider == ProviderKind::GigaChat
+            && !gigachat::looks_like_access_token(stored_token)
+            && matches!(
+                result,
+                Err(AppError::ProviderHttp(error))
+                    if error.status == Some(reqwest::StatusCode::UNAUTHORIZED)
+            )
     }
 
     pub async fn list_model_info(
@@ -553,8 +652,15 @@ impl ReqwestProviderClient {
         token: &str,
     ) -> Result<Vec<ModelInfo>, AppError> {
         let spec = profile.provider.spec();
-        let token = self.bearer_token(profile, token).await?;
-        openai_compatible::list_model_info(&self.client, spec, profile, &token).await
+        let access_token = self.bearer_token(profile, token).await?;
+        let result =
+            openai_compatible::list_model_info(&self.client, spec, profile, &access_token).await;
+        if self.should_refresh_gigachat_token(profile, token, &result) {
+            let access_token = self.refresh_bearer_token(profile, token).await?;
+            return openai_compatible::list_model_info(&self.client, spec, profile, &access_token)
+                .await;
+        }
+        result
     }
 
     pub async fn chat_completion_with_debug(
@@ -564,9 +670,27 @@ impl ReqwestProviderClient {
         request: ChatRequest,
     ) -> Result<(ChatResponse, ProviderExchangeDebug), AppError> {
         let spec = profile.provider.spec();
-        let token = self.bearer_token(profile, token).await?;
-        openai_compatible::chat_completion_with_debug(&self.client, spec, profile, &token, request)
-            .await
+        let access_token = self.bearer_token(profile, token).await?;
+        let result = openai_compatible::chat_completion_with_debug(
+            &self.client,
+            spec,
+            profile,
+            &access_token,
+            request.clone(),
+        )
+        .await;
+        if self.should_refresh_gigachat_token(profile, token, &result) {
+            let access_token = self.refresh_bearer_token(profile, token).await?;
+            return openai_compatible::chat_completion_with_debug(
+                &self.client,
+                spec,
+                profile,
+                &access_token,
+                request,
+            )
+            .await;
+        }
+        result
     }
 }
 

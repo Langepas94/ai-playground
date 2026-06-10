@@ -8,9 +8,13 @@ use ai_playground::{
 };
 use reqwest::StatusCode;
 use serde_json::json;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use wiremock::{
-    Mock, MockServer, ResponseTemplate,
-    matchers::{bearer_token, method, path},
+    Mock, MockServer, Request, ResponseTemplate,
+    matchers::{bearer_token, body_string_contains, header, header_exists, method, path},
 };
 
 #[tokio::test]
@@ -105,6 +109,93 @@ async fn chat_completion_calculates_cost_from_configured_pricing() {
     assert!((cost.amount - 0.007).abs() < f64::EPSILON);
     assert_eq!(cost.currency, "USD");
     assert_eq!(cost.source, CostSource::ConfiguredPricing);
+}
+
+#[tokio::test]
+async fn gigachat_refreshes_access_token_after_unauthorized_and_counts_usage() {
+    let api_server = MockServer::start().await;
+    let oauth_server = MockServer::start().await;
+    let oauth_calls = Arc::new(AtomicUsize::new(0));
+    let oauth_calls_for_mock = oauth_calls.clone();
+    Mock::given(method("POST"))
+        .and(path("/api/v2/oauth"))
+        .and(header("authorization", "Basic auth-key"))
+        .and(header_exists("rquid"))
+        .and(body_string_contains("scope=GIGACHAT_API_PERS"))
+        .respond_with(move |_request: &Request| {
+            let call = oauth_calls_for_mock.fetch_add(1, Ordering::SeqCst);
+            let access_token = if call == 0 {
+                "expired.access.token"
+            } else {
+                "fresh.access.token"
+            };
+            ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": access_token,
+                "expires_at": 4_000_000_000_000_u64
+            }))
+        })
+        .expect(2)
+        .mount(&oauth_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(bearer_token("expired.access.token"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "message": "token expired"
+        })))
+        .expect(1)
+        .mount(&api_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(bearer_token("fresh.access.token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{ "message": { "content": "привет" }, "finish_reason": "stop" }],
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 7,
+                "total_tokens": 19
+            }
+        })))
+        .expect(1)
+        .mount(&api_server)
+        .await;
+
+    let profile = ProfileConfig {
+        provider: ProviderKind::GigaChat,
+        model: "GigaChat".to_string(),
+        base_url: api_server.uri(),
+        token_ref: "gigachat:test".to_string(),
+    };
+    let client = ReqwestProviderClient::new_with_gigachat_oauth_url(format!(
+        "{}/api/v2/oauth",
+        oauth_server.uri()
+    ))
+    .expect("client");
+    let response = client
+        .chat_completion(
+            &profile,
+            "auth-key",
+            ChatRequest {
+                model: "GigaChat".to_string(),
+                messages: vec![ChatMessage {
+                    role: Role::User,
+                    content: "Привет".to_string(),
+                }],
+                control: ResponseControl::uncontrolled(),
+                pricing: None,
+                billing: None,
+            },
+        )
+        .await
+        .expect("chat");
+
+    assert_eq!(oauth_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(response.text, "привет");
+    let usage = response.metrics.usage.expect("usage");
+    assert_eq!(usage.input_tokens, 12);
+    assert_eq!(usage.output_tokens, 7);
+    assert_eq!(usage.total_tokens, 19);
 }
 
 #[tokio::test]
