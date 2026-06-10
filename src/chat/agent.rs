@@ -134,18 +134,16 @@ impl ChatAgent {
     }
 
     fn request_with_user_prompt(&self, prompt: String) -> ChatRequest {
-        let mut messages = Vec::new();
-        if !self
-            .history
-            .iter()
-            .any(|message| message.role == Role::System)
-        {
-            messages.push(ChatMessage {
-                role: Role::System,
-                content: LOCAL_AGENT_SYSTEM_PROMPT.to_string(),
-            });
+        let mut messages = self.memory.build_context(&self.history, self.memory_config);
+        if !messages.iter().any(|message| message.role == Role::System) {
+            messages.insert(
+                0,
+                ChatMessage {
+                    role: Role::System,
+                    content: LOCAL_AGENT_SYSTEM_PROMPT.to_string(),
+                },
+            );
         }
-        messages.extend(self.memory.build_context(&self.history, self.memory_config));
         messages.push(ChatMessage {
             role: Role::User,
             content: prompt,
