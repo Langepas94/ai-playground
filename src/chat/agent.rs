@@ -134,10 +134,17 @@ impl ChatAgent {
     }
 
     fn request_with_user_prompt(&self, prompt: String) -> ChatRequest {
-        let mut messages = vec![ChatMessage {
-            role: Role::System,
-            content: LOCAL_AGENT_SYSTEM_PROMPT.to_string(),
-        }];
+        let mut messages = Vec::new();
+        if !self
+            .history
+            .iter()
+            .any(|message| message.role == Role::System)
+        {
+            messages.push(ChatMessage {
+                role: Role::System,
+                content: LOCAL_AGENT_SYSTEM_PROMPT.to_string(),
+            });
+        }
         messages.extend(self.memory.build_context(&self.history, self.memory_config));
         messages.push(ChatMessage {
             role: Role::User,
@@ -343,6 +350,42 @@ mod tests {
         assert_eq!(seen[1][2].content, "first answer");
         assert_eq!(seen[1][3].content, "second question");
         assert_eq!(agent.history().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn agent_uses_custom_system_prompt_without_default_agent_prompt() {
+        let client = FakeClient {
+            replies: std::sync::Mutex::new(vec!["answer".to_string()]),
+            seen_messages: std::sync::Mutex::new(Vec::new()),
+        };
+        let mut agent = ChatAgent::new(
+            test_profile(),
+            "secret".to_string(),
+            vec![ChatMessage {
+                role: Role::System,
+                content: "Ты эксперт по Civilization 6.".to_string(),
+            }],
+            AgentMemory::default(),
+            ResponseControl::uncontrolled(),
+            None,
+            None,
+        );
+
+        agent
+            .respond(&client, "Как играть за Византию?".to_string())
+            .await
+            .expect("response");
+
+        let seen = client.seen_messages.lock().expect("seen messages");
+        assert_eq!(seen[0].len(), 2);
+        assert_eq!(seen[0][0].role, Role::System);
+        assert_eq!(seen[0][0].content, "Ты эксперт по Civilization 6.");
+        assert!(
+            !seen[0]
+                .iter()
+                .any(|message| message.content.contains("local conversational agent"))
+        );
+        assert_eq!(seen[0][1].content, "Как играть за Византию?");
     }
 
     #[tokio::test]
