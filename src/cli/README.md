@@ -4,8 +4,11 @@ CLI отвечает за пользовательский ввод, dispatch к
 
 ## Файлы
 
-- `mod.rs` - `Cli`, `run()`, `run_with_store()`, dispatch, shared helpers для профилей, моделей, pricing и stdin.
+- `mod.rs` - `Cli`, `run()`, `run_with_store()`, dispatch и фасад для command modules.
 - `args.rs` - только clap structs/enums. Здесь не должно быть бизнес-логики.
+- `input.rs` - stdin/prompt helpers без знаний о профилях, provider или config.
+- `profile_input.rs` - интерактивный сбор provider/base_url/model/profile name.
+- `pricing.rs` - получение цены модели из аргументов или provider `/models`.
 - `commands/ask.rs` - одноразовый prompt через `ask_once`.
 - `commands/chat.rs` - запуск интерактивной REPL-сессии.
 - `commands/compare.rs` - сравнение обычного/управляемого ответа и goal stop modes.
@@ -37,7 +40,7 @@ Cli::parse()
 ## Частые баги
 
 - Команда не видит активный профиль: смотри `AppConfig::selected_profile` в `src/config.rs`.
-- Модель не подставляется: смотри `collect_profile_input_inner()` и `prompt_model()` в `mod.rs`.
+- Модель не подставляется: смотри `collect_profile_input_inner()` и `prompt_model()` в `profile_input.rs`.
 - Токен "пропал": смотри `get_config_profile_token()` в `src/secrets.rs`.
 - В CLI напечатался секрет: это bug; искать `println!`/`eprintln!` в command handler и использовать `mask_token`.
 
