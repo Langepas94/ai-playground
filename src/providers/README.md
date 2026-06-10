@@ -8,7 +8,7 @@
 - `openai_compatible.rs` - основной Chat Completions/list models/billing/debug implementation.
 - `openrouter.rs` - spec и OpenRouter overrides.
 - `deepseek.rs` - DeepSeek spec.
-- `gigachat.rs` - GigaChat spec, OAuth bearer token и custom CA bundle.
+- `gigachat.rs` - GigaChat spec, OAuth bearer token cache/refresh и custom CA bundle.
 - `kimi.rs` - Kimi/Moonshot spec.
 
 ## Поток HTTP-запроса
@@ -29,6 +29,12 @@ ReqwestProviderClient::chat_completion()
 - Новый response parameter: `ResponseControl`/`ChatRequest` в `mod.rs`, payload в `openai_compatible.rs`.
 - Новый cost источник: `RequestMetrics`, `RequestCost`, billing helpers в `openai_compatible.rs`.
 - Provider-specific auth/header/base URL: spec или override рядом с provider-файлом.
+
+## GigaChat auth
+
+Для профиля `gigachat` в secret store сохраняется Authorization key из личного кабинета GigaChat API, а не временный access token. `ReqwestProviderClient` меняет его на OAuth access token через `/api/v2/oauth`, кэширует access token до `expires_at` и обновляет его заранее или после `401 Unauthorized`.
+
+Scope по умолчанию: `GIGACHAT_API_PERS`. Для B2B/CORP можно задать `AI_PLAYGROUND_GIGACHAT_SCOPE` или legacy `AITEACH_GIGACHAT_SCOPE`.
 
 ## Инварианты
 
