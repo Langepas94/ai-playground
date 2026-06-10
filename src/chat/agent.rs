@@ -13,7 +13,6 @@ use tokio::time::{Duration, timeout};
 
 pub const LOCAL_SESSION_AGENT_ID: &str = "local-session-agent";
 const MEMORY_REFRESH_TIMEOUT: Duration = Duration::from_millis(250);
-const LOCAL_AGENT_SYSTEM_PROMPT: &str = "You are a local conversational agent. Be responsive and collaborative. When the user proposes to work together on a creative, personal, or ambiguous task, acknowledge the intent and ask one or two concise clarifying questions before producing a finished artifact, unless the user explicitly asks for an immediate draft. For simple direct requests, answer directly.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgentDescriptor {
@@ -152,15 +151,6 @@ impl ChatAgent {
 
     fn request_with_user_prompt(&self, prompt: String) -> ChatRequest {
         let mut messages = self.memory.build_context(&self.history, self.memory_config);
-        if !messages.iter().any(|message| message.role == Role::System) {
-            messages.insert(
-                0,
-                ChatMessage {
-                    role: Role::System,
-                    content: LOCAL_AGENT_SYSTEM_PROMPT.to_string(),
-                },
-            );
-        }
         messages.push(ChatMessage {
             role: Role::User,
             content: prompt,
@@ -356,14 +346,12 @@ mod tests {
             .expect("second response");
 
         let seen = client.seen_messages.lock().expect("seen messages");
-        assert_eq!(seen[0].len(), 2);
-        assert!(seen[0][0].content.contains("collaborative"));
-        assert_eq!(seen[0][1].content, "first question");
-        assert_eq!(seen[1].len(), 4);
-        assert!(seen[1][0].content.contains("clarifying questions"));
-        assert_eq!(seen[1][1].content, "first question");
-        assert_eq!(seen[1][2].content, "first answer");
-        assert_eq!(seen[1][3].content, "second question");
+        assert_eq!(seen[0].len(), 1);
+        assert_eq!(seen[0][0].content, "first question");
+        assert_eq!(seen[1].len(), 3);
+        assert_eq!(seen[1][0].content, "first question");
+        assert_eq!(seen[1][1].content, "first answer");
+        assert_eq!(seen[1][2].content, "second question");
         assert_eq!(agent.history().len(), 4);
     }
 
@@ -395,11 +383,6 @@ mod tests {
         assert_eq!(seen[0].len(), 2);
         assert_eq!(seen[0][0].role, Role::System);
         assert_eq!(seen[0][0].content, "Ты эксперт по Civilization 6.");
-        assert!(
-            !seen[0]
-                .iter()
-                .any(|message| message.content.contains("local conversational agent"))
-        );
         assert_eq!(seen[0][1].content, "Как играть за Византию?");
     }
 
@@ -481,10 +464,9 @@ mod tests {
 
         let seen = client.seen_messages.lock().expect("seen messages");
         assert_eq!(seen.len(), 2);
-        assert_eq!(seen[0].len(), 14);
-        assert!(seen[0][0].content.contains("collaborative"));
-        assert_eq!(seen[0][1].content, "history 8");
-        assert_eq!(seen[0][13].content, "current question");
+        assert_eq!(seen[0].len(), 13);
+        assert_eq!(seen[0][0].content, "history 8");
+        assert_eq!(seen[0][12].content, "current question");
         assert_eq!(seen[1].len(), 2);
         assert!(seen[1][1].content.contains("history 0"));
         assert_eq!(
