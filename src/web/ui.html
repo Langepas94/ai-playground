@@ -456,6 +456,16 @@
       color: #555;
     }
     .debug-doc-row a { font-weight: 500; }
+    .debug-status {
+      font-size: 11px;
+      font-weight: 600;
+      border-radius: 8px;
+      padding: 1px 7px;
+      vertical-align: middle;
+    }
+    .debug-status.ok   { background: #d4f5e2; color: #1a6b3a; }
+    .debug-status.err  { background: #fde8e8; color: #b91c1c; }
+    .debug-status.pending { background: #fef3cd; color: #856404; }
     details.debug { border: 0; background: #fff; }
     details.debug summary {
       cursor: pointer;
@@ -774,6 +784,14 @@
           <details id="debugDetails" class="debug" open>
             <summary>JSON отладка</summary>
             <div class="debug-grid">
+              <div class="debug-item">
+                <h3>Запрос к серверу <span id="serverReqStatus" class="debug-status"></span></h3>
+                <pre id="serverRequest">{}</pre>
+              </div>
+              <div class="debug-item">
+                <h3>Ответ сервера <span id="serverRespStatus" class="debug-status"></span></h3>
+                <pre id="serverResponse">{}</pre>
+              </div>
               <div class="debug-item">
                 <h3>Запрос к provider API</h3>
                 <pre id="providerRequest">{}</pre>
@@ -1180,6 +1198,38 @@
       $('providerResponse').textContent = prettyJson(debug?.provider_response);
     }
 
+    function setServerDebug(payload, responseText, httpStatus) {
+      // Truncate attachment content in the displayed payload to keep it readable
+      const displayPayload = payload ? JSON.parse(JSON.stringify(payload)) : null;
+      if (displayPayload?.attachments) {
+        displayPayload.attachments = displayPayload.attachments.map((a) => ({
+          name: a.name,
+          content: a.content.length > 120 ? a.content.slice(0, 120) + `… [${a.content.length} chars]` : a.content,
+        }));
+      }
+      $('serverRequest').textContent = prettyJson(displayPayload);
+      $('serverResponse').textContent = responseText ?? '';
+
+      const reqBadge = $('serverReqStatus');
+      const respBadge = $('serverRespStatus');
+      if (httpStatus === null) {
+        reqBadge.textContent = 'отправляется…';
+        reqBadge.className = 'debug-status pending';
+        respBadge.textContent = '';
+        respBadge.className = 'debug-status';
+      } else if (httpStatus >= 200 && httpStatus < 300) {
+        reqBadge.textContent = 'отправлен';
+        reqBadge.className = 'debug-status ok';
+        respBadge.textContent = httpStatus;
+        respBadge.className = 'debug-status ok';
+      } else {
+        reqBadge.textContent = 'отправлен';
+        reqBadge.className = 'debug-status ok';
+        respBadge.textContent = httpStatus ?? 'network error';
+        respBadge.className = 'debug-status err';
+      }
+    }
+
     function renderChatHistory() {
       updateAgentStatus();
       const visibleMessages = chatHistory.filter((message) => message.role !== 'system');
@@ -1459,9 +1509,28 @@
       setStatus('Жду ответ модели...');
       setDebug(null);
       setMetrics(null);
+      const payload = chatPayload();
+      setServerDebug(payload, null, null); // показываем payload до отправки
+      let response;
+      let rawText = '';
       try {
-        const payload = chatPayload();
-        const data = await requestJson('/api/agent/chat', payload);
+        try {
+          response = await fetch('/api/agent/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+        } catch {
+          setServerDebug(payload, 'network error — сервер недоступен', null);
+          throw new Error('Локальный сервер недоступен. Запустите `ai web` и обновите страницу.');
+        }
+        rawText = await response.text();
+        let data = {};
+        try { data = rawText ? JSON.parse(rawText) : {}; } catch { data = { error: rawText || 'Request failed' }; }
+        setServerDebug(payload, rawText, response.status);
+        if (!response.ok) {
+          throw new Error(data.error || rawText || 'Request failed');
+        }
         chatSessionId = data.session_id || chatSessionId;
         forceNewSession = false;
         if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
