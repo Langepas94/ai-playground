@@ -4,7 +4,11 @@
 
 ## Файлы
 
-- `mod.rs` - routes, handlers, DTO, web error mapping, tests.
+- `mod.rs` - Axum server, routes, handlers, request/response DTO и tests.
+- `error.rs` - преобразование `AppError` в HTTP status + JSON error body.
+- `parameters.rs` - web-facing constraints для provider response controls.
+- `tokens.rs` - web token override/status/lookup rules.
+- `util.rs` - маленькие text/parse helpers для request DTO.
 - `ui.html` - HTML/CSS/JS целиком; подключается через `include_str!("ui.html")`.
 
 ## Routes
@@ -38,12 +42,12 @@ ChatWebRequest
 ## Где искать баг
 
 - UI не видит provider/model defaults: `providers()` handler и `applyProviderDefaults()` в `ui.html`.
-- Токен из web не используется: `resolve_web_token()`.
-- Статус/сохранение токена в web: `token_status()`, `token_save()`, `web_token_present()`.
+- Токен из web не используется: `tokens::resolve_web_token()`.
+- Статус/сохранение токена в web: `token_status()`, `token_save()`, `tokens::web_token_present()`.
 - Сессия web не продолжается: `chat_session()`, `chat()`, `LocalSessionStore`.
 - Метрики запроса/диалога неверные: `TokenUsage`, `add_request_metrics()`, `setMetrics()`, `setSessionMetrics()`.
 - Debug JSON странный: `ChatDebugView` и provider debug в `ChatAgent`.
-- Ошибка приходит без понятного текста: `WebError::into_response()`.
+- Ошибка приходит без понятного текста: `error::WebError::into_response()`.
 
 ## Инварианты UI
 
