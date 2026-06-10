@@ -1099,6 +1099,11 @@
       </article>`;
     }
 
+    function restoreSystemPromptFromHistory(messages) {
+      const systemMessage = (messages || []).find((message) => message.role === 'system');
+      $('systemPrompt').value = systemMessage?.content || '';
+    }
+
     function updateAgentStatus() {
       $('sessionLabel').textContent = chatSessionId ? chatSessionId.slice(0, 8) : 'новая';
       const visibleMessages = chatHistory.filter((message) => message.role !== 'system').length;
@@ -1113,12 +1118,14 @@
         chatSessionId = data.session_id || null;
         forceNewSession = false;
         chatHistory = data.messages || [];
+        restoreSystemPromptFromHistory(chatHistory);
         setSessionMetrics(data.metrics);
         if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
         renderChatHistory();
       } catch (error) {
         chatSessionId = null;
         chatHistory = [];
+        restoreSystemPromptFromHistory(chatHistory);
         setSessionMetrics(null);
         renderChatHistory();
         setStatus(error.message, true);
@@ -1131,6 +1138,7 @@
       chatSessionId = data.session_id || null;
       forceNewSession = false;
       chatHistory = data.messages || [];
+      restoreSystemPromptFromHistory(chatHistory);
       setMetrics(null);
       setSessionMetrics(data.metrics);
       if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
@@ -1335,6 +1343,7 @@
         forceNewSession = false;
         if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
         chatHistory = data.messages || chatHistory;
+        restoreSystemPromptFromHistory(chatHistory);
         renderChatHistory();
         $('prompt').value = '';
         setMetrics(data.metrics);
