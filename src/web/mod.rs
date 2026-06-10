@@ -2,7 +2,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     response::Html,
     routing::{get, post},
 };
@@ -58,6 +58,7 @@ pub async fn serve(addr: SocketAddr) -> Result<(), AppError> {
         .route("/api/agent/chat", post(chat))
         .route("/api/chat/session", post(chat_session))
         .route("/api/chat", post(chat))
+        .layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // 50 MB — для вложений
         .with_state(AppState {
             client,
             secrets,
