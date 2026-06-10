@@ -8,6 +8,7 @@ use crate::{
 };
 
 use super::memory::{AgentMemory, MemoryConfig, format_messages_for_summary};
+use super::token_accounting::{TokenEstimate, estimate_exchange};
 use tokio::time::{Duration, timeout};
 
 pub const LOCAL_SESSION_AGENT_ID: &str = "local-session-agent";
@@ -131,6 +132,22 @@ impl ChatAgent {
 
     pub fn control(&self) -> &ResponseControl {
         &self.control
+    }
+
+    pub fn estimate_next_exchange(
+        &self,
+        prompt: &str,
+        response_text: &str,
+        context_limit: u32,
+    ) -> TokenEstimate {
+        let request = self.request_with_user_prompt(prompt.to_string());
+        estimate_exchange(
+            &request.messages,
+            &self.history,
+            response_text,
+            context_limit,
+            self.pricing.as_ref(),
+        )
     }
 
     fn request_with_user_prompt(&self, prompt: String) -> ChatRequest {
@@ -384,6 +401,48 @@ mod tests {
                 .any(|message| message.content.contains("local conversational agent"))
         );
         assert_eq!(seen[0][1].content, "Как играть за Византию?");
+    }
+
+    #[test]
+    fn agent_estimates_next_exchange_from_current_history() {
+        let agent = ChatAgent::new(
+            test_profile(),
+            "secret".to_string(),
+            vec![
+                ChatMessage {
+                    role: Role::System,
+                    content: "Ты эксперт по Civilization 6.".to_string(),
+                },
+                ChatMessage {
+                    role: Role::User,
+                    content: "Как играть за Византию?".to_string(),
+                },
+                ChatMessage {
+                    role: Role::Assistant,
+                    content: "Через религию и кавалерию.".to_string(),
+                },
+            ],
+            AgentMemory::default(),
+            ResponseControl::uncontrolled(),
+            Some(ModelPricing {
+                currency: "USD".to_string(),
+                input_per_million: Some(1.0),
+                output_per_million: 4.0,
+                cache_hit_input_per_million: None,
+                cache_miss_input_per_million: None,
+            }),
+            None,
+        );
+
+        let estimate = agent.estimate_next_exchange(
+            "Что делать, если я отстал по науке?",
+            "Сократи религиозные вложения и подними кампусы.",
+            512,
+        );
+
+        assert!(estimate.current_request_tokens > estimate.history_tokens);
+        assert!(estimate.response_tokens > 0);
+        assert!(estimate.cost.expect("cost").amount > 0.0);
     }
 
     #[tokio::test]

@@ -37,6 +37,8 @@ pub enum Command {
     Compare(CompareArgs),
     #[command(about = "Compare state-based, instruction-based, and combined dialogue stopping")]
     CompareGoal(CompareGoalArgs),
+    #[command(about = "Show how agent tokens, cost, and context overflow grow across dialogue")]
+    TokenDemo(TokenDemoArgs),
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -136,6 +138,56 @@ pub struct CompareGoalArgs {
     pub pricing: PricingArgs,
     #[command(flatten)]
     pub billing: BillingArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct TokenDemoArgs {
+    #[arg(
+        long,
+        default_value_t = 4096,
+        help = "Model context window used by the demo"
+    )]
+    pub context_limit: u32,
+    #[arg(
+        long,
+        default_value_t = 3,
+        help = "Turns in the short dialogue scenario"
+    )]
+    pub short_turns: usize,
+    #[arg(
+        long,
+        default_value_t = 7,
+        help = "Turns in the long dialogue scenario"
+    )]
+    pub long_turns: usize,
+    #[arg(
+        long,
+        default_value_t = 80,
+        help = "Max turns in the overflow scenario"
+    )]
+    pub overflow_turns: usize,
+    #[arg(long, default_value_t = 60, help = "Estimated user tokens per turn")]
+    pub user_tokens_per_turn: u32,
+    #[arg(
+        long,
+        default_value_t = 180,
+        help = "Estimated model response tokens per turn"
+    )]
+    pub response_tokens_per_turn: u32,
+    #[arg(
+        long,
+        default_value_t = 1.25,
+        help = "Demo input token price per 1M tokens"
+    )]
+    pub input_price_per_million: f64,
+    #[arg(
+        long,
+        default_value_t = 10.0,
+        help = "Demo output token price per 1M tokens"
+    )]
+    pub output_price_per_million: f64,
+    #[arg(long, default_value = "USD", help = "Demo pricing currency label")]
+    pub price_currency: String,
 }
 
 #[derive(Debug, Args)]

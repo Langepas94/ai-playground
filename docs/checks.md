@@ -13,6 +13,7 @@ rtk cargo test
 rtk cargo run -- profile list
 rtk cargo run -- config path
 rtk cargo run -- doctor
+rtk cargo run --bin ai -- token-demo --context-limit 4096
 ```
 
 ## Web smoke

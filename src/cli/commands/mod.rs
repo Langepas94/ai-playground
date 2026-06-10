@@ -17,3 +17,5 @@ pub use models::run_models_list;
 pub use profile::{run_profile_add, run_profile_list, run_profile_remove, run_profile_use};
 pub use setup::run_setup;
 pub use token::{run_token_delete, run_token_set};
+pub mod token_demo;
+pub use token_demo::run_token_demo;

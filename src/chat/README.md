@@ -9,6 +9,7 @@
 - `session.rs` - интерактивный `ai chat`, slash-команды и terminal I/O.
 - `goal.rs` - `ConversationGoal`, `GoalState`, stop modes и сравнение goal режимов.
 - `memory.rs` - `AgentMemory`, summary и recent-window context layering.
+- `token_accounting.rs` - локальная оценка токенов запроса, истории, ответа, стоимости и overflow по context limit.
 - `store.rs` - `LocalSessionStore`: TOON-сессии, memory sidecar, индекс последней сессии.
 - `history.rs` - сохранение истории в файл.
 - `AGENT_RUNTIME.md` - подробная модель локального agent runtime.
@@ -48,3 +49,4 @@ interactive_chat()
 - Сессия не восстанавливается: `store.rs`.
 - Goal завершается рано/поздно: `goal.rs`.
 - Метрики не печатаются или выглядят неверно: `format_request_metrics` в `mod.rs`.
+- Локальная оценка токенов/overflow неверная: `token_accounting.rs` и `ChatAgent::estimate_next_exchange()`.
