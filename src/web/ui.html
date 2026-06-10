@@ -413,6 +413,12 @@
       background: #fff1f2;
       color: #8f1d2c;
     }
+    .message.streaming {
+      justify-self: start;
+      background: #ffffff;
+      color: #172033;
+      opacity: 0.85;
+    }
     .message-role {
       color: inherit;
       opacity: .62;
@@ -1512,12 +1518,24 @@
       setDebug(null);
       setMetrics(null);
       const payload = chatPayload();
-      setServerDebug(payload, null, null); // показываем payload до отправки
-      let response;
-      let rawText = '';
+      setServerDebug(payload, null, null);
+
+      // Оптимистично добавляем сообщение пользователя в историю
+      const userText = $('prompt').value;
+      const userMsg = { role: 'user', content: userText };
+      chatHistory = [...chatHistory, userMsg];
+      renderChatHistory();
+      $('prompt').value = '';
+      pendingAttachments = [];
+      renderAttachmentChips();
+
+      let assistantEl = null; // DOM-элемент для стриминга
+      let accText = '';
+
       try {
+        let response;
         try {
-          response = await fetch('/api/agent/chat', {
+          response = await fetch('/api/agent/chat/stream', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
@@ -1526,33 +1544,90 @@
           setServerDebug(payload, 'network error — сервер недоступен', null);
           throw new Error('Локальный сервер недоступен. Запустите `ai web` и обновите страницу.');
         }
-        rawText = await response.text();
-        let data = {};
-        try { data = rawText ? JSON.parse(rawText) : {}; } catch { data = { error: rawText || 'Request failed' }; }
-        setServerDebug(payload, rawText, response.status);
+
+        setServerDebug(payload, `HTTP ${response.status}`, response.status);
+
         if (!response.ok) {
-          throw new Error(data.error || rawText || 'Request failed');
+          const errText = await response.text();
+          setServerDebug(payload, errText, response.status);
+          throw new Error(errText || 'Request failed');
         }
-        chatSessionId = data.session_id || chatSessionId;
-        forceNewSession = false;
-        if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
-        chatHistory = data.messages || chatHistory;
-        restoreSystemPromptFromHistory(chatHistory);
-        renderChatHistory();
-        $('prompt').value = '';
-        pendingAttachments = [];
-        renderAttachmentChips();
-        setMetrics(data.metrics);
-        setSessionMetrics(data.session_metrics);
+
+        // Создаём заглушку для ответа ассистента
+        assistantEl = appendStreamingMessage();
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let sseBuffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          sseBuffer += decoder.decode(value, { stream: true });
+          const lines = sseBuffer.split('\n');
+          sseBuffer = lines.pop(); // последняя неполная строка
+
+          let eventType = null;
+          let eventData = null;
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              eventType = line.slice(7).trim();
+            } else if (line.startsWith('data: ')) {
+              eventData = line.slice(6);
+            } else if (line === '' && eventType && eventData !== null) {
+              if (eventType === 'token') {
+                accText += eventData;
+                updateStreamingMessage(assistantEl, accText);
+              } else if (eventType === 'done') {
+                const data = JSON.parse(eventData);
+                chatSessionId = data.session_id || chatSessionId;
+                forceNewSession = false;
+                if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
+                chatHistory = data.messages || chatHistory;
+                restoreSystemPromptFromHistory(chatHistory);
+                renderChatHistory(); // финальный рендер с метаданными
+                setSessionMetrics(data.session_metrics);
+                setStatus('Готово');
+              } else if (eventType === 'error') {
+                throw new Error(eventData);
+              }
+              eventType = null;
+              eventData = null;
+            }
+          }
+        }
         await refreshTokenStatus();
-        setDebug(data.debug);
-        setStatus(data.finish_reason ? `Готово: ${data.finish_reason}` : 'Готово');
       } catch (error) {
+        // Откатываем оптимистичное сообщение пользователя если ответа не было
+        if (!accText) {
+          chatHistory = chatHistory.slice(0, -1);
+          $('prompt').value = userText;
+        }
+        if (assistantEl) assistantEl.remove();
+        renderChatHistory();
         renderConversationError(error.message);
         setStatus(error.message, true);
       } finally {
         $('send').disabled = false;
       }
+    }
+
+    function appendStreamingMessage() {
+      const conv = $('conversation');
+      const empty = conv.querySelector('.conversation-empty');
+      if (empty) empty.remove();
+      const div = document.createElement('div');
+      div.className = 'message assistant streaming';
+      div.textContent = '▍';
+      conv.appendChild(div);
+      conv.scrollTop = conv.scrollHeight;
+      return div;
+    }
+
+    function updateStreamingMessage(el, text) {
+      el.textContent = text + '▍';
+      const conv = $('conversation');
+      conv.scrollTop = conv.scrollHeight;
     }
 
     const PROVIDER_DOCS = {

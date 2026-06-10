@@ -3,11 +3,14 @@ use std::{net::SocketAddr, sync::Arc};
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, State},
-    response::Html,
+    response::{Html, sse::{Event, Sse}},
     routing::{get, post},
 };
+use futures_util::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 
 use crate::{
     chat::{
@@ -56,6 +59,7 @@ pub async fn serve(addr: SocketAddr) -> Result<(), AppError> {
         .route("/api/models", post(models))
         .route("/api/agent/session", post(chat_session))
         .route("/api/agent/chat", post(chat))
+        .route("/api/agent/chat/stream", post(chat_stream))
         .route("/api/chat/session", post(chat_session))
         .route("/api/chat", post(chat))
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // 50 MB — для вложений
@@ -232,6 +236,98 @@ async fn chat(
             provider_response: provider_debug.response,
         },
     }))
+}
+
+async fn chat_stream(
+    State(state): State<AppState>,
+    Json(request): Json<ChatWebRequest>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, WebError> {
+    let agent_spec = selected_agent(request.agent_id.as_deref())?;
+    let profile = request.profile()?;
+    validate_base_url(&profile.provider.to_string(), &profile.base_url)?;
+    if request.prompt.trim().is_empty() {
+        return Err(AppError::InvalidInput("Prompt is required".to_string()).into());
+    }
+    let prompt = build_web_prompt(&request.prompt, request.attachments.as_deref());
+    let token = resolve_web_token(
+        state.secrets.as_ref(),
+        &profile,
+        &request.token,
+        request.token_provider.as_deref(),
+    )?;
+    let session_key = web_session_key(agent_spec.id, &profile.provider.to_string(), &profile.model);
+    let session = if request.new_session {
+        state.sessions.create_session()?
+    } else {
+        match request.session_id.as_deref().and_then(blank_str_to_none) {
+            Some(session_id) => state.sessions.load_session(session_id)?,
+            None => state.sessions.load_or_create_latest(&session_key)?,
+        }
+    };
+    let memory = state.sessions.load_memory(&session.id)?;
+    let control = request.control.clone().into_control();
+    let mut agent = ChatAgent::new(
+        profile.clone(),
+        token.clone(),
+        request.initial_history(session.messages),
+        memory,
+        control,
+        request.pricing.clone().and_then(WebPricing::into_model_pricing),
+        request.billing.clone().and_then(WebBilling::into_billing_lookup),
+    );
+    let chat_request = agent.build_stream_request(prompt.clone());
+    let session_id = session.id.clone();
+    let session_metrics_before = session.metrics.clone();
+
+    let (tx, rx) = mpsc::unbounded_channel::<String>();
+    let client = state.client.clone();
+    let sessions = state.sessions.clone();
+
+    tokio::spawn(async move {
+        let tx_token = tx.clone();
+        let result = client
+            .stream_chat_completion(&profile, &token, chat_request, move |chunk| {
+                let _ = tx_token.send(chunk.to_string());
+            })
+            .await;
+        match result {
+            Ok(response) => {
+                let assistant_text = response.text.clone();
+                let session_metrics =
+                    add_request_metrics(&session_metrics_before, &response.metrics);
+                agent.record_stream_response(prompt, assistant_text);
+                let _ = sessions.save_session(&session_key, &session_id, agent.history());
+                let _ = sessions.save_metrics(&session_id, &session_metrics);
+                let _ = sessions.save_memory(&session_id, agent.memory());
+                let done_event = serde_json::json!({
+                    "done": true,
+                    "session_id": session_id,
+                    "session_metrics": session_metrics,
+                    "messages": agent.history(),
+                });
+                let _ = tx.send(format!("\x00DONE\x00{done_event}"));
+            }
+            Err(err) => {
+                let _ = tx.send(format!("\x00ERR\x00{err}"));
+            }
+        }
+    });
+
+    let sse_stream = stream::unfold(rx, |mut rx| async move {
+        let msg = rx.recv().await?;
+        if let Some(payload) = msg.strip_prefix("\x00DONE\x00") {
+            let event = Event::default().event("done").data(payload.to_string());
+            Some((Ok(event), rx))
+        } else if let Some(payload) = msg.strip_prefix("\x00ERR\x00") {
+            let event = Event::default().event("error").data(payload.to_string());
+            Some((Ok(event), rx))
+        } else {
+            let event = Event::default().event("token").data(msg);
+            Some((Ok(event), rx))
+        }
+    });
+
+    Ok(Sse::new(sse_stream))
 }
 
 async fn chat_session(
