@@ -434,16 +434,19 @@
       border-radius: 8px;
       min-height: 32px;
     }
+    .model-meta-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: #666;
+      margin-top: -4px;
+    }
+    .model-meta-label { white-space: nowrap; }
     .context-badge {
-      font-size: 11px;
+      font-size: 12px;
       font-weight: 600;
       color: #3a5cc7;
-      background: #dde8ff;
-      border: 1px solid #b3c9f9;
-      border-radius: 10px;
-      padding: 2px 9px;
-      white-space: nowrap;
-      flex-shrink: 0;
     }
     .debug-doc-row {
       display: flex;
@@ -622,7 +625,6 @@
         </div>
         <div class="composer">
           <div id="composerMeta" class="composer-meta" style="display:none">
-            <span id="contextWindowBadge" class="context-badge" style="display:none"></span>
             <div id="attachmentChips" class="attachment-chips"></div>
           </div>
           <div class="prompt-row">
@@ -653,6 +655,10 @@
             <label>agent<select id="agentMode"></select></label>
             <label>Provider<select id="provider"></select></label>
             <label>Model<select id="model"></select></label>
+            <div class="model-meta-row">
+              <span class="model-meta-label">Контекст:</span>
+              <span id="contextWindowBadge" class="context-badge">—</span>
+            </div>
             <div class="actions">
               <button id="loadModels" class="secondary" type="button">Загрузить модели</button>
             </div>
@@ -785,19 +791,11 @@
             <summary>JSON отладка</summary>
             <div class="debug-grid">
               <div class="debug-item">
-                <h3>Запрос к серверу <span id="serverReqStatus" class="debug-status"></span></h3>
-                <pre id="serverRequest">{}</pre>
-              </div>
-              <div class="debug-item">
-                <h3>Ответ сервера <span id="serverRespStatus" class="debug-status"></span></h3>
-                <pre id="serverResponse">{}</pre>
-              </div>
-              <div class="debug-item">
-                <h3>Запрос к provider API</h3>
+                <h3>Запрос <span id="serverReqStatus" class="debug-status"></span></h3>
                 <pre id="providerRequest">{}</pre>
               </div>
               <div class="debug-item">
-                <h3>Ответ provider API</h3>
+                <h3>Ответ <span id="serverRespStatus" class="debug-status"></span></h3>
                 <pre id="providerResponse">{}</pre>
               </div>
             </div>
@@ -1199,7 +1197,7 @@
     }
 
     function setServerDebug(payload, responseText, httpStatus) {
-      // Truncate attachment content in the displayed payload to keep it readable
+      // Show server payload as the request until provider data arrives
       const displayPayload = payload ? JSON.parse(JSON.stringify(payload)) : null;
       if (displayPayload?.attachments) {
         displayPayload.attachments = displayPayload.attachments.map((a) => ({
@@ -1207,8 +1205,8 @@
           content: a.content.length > 120 ? a.content.slice(0, 120) + `… [${a.content.length} chars]` : a.content,
         }));
       }
-      $('serverRequest').textContent = prettyJson(displayPayload);
-      $('serverResponse').textContent = responseText ?? '';
+      $('providerRequest').textContent = prettyJson(displayPayload);
+      $('providerResponse').textContent = responseText ?? '';
 
       const reqBadge = $('serverReqStatus');
       const respBadge = $('serverRespStatus');
@@ -1218,13 +1216,13 @@
         respBadge.textContent = '';
         respBadge.className = 'debug-status';
       } else if (httpStatus >= 200 && httpStatus < 300) {
-        reqBadge.textContent = 'отправлен';
+        reqBadge.textContent = httpStatus;
         reqBadge.className = 'debug-status ok';
         respBadge.textContent = httpStatus;
         respBadge.className = 'debug-status ok';
       } else {
-        reqBadge.textContent = 'отправлен';
-        reqBadge.className = 'debug-status ok';
+        reqBadge.textContent = httpStatus ?? 'network error';
+        reqBadge.className = 'debug-status err';
         respBadge.textContent = httpStatus ?? 'network error';
         respBadge.className = 'debug-status err';
       }
@@ -1439,13 +1437,14 @@
       const ctx = modelContextById.get(model);
       const badge = $('contextWindowBadge');
       if (ctx) {
-        badge.style.display = '';
-        badge.textContent = `ctx ${formatTokenCount(ctx)}`;
-        badge.title = `Максимальный контекст модели: ${ctx.toLocaleString()} токенов`;
+        badge.textContent = formatTokenCount(ctx) + ' токенов';
+        badge.title = `Максимальный контекст: ${ctx.toLocaleString()} токенов`;
+        badge.style.color = '';
       } else {
-        badge.style.display = 'none';
+        badge.textContent = '— загрузите модели';
+        badge.style.color = '#aaa';
+        badge.title = '';
       }
-      updateComposerMeta();
     }
 
     function formatTokenCount(n) {
