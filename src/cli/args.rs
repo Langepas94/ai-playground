@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
 
@@ -102,6 +103,12 @@ pub struct AskArgs {
     pub prompt: String,
     #[arg(long)]
     pub profile: Option<String>,
+    #[arg(
+        long,
+        action = clap::ArgAction::Append,
+        help = "Path to a text file whose content is appended to the prompt; can be provided multiple times"
+    )]
+    pub file: Vec<PathBuf>,
     #[command(flatten)]
     pub control: ResponseControlArgs,
     #[command(flatten)]

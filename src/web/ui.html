@@ -207,6 +207,52 @@
       height: 100%;
       min-width: 132px;
     }
+    .icon-btn {
+      min-width: unset !important;
+      width: 38px;
+      font-size: 18px;
+      padding: 0;
+      height: 100%;
+      flex-shrink: 0;
+    }
+    .attachment-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 2px 0;
+    }
+    .attachment-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: #e8f0fe;
+      border: 1px solid #b3c9f9;
+      border-radius: 14px;
+      padding: 2px 10px 2px 10px;
+      font-size: 12px;
+      color: #1a3a6e;
+      max-width: 220px;
+    }
+    .attachment-chip span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .attachment-chip button {
+      background: none;
+      border: none;
+      padding: 0;
+      margin: 0;
+      cursor: pointer;
+      color: #6b7f9e;
+      font-size: 14px;
+      line-height: 1;
+      min-width: unset;
+      min-height: unset;
+      width: auto;
+      height: auto;
+    }
+    .attachment-chip button:hover { color: #c0392b; }
     .inspector-tabs {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -520,10 +566,13 @@
           <div class="prompt-row">
             <label><textarea id="prompt" placeholder="Введите запрос к модели"></textarea></label>
             <div class="send-row">
+              <button id="attachBtn" class="secondary icon-btn" type="button" title="Прикрепить файл">📎</button>
+              <input id="fileInput" type="file" accept="text/*,.md,.txt,.rs,.py,.js,.ts,.json,.toml,.yaml,.yml,.csv,.xml,.html,.css,.sh,.log" multiple style="display:none">
               <button id="send" type="button">Отправить</button>
               <button id="clear" class="secondary" type="button">Новая сессия</button>
             </div>
           </div>
+          <div id="attachmentChips" class="attachment-chips" style="display:none"></div>
         </div>
       </section>
 
@@ -695,6 +744,7 @@
     let chatHistory = [];
     let chatSessionId = null;
     let forceNewSession = false;
+    let pendingAttachments = []; // [{name, content}]
 
     function pricingCacheKey(provider, modelId) {
       return `ai_pricing:${provider}:${modelId}`;
@@ -951,6 +1001,7 @@
         model: selectedModel(),
         system_prompt: textValue('systemPrompt'),
         prompt: $('prompt').value,
+        attachments: pendingAttachments.length ? pendingAttachments.map(a => ({name: a.name, content: a.content})) : null,
         session_id: chatSessionId,
         new_session: forceNewSession,
         messages: chatHistory,
@@ -1336,6 +1387,8 @@
         restoreSystemPromptFromHistory(chatHistory);
         renderChatHistory();
         $('prompt').value = '';
+        pendingAttachments = [];
+        renderAttachmentChips();
         setMetrics(data.metrics);
         setSessionMetrics(data.session_metrics);
         await refreshTokenStatus();
@@ -1348,6 +1401,59 @@
         $('send').disabled = false;
       }
     }
+
+    function renderAttachmentChips() {
+      const container = $('attachmentChips');
+      container.innerHTML = '';
+      if (pendingAttachments.length === 0) {
+        container.style.display = 'none';
+        return;
+      }
+      container.style.display = 'flex';
+      pendingAttachments.forEach((att, idx) => {
+        const chip = document.createElement('div');
+        chip.className = 'attachment-chip';
+        const nameSpan = document.createElement('span');
+        nameSpan.title = att.name;
+        nameSpan.textContent = att.name;
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.textContent = '×';
+        removeBtn.title = 'Убрать';
+        removeBtn.addEventListener('click', () => {
+          pendingAttachments.splice(idx, 1);
+          renderAttachmentChips();
+        });
+        chip.appendChild(nameSpan);
+        chip.appendChild(removeBtn);
+        container.appendChild(chip);
+      });
+    }
+
+    function readFilesAsText(files) {
+      return Promise.all(Array.from(files).map(file =>
+        new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = e => resolve({ name: file.name, content: e.target.result });
+          reader.onerror = () => reject(new Error(`Не удалось прочитать ${file.name}`));
+          reader.readAsText(file);
+        })
+      ));
+    }
+
+    $('attachBtn').addEventListener('click', () => $('fileInput').click());
+    $('fileInput').addEventListener('change', async (e) => {
+      const files = e.target.files;
+      if (!files || files.length === 0) return;
+      try {
+        const loaded = await readFilesAsText(files);
+        pendingAttachments.push(...loaded);
+        renderAttachmentChips();
+      } catch (err) {
+        setStatus(err.message, true);
+      }
+      e.target.value = '';
+    });
 
     providerSelect.addEventListener('change', () => {
       resetTokenOverrideForProvider();
