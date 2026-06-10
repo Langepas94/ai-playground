@@ -194,7 +194,8 @@
       gap: 10px;
       align-items: stretch;
     }
-    .prompt-row label {
+    .prompt-row label,
+    .prompt-row .textarea-wrap {
       min-width: 0;
     }
     .prompt-row .send-row {
@@ -207,14 +208,28 @@
       height: 100%;
       min-width: 132px;
     }
-    .icon-btn {
-      min-width: unset !important;
-      width: 38px;
-      font-size: 18px;
-      padding: 0;
-      height: 100%;
-      flex-shrink: 0;
+    .textarea-wrap {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
     }
+    .textarea-wrap textarea {
+      padding-bottom: 32px;
+    }
+    .icon-btn {
+      position: absolute;
+      bottom: 6px;
+      right: 6px;
+      min-width: unset !important;
+      width: 28px;
+      height: 28px;
+      font-size: 15px;
+      padding: 0;
+      line-height: 1;
+      opacity: 0.6;
+    }
+    .icon-btn:hover { opacity: 1; }
     .attachment-chips {
       display: flex;
       flex-wrap: wrap;
@@ -408,6 +423,17 @@
     .message-content {
       min-width: 0;
     }
+    .debug-doc-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      font-size: 12px;
+      border-bottom: 1px solid var(--line);
+      background: #f9fbfc;
+      color: #555;
+    }
+    .debug-doc-row a { font-weight: 500; }
     details.debug { border: 0; background: #fff; }
     details.debug summary {
       cursor: pointer;
@@ -564,10 +590,12 @@
         </div>
         <div class="composer">
           <div class="prompt-row">
-            <label><textarea id="prompt" placeholder="Введите запрос к модели"></textarea></label>
-            <div class="send-row">
+            <div class="textarea-wrap">
+              <textarea id="prompt" placeholder="Введите запрос к модели"></textarea>
               <button id="attachBtn" class="secondary icon-btn" type="button" title="Прикрепить файл">📎</button>
               <input id="fileInput" type="file" accept="text/*,.md,.txt,.rs,.py,.js,.ts,.json,.toml,.yaml,.yml,.csv,.xml,.html,.css,.sh,.log" multiple style="display:none">
+            </div>
+            <div class="send-row">
               <button id="send" type="button">Отправить</button>
               <button id="clear" class="secondary" type="button">Новая сессия</button>
             </div>
@@ -714,6 +742,10 @@
         </div>
 
         <div id="tab-debug" class="inspector-pane">
+          <div class="debug-doc-row">
+            <span>Документация API:</span>
+            <a id="providerDocLink" href="#" target="_blank" rel="noopener">—</a>
+          </div>
           <details id="debugDetails" class="debug" open>
             <summary>JSON отладка</summary>
             <div class="debug-grid">
@@ -1346,6 +1378,7 @@
       providerSelect.innerHTML = providers.map((item) => `<option value="${item.id}">${item.name}</option>`).join('');
       resetTokenOverrideForProvider();
       applyProviderDefaults();
+      updateProviderDocLink();
       await refreshTokenStatus();
       await loadChatSession();
       setStatus('Готово');
@@ -1399,6 +1432,27 @@
         setStatus(error.message, true);
       } finally {
         $('send').disabled = false;
+      }
+    }
+
+    const PROVIDER_DOCS = {
+      'openai-compatible': { label: 'OpenAI Chat Completions API', url: 'https://platform.openai.com/docs/api-reference/chat/create' },
+      'openrouter':        { label: 'OpenRouter API Reference',    url: 'https://openrouter.ai/docs/api-reference/overview' },
+      'deepseek':          { label: 'DeepSeek API Reference',      url: 'https://api-docs.deepseek.com/api/create-chat-completion' },
+      'gigachat':          { label: 'GigaChat API Reference',      url: 'https://developers.sber.ru/docs/ru/gigachat/api/reference/rest/post-chat' },
+      'kimi':              { label: 'Moonshot (Kimi) API Reference',url: 'https://platform.moonshot.cn/docs/api/chat' },
+    };
+
+    function updateProviderDocLink() {
+      const provider = currentProvider();
+      const doc = PROVIDER_DOCS[provider];
+      const link = $('providerDocLink');
+      if (doc) {
+        link.href = doc.url;
+        link.textContent = doc.label;
+      } else {
+        link.href = '#';
+        link.textContent = '—';
       }
     }
 
@@ -1458,6 +1512,7 @@
     providerSelect.addEventListener('change', () => {
       resetTokenOverrideForProvider();
       applyProviderDefaults();
+      updateProviderDocLink();
       loadChatSession();
     });
     document.querySelectorAll('.tab-button').forEach((button) => {
