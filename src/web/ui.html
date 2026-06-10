@@ -1488,14 +1488,16 @@
       setStatus('Загружаю модели...');
       try {
         const data = await requestJson('/api/models', providerPayload());
-        const current = selectedModel();
+        const modelBefore = selectedModel();
         const modelIds = data.models.map((model) => model.id);
-        const fallback = modelIds[0] || current;
-        setModelOptions(data.models, modelIds.includes(current) ? current : fallback);
+        const fallback = modelIds[0] || modelBefore;
+        setModelOptions(data.models, modelIds.includes(modelBefore) ? modelBefore : fallback);
         persistModelPricing();
-        $('customModel').value = '';
-        await loadChatSession();
         await refreshTokenStatus();
+        // Перезагружаем сессию только если модель изменилась
+        if (selectedModel() !== modelBefore) {
+          await loadChatSession();
+        }
         setStatus(data.models.length ? `Загружено моделей: ${data.models.length}; выбрана ${$('model').value}` : 'Провайдер вернул пустой список моделей');
       } catch (error) {
         setStatus(error.message, true);
