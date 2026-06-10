@@ -12,8 +12,8 @@ CLI / web UI
 
 ## С чего начинать расследование
 
-- CLI команда ведет себя странно: `src/cli/README.md`, затем конкретный файл в `src/cli/commands/`.
-- Web UI или JSON API сломаны: `src/web/README.md`, затем `src/web/mod.rs` и `src/web/ui.html`.
+- CLI команда ведет себя странно: `src/cli/README.md`, затем `src/cli/mod.rs` для dispatch или конкретный файл в `src/cli/commands/`.
+- Web UI или JSON API сломаны: `src/web/README.md`, затем handler в `src/web/mod.rs`, DTO рядом в этом же файле, token/error/parameter helpers в соседних модулях.
 - Ответ модели, payload, usage, cost или список моделей неверные: `src/providers/README.md`, затем `src/providers/openai_compatible.rs`.
 - История, память, goal mode или интерактивный чат работают не так: `src/chat/README.md`.
 - Профиль не находится, active profile неверный, TOML не читается: `src/config.rs`.
@@ -24,11 +24,11 @@ CLI / web UI
 ## Границы модулей
 
 - `cli/` только собирает пользовательский ввод и вызывает доменную логику.
-- `web/` держит Axum routes, request/response DTO и вшитый HTML.
+- `web/` держит Axum routes, request/response DTO, token/error/parameter helpers и вшитый HTML.
 - `chat/` управляет локальной историей, memory и сборкой контекста для модели.
 - `providers/` знает про HTTP provider API и нормализацию OpenAI-compatible payload.
-- `config.rs` пишет только TOML config, без секретов.
-- `secrets.rs` пишет только keychain/storage секретов, без config-логики сверх token refs.
+- `config.rs` пишет только TOML config, без секретов и provider HTTP.
+- `secrets.rs` пишет только keychain/storage секретов, без CLI/web ввода.
 
 ## Инварианты
 

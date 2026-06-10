@@ -4,7 +4,7 @@
 
 ## Как работать в этом репозитории
 
-- Проект маленький: сначала читай `src/README.md`, затем `src/cli/mod.rs`, `src/config.rs`, `src/secrets.rs`, `src/web/mod.rs`, потом уже меняй код.
+- Сначала читай `src/README.md`. Для CLI смотри `src/cli/README.md`, `src/cli/mod.rs`, затем нужный `src/cli/commands/*`. Для web смотри `src/web/README.md`, `src/web/mod.rs`, затем соседние `error.rs`/`parameters.rs`/`tokens.rs`/`util.rs`.
 - Все shell-команды запускай через `rtk`.
 - Не трогай пользовательские незакоммиченные файлы вроде `.DS_Store`.
 - Для ручных правок используй `apply_patch`.
@@ -27,10 +27,17 @@ rtk cargo test
 | Файл/Директория | Ответственность |
 |-----------------|----------------|
 | `src/README.md` | Карта исходников: куда идти при баге, где границы модулей, какие инварианты нельзя ломать. |
-| `src/cli/mod.rs` | `run()` — точка входа CLI, dispatch команд, shared helpers (prompt, select_profile_name, request_pricing). |
+| `src/cli/mod.rs` | `run()` — точка входа CLI и dispatch команд. |
 | `src/cli/args.rs` | Все `*Args` structs (clap), `ResponseControlArgs`, `PricingArgs`, `ConversationGoalArgs`. |
 | `src/cli/commands/` | По одному файлу на команду: `ask`, `chat`, `compare`, `setup`, `profile`, `token`, `models`, `doctor`, `config`. |
-| `src/web/mod.rs` | Axum server: `/api/providers`, `/api/models`, `/api/chat`. Типы запросов/ответов, тесты. |
+| `src/cli/input.rs` | Низкоуровневый stdin/prompt без config/provider знаний. |
+| `src/cli/profile_input.rs` | Интерактивный сбор профиля, provider, base_url и модели. |
+| `src/cli/pricing.rs` | Выбор/загрузка pricing для CLI-команд. |
+| `src/web/mod.rs` | Axum server: `/api/providers`, `/api/models`, `/api/chat`. Handlers, DTO, тесты. |
+| `src/web/error.rs` | Mapping `AppError` → HTTP status + JSON. |
+| `src/web/parameters.rs` | Ограничения response parameters для web формы. |
+| `src/web/tokens.rs` | Web token override/status/lookup. |
+| `src/web/util.rs` | Маленькие parse/blank helpers для web DTO. |
 | `src/web/ui.html` | Web UI — HTML/CSS/JS. Подключается через `include_str!("ui.html")`. Редактируется как обычный файл с подсветкой. |
 | `src/chat/` | Логика `ask_once`, `interactive_chat` (REPL), `compare_*`, `ConversationGoal`, `GoalState`, local agent runtime. |
 | `src/config.rs` | `AppConfig` (TOML): профили, активный профиль. Пути — `ai-playground` с legacy fallback на `aiteach`. |
@@ -71,7 +78,7 @@ CLI/web  →  ProfileConfig + token  →  ReqwestProviderClient
 2. `src/providers/openai_compatible.rs` — включить поле в payload.
 3. `src/cli/args.rs` — добавить флаг в `AskArgs`/`ChatArgs`.
 4. `src/cli/commands/` или `src/cli/mod.rs` — пробросить флаг в `ResponseControl`.
-5. `src/web/mod.rs` — добавить поле в JSON API.
+5. `src/web/mod.rs` — добавить поле в JSON API, а provider-specific ограничения при необходимости в `src/web/parameters.rs`.
 6. `src/web/ui.html` — добавить поле в HTML-форму.
 
 ## Инварианты

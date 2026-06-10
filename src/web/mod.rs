@@ -3,8 +3,7 @@ use std::{net::SocketAddr, sync::Arc};
 use axum::{
     Json, Router,
     extract::State,
-    http::{StatusCode, header},
-    response::{Html, IntoResponse, Response},
+    response::Html,
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -15,15 +14,25 @@ use crate::{
         AgentMemory, ChatAgent, LocalSessionStore, add_request_metrics, available_agents,
         selected_agent, web_session_key,
     },
-    config::{AppConfig, ProfileConfig, token_ref},
+    config::ProfileConfig,
     errors::AppError,
     providers::{
         AnswerFormat, BillingLookup, BillingProvider, ChatMessage, HttpDebugRequest,
         HttpDebugResponse, ModelPricing, ProviderKind, ReqwestProviderClient, ResponseControl,
         ResponseFormat, Role, validate_base_url,
     },
-    secrets::{KeyringSecretStore, SecretStore, get_config_profile_token, set_profile_token},
+    secrets::{KeyringSecretStore, SecretStore, set_profile_token},
 };
+
+mod error;
+mod parameters;
+mod tokens;
+mod util;
+
+use error::WebError;
+use parameters::{ParameterConstraintView, parameter_constraints};
+use tokens::{resolve_web_token, token_override_belongs_to_provider, web_token_present};
+use util::{blank_str_to_none, blank_to_none, parse_provider};
 
 const INDEX_HTML: &str = include_str!("ui.html");
 
@@ -282,202 +291,6 @@ struct ProviderView {
     parameter_constraints: Vec<ParameterConstraintView>,
 }
 
-#[derive(Debug, Serialize)]
-struct ParameterConstraintView {
-    id: &'static str,
-    supported: bool,
-    min: Option<f32>,
-    max: Option<f32>,
-    step: Option<f32>,
-    note: &'static str,
-}
-
-fn parameter_constraints(provider: ProviderKind) -> Vec<ParameterConstraintView> {
-    let mut constraints = openrouter_like_constraints();
-    match provider {
-        ProviderKind::OpenRouter => constraints,
-        ProviderKind::OpenAiCompatible => {
-            mark_unsupported(
-                &mut constraints,
-                &["maxTokens"],
-                "OpenAI chat models use max_completion_tokens; max_tokens is converted server-side for compatibility.",
-            );
-            constraints
-        }
-        ProviderKind::DeepSeek => {
-            mark_unsupported(
-                &mut constraints,
-                &[
-                    "maxCompletionTokens",
-                    "topK",
-                    "minP",
-                    "topA",
-                    "presencePenalty",
-                    "frequencyPenalty",
-                    "repetitionPenalty",
-                    "n",
-                    "store",
-                    "parallelToolCalls",
-                ],
-                "DeepSeek docs: unsupported/deprecated; the API will ignore this parameter.",
-            );
-            constraints
-        }
-        ProviderKind::Kimi => {
-            mark_unsupported(
-                &mut constraints,
-                &[
-                    "maxTokens",
-                    "temperature",
-                    "topP",
-                    "topK",
-                    "minP",
-                    "topA",
-                    "presencePenalty",
-                    "frequencyPenalty",
-                    "repetitionPenalty",
-                    "n",
-                    "store",
-                    "parallelToolCalls",
-                ],
-                "Kimi current docs do not list this parameter for Chat Completion.",
-            );
-            constraints
-        }
-        ProviderKind::GigaChat => {
-            mark_unsupported(
-                &mut constraints,
-                &[
-                    "maxCompletionTokens",
-                    "topK",
-                    "minP",
-                    "topA",
-                    "presencePenalty",
-                    "frequencyPenalty",
-                    "store",
-                    "parallelToolCalls",
-                ],
-                "GigaChat docs do not list this parameter for Chat Completion.",
-            );
-            set_constraint(
-                &mut constraints,
-                "temperature",
-                Some(0.01),
-                None,
-                "GigaChat docs: temperature must be > 0; values above 2 can be too random.",
-            );
-            constraints
-        }
-    }
-}
-
-fn openrouter_like_constraints() -> Vec<ParameterConstraintView> {
-    vec![
-        constraint("maxTokens", true, Some(1.0), None, Some(1.0), ">= 1"),
-        constraint(
-            "maxCompletionTokens",
-            true,
-            Some(1.0),
-            None,
-            Some(1.0),
-            ">= 1",
-        ),
-        constraint("temperature", true, Some(0.0), Some(2.0), Some(0.1), "0..2"),
-        constraint("topP", true, Some(0.0), Some(1.0), Some(0.05), "0..1"),
-        constraint("topK", true, Some(0.0), None, Some(1.0), ">= 0"),
-        constraint("minP", true, Some(0.0), Some(1.0), Some(0.01), "0..1"),
-        constraint("topA", true, Some(0.0), Some(1.0), Some(0.01), "0..1"),
-        constraint(
-            "presencePenalty",
-            true,
-            Some(-2.0),
-            Some(2.0),
-            Some(0.1),
-            "-2..2",
-        ),
-        constraint(
-            "frequencyPenalty",
-            true,
-            Some(-2.0),
-            Some(2.0),
-            Some(0.1),
-            "-2..2",
-        ),
-        constraint(
-            "repetitionPenalty",
-            true,
-            Some(0.0),
-            Some(2.0),
-            Some(0.05),
-            "0..2",
-        ),
-        constraint(
-            "topLogprobs",
-            true,
-            Some(0.0),
-            Some(20.0),
-            Some(1.0),
-            "0..20",
-        ),
-        constraint("n", true, Some(1.0), None, Some(1.0), ">= 1"),
-        constraint("includeReasoning", true, None, None, None, "boolean"),
-        constraint("logprobs", true, None, None, None, "boolean"),
-        constraint("store", true, None, None, None, "boolean"),
-        constraint(
-            "parallelToolCalls",
-            true,
-            None,
-            None,
-            None,
-            "Only send when tools are specified; OpenAI-compatible APIs reject it without tools.",
-        ),
-    ]
-}
-
-fn constraint(
-    id: &'static str,
-    supported: bool,
-    min: Option<f32>,
-    max: Option<f32>,
-    step: Option<f32>,
-    note: &'static str,
-) -> ParameterConstraintView {
-    ParameterConstraintView {
-        id,
-        supported,
-        min,
-        max,
-        step,
-        note,
-    }
-}
-
-fn mark_unsupported(constraints: &mut [ParameterConstraintView], ids: &[&str], note: &'static str) {
-    for constraint in constraints {
-        if ids.contains(&constraint.id) {
-            constraint.supported = false;
-            constraint.note = note;
-        }
-    }
-}
-
-fn set_constraint(
-    constraints: &mut [ParameterConstraintView],
-    id: &str,
-    min: Option<f32>,
-    max: Option<f32>,
-    note: &'static str,
-) {
-    if let Some(constraint) = constraints
-        .iter_mut()
-        .find(|constraint| constraint.id == id)
-    {
-        constraint.min = min;
-        constraint.max = max;
-        constraint.note = note;
-    }
-}
-
 #[derive(Debug, Deserialize)]
 struct ModelsRequest {
     provider: String,
@@ -732,124 +545,6 @@ struct ChatWebResponse {
 struct ChatDebugView {
     provider_request: HttpDebugRequest,
     provider_response: HttpDebugResponse,
-}
-
-fn resolve_web_token(
-    secrets: &dyn SecretStore,
-    profile: &ProfileConfig,
-    token_override: &str,
-    token_provider: Option<&str>,
-) -> Result<String, AppError> {
-    let token_override = token_override.trim();
-    if !token_override.is_empty() && token_override_belongs_to_provider(profile, token_provider)? {
-        set_profile_token(secrets, profile, token_override)?;
-        return Ok(token_override.to_string());
-    }
-
-    if let Some(token) = secrets.get_token(&token_ref(&profile.provider))? {
-        return Ok(token);
-    }
-
-    let config = AppConfig::load()?;
-    for (name, candidate) in &config.profiles {
-        if candidate.provider != profile.provider {
-            continue;
-        }
-        if let Some(token) = get_config_profile_token(secrets, &config, name, candidate)? {
-            return Ok(token);
-        }
-    }
-
-    Err(AppError::InvalidInput(
-        "API token is required. Save it with `ai token set --profile <name>` or paste it once in the web UI.".to_string(),
-    ))
-}
-
-fn web_token_present(
-    secrets: &dyn SecretStore,
-    profile: &ProfileConfig,
-    token_override: &str,
-    token_provider: Option<&str>,
-) -> Result<bool, AppError> {
-    if !token_override.trim().is_empty()
-        && token_override_belongs_to_provider(profile, token_provider)?
-    {
-        return Ok(true);
-    }
-    if secrets.get_token(&token_ref(&profile.provider))?.is_some() {
-        return Ok(true);
-    }
-    let config = AppConfig::load()?;
-    for (name, candidate) in &config.profiles {
-        if candidate.provider != profile.provider {
-            continue;
-        }
-        if get_config_profile_token(secrets, &config, name, candidate)?.is_some() {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn token_override_belongs_to_provider(
-    profile: &ProfileConfig,
-    token_provider: Option<&str>,
-) -> Result<bool, AppError> {
-    let Some(token_provider) = token_provider else {
-        return Ok(true);
-    };
-    let token_provider = token_provider.trim();
-    if token_provider.is_empty() {
-        return Ok(false);
-    }
-    Ok(parse_provider(token_provider)? == profile.provider)
-}
-
-fn parse_provider(value: &str) -> Result<ProviderKind, AppError> {
-    value.parse()
-}
-
-fn blank_to_none(value: Option<String>) -> Option<String> {
-    value.and_then(|value| {
-        let trimmed = value.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_string())
-    })
-}
-
-fn blank_str_to_none(value: &str) -> Option<&str> {
-    let value = value.trim();
-    (!value.is_empty()).then_some(value)
-}
-
-struct WebError(AppError);
-
-impl From<AppError> for WebError {
-    fn from(error: AppError) -> Self {
-        Self(error)
-    }
-}
-
-impl IntoResponse for WebError {
-    fn into_response(self) -> Response {
-        let status = match self.0 {
-            AppError::InvalidInput(_) | AppError::InvalidBaseUrl { .. } => StatusCode::BAD_REQUEST,
-            AppError::ProviderHttp(_) => StatusCode::BAD_GATEWAY,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-        (
-            status,
-            [(header::CONTENT_TYPE, "application/json")],
-            Json(ErrorResponse {
-                error: self.0.to_string(),
-            }),
-        )
-            .into_response()
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct ErrorResponse {
-    error: String,
 }
 
 #[cfg(test)]
