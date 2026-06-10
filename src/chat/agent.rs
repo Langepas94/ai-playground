@@ -95,6 +95,16 @@ impl ChatAgent {
         self.control = control;
     }
 
+    /// Build a ChatRequest for streaming (same as non-streaming).
+    pub fn build_stream_request(&self, prompt: String) -> crate::providers::ChatRequest {
+        self.request_with_user_prompt(prompt)
+    }
+
+    /// Record user prompt + assistant response into history after streaming completes.
+    pub fn record_stream_response(&mut self, prompt: String, answer: String) {
+        self.commit_turn(prompt, answer);
+    }
+
     pub async fn respond(
         &mut self,
         client: &dyn ProviderClient,

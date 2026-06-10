@@ -3,6 +3,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use futures_util::StreamExt;
 use reqwest::Client;
 use reqwest::{StatusCode, header::RETRY_AFTER};
 use serde::{Deserialize, Serialize};
@@ -319,6 +320,8 @@ pub struct OpenAiChatPayload {
     pub stop: Vec<String>,
     #[serde(flatten)]
     pub extra_params: serde_json::Map<String, serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -420,6 +423,104 @@ struct OpenAiCostAmount {
     value: Option<f64>,
 }
 
+/// Stream chat completion, calling `on_token` for each text chunk as it arrives.
+/// Returns the full accumulated `ChatResponse` when the stream ends.
+pub async fn stream_chat_completion(
+    client: &Client,
+    spec: ProviderSpec,
+    profile: &ProfileConfig,
+    token: &str,
+    request: ChatRequest,
+    on_token: impl Fn(&str),
+) -> Result<ChatResponse, AppError> {
+    let url = endpoint(&profile.base_url, "chat/completions");
+    let pricing = request.pricing.clone();
+    let started = Instant::now();
+    let mut payload = chat_payload_for_provider(spec.kind, request);
+    payload.stream = Some(true);
+    let response = authorized(client.post(&url), spec, token)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| map_network_error(spec, EndpointCategory::Chat, error))?;
+    let status = response.status();
+    if !status.is_success() {
+        let raw = response
+            .text()
+            .await
+            .map_err(|e| map_network_error(spec, EndpointCategory::Chat, e))?;
+        return Err(AppError::ProviderHttp(map_http_status(
+            spec.kind.to_string(),
+            EndpointCategory::Chat,
+            status,
+            None,
+            short_reason(&raw),
+        )));
+    }
+    let mut stream = response.bytes_stream();
+    let mut full_text = String::new();
+    let mut finish_reason: Option<String> = None;
+    let mut usage: Option<OpenAiUsage> = None;
+    let mut buf = String::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| map_network_error(spec, EndpointCategory::Chat, e))?;
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+        // Process complete SSE lines
+        while let Some(pos) = buf.find('\n') {
+            let line = buf[..pos].trim_end_matches('\r').to_string();
+            buf = buf[pos + 1..].to_string();
+            if let Some(data) = line.strip_prefix("data: ") {
+                if data == "[DONE]" {
+                    break;
+                }
+                if let Ok(event) = serde_json::from_str::<OpenAiStreamEvent>(data) {
+                    if let Some(u) = event.usage {
+                        usage = Some(u);
+                    }
+                    if let Some(choice) = event.choices.into_iter().next() {
+                        if let Some(fr) = choice.finish_reason {
+                            finish_reason = Some(fr);
+                        }
+                        if let Some(text) = choice.delta.content {
+                            on_token(&text);
+                            full_text.push_str(&text);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let elapsed_ms = started.elapsed().as_millis();
+    let tu = usage.as_ref().map(|u| token_usage(u));
+    let cost = usage.map(|u| request_cost(u, pricing.as_ref())).flatten();
+    Ok(ChatResponse {
+        text: full_text,
+        finish_reason,
+        metrics: RequestMetrics {
+            elapsed_ms,
+            usage: tu,
+            cost,
+        },
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiStreamEvent {
+    choices: Vec<OpenAiStreamChoice>,
+    usage: Option<OpenAiUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiStreamChoice {
+    delta: OpenAiStreamDelta,
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiStreamDelta {
+    content: Option<String>,
+}
+
 pub fn chat_payload(request: ChatRequest) -> OpenAiChatPayload {
     chat_payload_for_provider(ProviderKind::OpenAiCompatible, request)
 }
@@ -471,6 +572,7 @@ pub fn chat_payload_for_provider(
         service_tier: control.service_tier,
         stop: control.stop,
         extra_params: control.extra_params,
+        stream: None,
     }
 }
 
