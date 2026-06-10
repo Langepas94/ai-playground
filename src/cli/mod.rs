@@ -22,7 +22,7 @@ use args::{
 use commands::{
     run_ask, run_chat, run_compare, run_compare_goal, run_config_path, run_doctor, run_models_list,
     run_profile_add, run_profile_list, run_profile_remove, run_profile_use, run_setup,
-    run_token_delete, run_token_set,
+    run_token_delete, run_token_demo, run_token_set,
 };
 
 #[derive(Debug, Parser)]
@@ -65,6 +65,10 @@ async fn run_with_store(cli: &Cli, secrets: &dyn SecretStore) -> Result<(), AppE
         Command::Web(args) => crate::web::serve(args.listen).await,
         Command::Compare(args) => run_compare(args, secrets).await,
         Command::CompareGoal(args) => run_compare_goal(args, secrets).await,
+        Command::TokenDemo(args) => {
+            run_token_demo(args);
+            Ok(())
+        }
         Command::Config { command } => match command {
             ConfigCommand::Path => run_config_path(),
         },

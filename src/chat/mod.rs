@@ -4,6 +4,7 @@ pub mod history;
 pub mod memory;
 pub mod session;
 pub mod store;
+pub mod token_accounting;
 
 pub use agent::{
     AgentDescriptor, ChatAgent, LOCAL_SESSION_AGENT_ID, available_agents, selected_agent,
@@ -16,6 +17,10 @@ pub use memory::{AgentMemory, MemoryConfig};
 pub use session::{describe_control, describe_goal, interactive_chat, read_terminal_line};
 pub use store::{
     ConversationSession, LocalSessionStore, add_request_metrics, session_key, web_session_key,
+};
+pub use token_accounting::{
+    ContextStatus, TokenCostEstimate, TokenEstimate, TokenGrowthReport, TokenGrowthRow,
+    estimate_exchange, estimate_messages_tokens, simulate_growth,
 };
 
 use crate::{
