@@ -9,6 +9,7 @@ CLI отвечает за пользовательский ввод, dispatch к
 - `commands/ask.rs` - одноразовый prompt через `ask_once`.
 - `commands/chat.rs` - запуск интерактивной REPL-сессии.
 - `commands/compare.rs` - сравнение обычного/управляемого ответа и goal stop modes.
+- `commands/token_demo.rs` - локальная демонстрация роста токенов/стоимости и context overflow без provider API.
 - `commands/setup.rs` - интерактивное создание профиля и optional token setup.
 - `commands/profile.rs` - add/list/use/remove профилей.
 - `commands/token.rs` - set/delete токенов через `SecretStore`.
@@ -48,4 +49,10 @@ Cli::parse()
 rtk cargo build 2>&1 | head -30
 rtk cargo fmt
 rtk cargo test
+```
+
+Для smoke-проверки токенов:
+
+```bash
+rtk cargo run --bin ai -- token-demo --context-limit 4096
 ```
