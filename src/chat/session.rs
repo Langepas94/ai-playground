@@ -1,4 +1,5 @@
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 
 use crate::{
     errors::AppError,
@@ -35,6 +36,7 @@ pub async fn interactive_chat(
         options.billing,
     );
     let mut goal_state = GoalState::new(goal.required_fields.clone());
+    let mut pending_attachments: Vec<PathBuf> = Vec::new();
     println!(
         "Chat started with profile '{profile_name}', model '{}', session '{}'.",
         profile.config.model,
@@ -45,7 +47,7 @@ pub async fn interactive_chat(
         println!("Loaded {} local history messages.", agent.history().len());
     }
     println!(
-        "Use /exit, /profile, /model, /clear, /save, /control, /format, /answer-format, /max-tokens, /temperature, /top-p, /presence-penalty, /frequency-penalty, /seed, /stop, /goal."
+        "Use /exit, /profile, /model, /clear, /save, /control, /format, /answer-format, /max-tokens, /temperature, /top-p, /presence-penalty, /frequency-penalty, /seed, /stop, /goal, /attach <path>."
     );
 
     loop {
@@ -118,7 +120,33 @@ pub async fn interactive_chat(
                 println!("Question quoting disabled.");
                 continue;
             }
+            "/attach clear" => {
+                pending_attachments.clear();
+                println!("Pending attachments cleared.");
+                continue;
+            }
+            "/attach" => {
+                if pending_attachments.is_empty() {
+                    println!("No pending attachments.");
+                } else {
+                    for p in &pending_attachments {
+                        println!("  {}", p.display());
+                    }
+                }
+                continue;
+            }
             _ => {}
+        }
+
+        if let Some(path_str) = line.strip_prefix("/attach ") {
+            let path = PathBuf::from(path_str.trim());
+            if !path.exists() {
+                println!("File not found: {}", path.display());
+            } else {
+                println!("Attached: {}", path.display());
+                pending_attachments.push(path);
+            }
+            continue;
         }
 
         if let Some(value) = line.strip_prefix("/format ") {
@@ -270,9 +298,11 @@ pub async fn interactive_chat(
         }
 
         eprintln!("Waiting for provider response...");
+        let user_text = build_message_with_attachments(line, &pending_attachments)?;
+        pending_attachments.clear();
         let effective_control = goal.apply_to_control(control.clone());
         agent.set_control(effective_control);
-        let response = agent.respond(runtime.client, line.to_string()).await?;
+        let response = agent.respond(runtime.client, user_text).await?;
         memory = agent.memory().clone();
         store.save_session(&session_key, &session.id, agent.history())?;
         store.save_memory(&session.id, &memory)?;
@@ -393,6 +423,30 @@ pub fn read_terminal_line() -> Result<Option<String>, AppError> {
         bytes.pop();
     }
     Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+fn build_message_with_attachments(
+    message: &str,
+    attachments: &[PathBuf],
+) -> Result<String, AppError> {
+    if attachments.is_empty() {
+        return Ok(message.to_string());
+    }
+    let mut parts = vec![message.to_string()];
+    for path in attachments {
+        let content = std::fs::read_to_string(path).map_err(|error| {
+            AppError::InvalidInput(format!(
+                "Cannot read file '{}': {error}",
+                path.display()
+            ))
+        })?;
+        let label = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        parts.push(format!("--- {label} ---\n{content}"));
+    }
+    Ok(parts.join("\n\n"))
 }
 
 #[cfg(test)]

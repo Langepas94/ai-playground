@@ -176,6 +176,7 @@ async fn chat(
     if request.prompt.trim().is_empty() {
         return Err(AppError::InvalidInput("Prompt is required".to_string()).into());
     }
+    let prompt = build_web_prompt(&request.prompt, request.attachments.as_deref());
     let token = resolve_web_token(
         state.secrets.as_ref(),
         &profile,
@@ -209,7 +210,7 @@ async fn chat(
             .and_then(WebBilling::into_billing_lookup),
     );
     let (response, provider_debug) = agent
-        .respond_with_debug(&state.client, request.prompt.clone())
+        .respond_with_debug(&state.client, prompt)
         .await?;
     let session_metrics = add_request_metrics(&session.metrics, &response.metrics);
     state
@@ -337,6 +338,12 @@ impl From<crate::providers::ModelInfo> for ModelView {
 }
 
 #[derive(Debug, Deserialize)]
+struct WebAttachment {
+    name: String,
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct ChatWebRequest {
     agent_id: Option<String>,
     provider: String,
@@ -346,6 +353,7 @@ struct ChatWebRequest {
     model: String,
     system_prompt: Option<String>,
     prompt: String,
+    attachments: Option<Vec<WebAttachment>>,
     session_id: Option<String>,
     new_session: bool,
     messages: Option<Vec<ChatMessage>>,
@@ -547,6 +555,24 @@ struct ChatDebugView {
     provider_response: HttpDebugResponse,
 }
 
+fn build_web_prompt(prompt: &str, attachments: Option<&[WebAttachment]>) -> String {
+    let Some(attachments) = attachments else {
+        return prompt.to_string();
+    };
+    let non_empty: Vec<&WebAttachment> = attachments
+        .iter()
+        .filter(|a| !a.content.is_empty())
+        .collect();
+    if non_empty.is_empty() {
+        return prompt.to_string();
+    }
+    let mut parts = vec![prompt.to_string()];
+    for attachment in non_empty {
+        parts.push(format!("--- {} ---\n{}", attachment.name, attachment.content));
+    }
+    parts.join("\n\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,6 +644,7 @@ mod tests {
             model: "deepseek-chat".to_string(),
             system_prompt: Some("Ты отвечаешь кратко.".to_string()),
             prompt: "Привет".to_string(),
+            attachments: None,
             session_id: None,
             new_session: false,
             messages: None,
@@ -644,6 +671,7 @@ mod tests {
             model: "deepseek-chat".to_string(),
             system_prompt: Some("Ты отвечаешь кратко.".to_string()),
             prompt: "Продолжи".to_string(),
+            attachments: None,
             session_id: None,
             new_session: false,
             messages: Some(vec![
@@ -688,6 +716,7 @@ mod tests {
             model: "deepseek-chat".to_string(),
             system_prompt: None,
             prompt: "Продолжи".to_string(),
+            attachments: None,
             session_id: Some("session".to_string()),
             new_session: false,
             messages: Some(vec![ChatMessage {
