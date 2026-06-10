@@ -423,15 +423,27 @@
     .message-content {
       min-width: 0;
     }
+    .composer-meta {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 5px 8px;
+      background: #f4f7ff;
+      border: 1px solid #d5e0fb;
+      border-radius: 8px;
+      min-height: 32px;
+    }
     .context-badge {
       font-size: 11px;
-      color: #555;
-      background: #f0f4ff;
-      border: 1px solid #c8d8f8;
+      font-weight: 600;
+      color: #3a5cc7;
+      background: #dde8ff;
+      border: 1px solid #b3c9f9;
       border-radius: 10px;
       padding: 2px 9px;
       white-space: nowrap;
-      align-self: center;
+      flex-shrink: 0;
     }
     .debug-doc-row {
       display: flex;
@@ -599,6 +611,10 @@
           <p class="conversation-empty">Ответ появится здесь.</p>
         </div>
         <div class="composer">
+          <div id="composerMeta" class="composer-meta" style="display:none">
+            <span id="contextWindowBadge" class="context-badge" style="display:none"></span>
+            <div id="attachmentChips" class="attachment-chips"></div>
+          </div>
           <div class="prompt-row">
             <div class="textarea-wrap">
               <textarea id="prompt" placeholder="Введите запрос к модели"></textarea>
@@ -610,7 +626,6 @@
               <button id="clear" class="secondary" type="button">Новая сессия</button>
             </div>
           </div>
-          <div id="attachmentChips" class="attachment-chips" style="display:none"></div>
         </div>
       </section>
 
@@ -628,7 +643,6 @@
             <label>agent<select id="agentMode"></select></label>
             <label>Provider<select id="provider"></select></label>
             <label>Model<select id="model"></select></label>
-            <div id="contextWindowBadge" class="context-badge" style="display:none"></div>
             <div class="actions">
               <button id="loadModels" class="secondary" type="button">Загрузить модели</button>
             </div>
@@ -1381,6 +1395,7 @@
       } else {
         badge.style.display = 'none';
       }
+      updateComposerMeta();
     }
 
     function formatTokenCount(n) {
@@ -1490,14 +1505,15 @@
       }
     }
 
+    function updateComposerMeta() {
+      const hasBadge = $('contextWindowBadge').style.display !== 'none';
+      const hasChips = pendingAttachments.length > 0;
+      $('composerMeta').style.display = (hasBadge || hasChips) ? 'flex' : 'none';
+    }
+
     function renderAttachmentChips() {
       const container = $('attachmentChips');
       container.innerHTML = '';
-      if (pendingAttachments.length === 0) {
-        container.style.display = 'none';
-        return;
-      }
-      container.style.display = 'flex';
       pendingAttachments.forEach((att, idx) => {
         const chip = document.createElement('div');
         chip.className = 'attachment-chip';
@@ -1516,6 +1532,7 @@
         chip.appendChild(removeBtn);
         container.appendChild(chip);
       });
+      updateComposerMeta();
     }
 
     function readFilesAsText(files) {
