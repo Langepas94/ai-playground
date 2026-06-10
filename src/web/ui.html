@@ -1178,31 +1178,21 @@
         ['completion', usage.output_tokens],
         ['total', usage.total_tokens]
       ];
-      if (usage.cache_hit_input_tokens !== null && usage.cache_hit_input_tokens !== undefined) {
-        rows.push(['prompt cached', usage.cache_hit_input_tokens]);
-      }
-      if (usage.cache_miss_input_tokens !== null && usage.cache_miss_input_tokens !== undefined) {
-        rows.push(['prompt uncached', usage.cache_miss_input_tokens]);
-      }
-      if (usage.input_audio_tokens !== null && usage.input_audio_tokens !== undefined) {
-        rows.push(['prompt audio', usage.input_audio_tokens]);
-      }
-      if (usage.output_visible_tokens !== null && usage.output_visible_tokens !== undefined) {
-        rows.push(['visible output', usage.output_visible_tokens]);
-      }
-      if (usage.output_reasoning_tokens !== null && usage.output_reasoning_tokens !== undefined) {
-        rows.push(['reasoning', usage.output_reasoning_tokens]);
-      }
-      if (usage.output_audio_tokens !== null && usage.output_audio_tokens !== undefined) {
-        rows.push(['output audio', usage.output_audio_tokens]);
-      }
-      if (usage.accepted_prediction_output_tokens !== null && usage.accepted_prediction_output_tokens !== undefined) {
-        rows.push(['accepted prediction', usage.accepted_prediction_output_tokens]);
-      }
-      if (usage.rejected_prediction_output_tokens !== null && usage.rejected_prediction_output_tokens !== undefined) {
-        rows.push(['rejected prediction', usage.rejected_prediction_output_tokens]);
-      }
+      pushTokenDetail(rows, 'prompt cached', usage.cache_hit_input_tokens);
+      pushTokenDetail(rows, 'prompt uncached', usage.cache_miss_input_tokens);
+      pushTokenDetail(rows, 'prompt audio', usage.input_audio_tokens);
+      pushTokenDetail(rows, 'visible output', usage.output_visible_tokens);
+      pushTokenDetail(rows, 'reasoning', usage.output_reasoning_tokens);
+      pushTokenDetail(rows, 'output audio', usage.output_audio_tokens);
+      pushTokenDetail(rows, 'accepted prediction', usage.accepted_prediction_output_tokens);
+      pushTokenDetail(rows, 'rejected prediction', usage.rejected_prediction_output_tokens);
       return `<span class="metric-lines">${rows.map(([label, value]) => `<span class="metric-line"><em>${label}</em><b>${value}</b></span>`).join('')}</span>`;
+    }
+
+    function pushTokenDetail(rows, label, value) {
+      if (value !== null && value !== undefined && Number(value) > 0) {
+        rows.push([label, value]);
+      }
     }
 
     async function requestJson(url, body) {

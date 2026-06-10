@@ -194,7 +194,41 @@ pub fn format_request_metrics(metrics: &RequestMetrics) -> String {
 }
 
 fn push_optional_metric(parts: &mut Vec<String>, label: &str, value: Option<u32>) {
-    if let Some(value) = value {
+    if let Some(value) = value.filter(|value| *value > 0) {
         parts.push(format!("{label}={value}"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::TokenUsage;
+
+    #[test]
+    fn request_metrics_hide_zero_optional_token_details() {
+        let formatted = format_request_metrics(&RequestMetrics {
+            elapsed_ms: 10,
+            usage: Some(TokenUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+                total_tokens: 150,
+                cache_hit_input_tokens: Some(12),
+                input_audio_tokens: Some(0),
+                output_reasoning_tokens: Some(0),
+                output_audio_tokens: Some(0),
+                accepted_prediction_output_tokens: Some(0),
+                rejected_prediction_output_tokens: Some(0),
+                ..TokenUsage::default()
+            }),
+            cost: None,
+        });
+
+        assert!(formatted.contains("prompt=100"));
+        assert!(formatted.contains("completion=50"));
+        assert!(formatted.contains("total=150"));
+        assert!(formatted.contains("prompt_cached=12"));
+        assert!(!formatted.contains("prompt_audio=0"));
+        assert!(!formatted.contains("reasoning=0"));
+        assert!(!formatted.contains("accepted_prediction=0"));
     }
 }
