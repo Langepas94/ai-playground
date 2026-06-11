@@ -12,7 +12,8 @@ use super::token_accounting::{TokenEstimate, estimate_exchange, estimate_message
 use tokio::time::{Duration, timeout};
 
 pub const LOCAL_SESSION_AGENT_ID: &str = "local-session-agent";
-const MEMORY_REFRESH_TIMEOUT: Duration = Duration::from_millis(250);
+const MEMORY_COMPACT_TIMEOUT: Duration = Duration::from_secs(30);
+const PREFLIGHT_COMPACT_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_PREFLIGHT_SUMMARY_PASSES: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +100,10 @@ impl ChatAgent {
 
     pub fn set_context_limit(&mut self, context_limit: Option<u32>) {
         self.context_limit = context_limit.filter(|limit| *limit > 0);
+    }
+
+    pub fn context_limit(&self) -> Option<u32> {
+        self.context_limit
     }
 
     pub fn clear_history(&mut self) {
@@ -262,7 +267,7 @@ impl ChatAgent {
         &mut self,
         client: &dyn ProviderClient,
     ) -> Option<crate::providers::RequestMetrics> {
-        timeout(MEMORY_REFRESH_TIMEOUT, self.refresh_memory(client))
+        timeout(MEMORY_COMPACT_TIMEOUT, self.refresh_memory(client))
             .await
             .ok()
             .flatten()
@@ -287,7 +292,7 @@ impl ChatAgent {
         prompt: &str,
     ) -> Option<crate::providers::RequestMetrics> {
         timeout(
-            MEMORY_REFRESH_TIMEOUT,
+            PREFLIGHT_COMPACT_TIMEOUT,
             self.preflight_compact_for_context_pressure(client, prompt),
         )
         .await
@@ -853,5 +858,80 @@ mod tests {
             selected_agent(Some("missing-agent")),
             Err(AppError::InvalidInput(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn agent_gracefully_degrades_when_context_overflows() {
+        let client = FakeClient {
+            replies: std::sync::Mutex::new(vec!["answer".to_string()]),
+            metrics: std::sync::Mutex::new(vec![crate::providers::RequestMetrics {
+                elapsed_ms: 1,
+                usage: None,
+                cost: None,
+            }]),
+            seen_messages: std::sync::Mutex::new(Vec::new()),
+        };
+
+        let history = (0..50)
+            .map(|index| ChatMessage {
+                role: if index % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                content: "x".repeat(500),
+            })
+            .collect::<Vec<_>>();
+
+        let original_history_len = history.len();
+
+        let mut agent = ChatAgent::new(
+            test_profile(),
+            "secret".to_string(),
+            history,
+            AgentMemory::default(),
+            ResponseControl::uncontrolled(),
+            None,
+            None,
+        );
+
+        // Установить маленький контекст лимит
+        agent.set_context_limit(Some(512));
+
+        let response = agent
+            .respond(&client, "new question".to_string())
+            .await
+            .expect("response");
+
+        assert!(!response.text.is_empty(), "response should be generated");
+
+        let seen = client.seen_messages.lock().expect("seen");
+        assert!(!seen.is_empty(), "should have sent at least one request");
+
+        // Last request should be the main request (not summarization)
+        let main_request = &seen[seen.len() - 1];
+        assert!(
+            main_request.len() < original_history_len + 1,
+            "context window strategy should limit messages sent (not send all 50+ messages). sent {} messages out of {}",
+            main_request.len(),
+            original_history_len
+        );
+    }
+
+    #[test]
+    fn agent_context_limit_can_be_updated() {
+        let mut agent = ChatAgent::new(
+            test_profile(),
+            "secret".to_string(),
+            Vec::new(),
+            AgentMemory::default(),
+            ResponseControl::uncontrolled(),
+            None,
+            None,
+        );
+
+        assert!(agent.context_limit().is_none());
+        agent.set_context_limit(Some(8192));
+        assert_eq!(agent.context_limit(), Some(8192));
     }
 }

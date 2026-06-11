@@ -1402,4 +1402,68 @@ mod tests {
             "catalog pricing should not overwrite manual/provider pricing while resolving context"
         );
     }
+
+    #[test]
+    fn web_attachments_merge_into_prompt() {
+        let prompt = "What is this?";
+        let attachments_vec = vec![
+            WebAttachment {
+                name: "data.txt".to_string(),
+                content: "some data".to_string(),
+            },
+            WebAttachment {
+                name: "info.txt".to_string(),
+                content: "more info".to_string(),
+            },
+        ];
+
+        let result = build_web_prompt(prompt, Some(attachments_vec.as_slice()));
+
+        assert!(result.contains("What is this?"), "original prompt must be preserved");
+        assert!(
+            result.contains("--- data.txt ---"),
+            "attachment name must appear as separator"
+        );
+        assert!(
+            result.contains("some data"),
+            "attachment content must be included"
+        );
+        assert!(
+            result.contains("--- info.txt ---\nmore info"),
+            "multiple attachments must be separated by name header"
+        );
+        assert!(
+            result.contains("\n\n"),
+            "prompt and attachments must be separated by double newline"
+        );
+    }
+
+    #[test]
+    fn web_attachments_empty_are_ignored() {
+        let prompt = "What is this?";
+        let attachments_vec = vec![
+            WebAttachment {
+                name: "empty.txt".to_string(),
+                content: "".to_string(),
+            },
+            WebAttachment {
+                name: "data.txt".to_string(),
+                content: "data".to_string(),
+            },
+        ];
+
+        let result = build_web_prompt(prompt, Some(attachments_vec.as_slice()));
+
+        assert_eq!(
+            result, "What is this?\n\n--- data.txt ---\ndata",
+            "empty attachments must be filtered out"
+        );
+    }
+
+    #[test]
+    fn web_attachments_none_returns_original_prompt() {
+        let prompt = "Original prompt";
+        let result = build_web_prompt(prompt, None);
+        assert_eq!(result, prompt, "no attachments = return prompt as-is");
+    }
 }

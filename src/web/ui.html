@@ -1312,18 +1312,10 @@
     }
 
     function setServerDebug(payload, responseText, httpStatus) {
-      // Show server payload as the request until provider data arrives
-      const displayPayload = payload ? JSON.parse(JSON.stringify(payload)) : null;
-      if (displayPayload?.attachments) {
-        displayPayload.attachments = displayPayload.attachments.map((a) => ({
-          name: a.name,
-          content: a.content.length > 120 ? a.content.slice(0, 120) + `… [${a.content.length} chars]` : a.content,
-        }));
-      }
-      $('providerRequest').textContent = prettyJson(displayPayload);
       if (httpStatus !== null && httpStatus >= 400) {
         $('providerResponse').textContent = responseText ?? '';
       } else if (httpStatus === null) {
+        $('providerRequest').textContent = '{}';
         $('providerResponse').textContent = '{}';
       }
 
