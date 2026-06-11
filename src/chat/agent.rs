@@ -8,11 +8,12 @@ use crate::{
 };
 
 use super::memory::{AgentMemory, MemoryConfig, format_messages_for_summary};
-use super::token_accounting::{TokenEstimate, estimate_exchange};
+use super::token_accounting::{TokenEstimate, estimate_exchange, estimate_messages_tokens};
 use tokio::time::{Duration, timeout};
 
 pub const LOCAL_SESSION_AGENT_ID: &str = "local-session-agent";
 const MEMORY_REFRESH_TIMEOUT: Duration = Duration::from_millis(250);
+const MAX_PREFLIGHT_SUMMARY_PASSES: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgentDescriptor {
@@ -54,6 +55,7 @@ pub struct ChatAgent {
     control: ResponseControl,
     pricing: Option<ModelPricing>,
     billing: Option<BillingLookup>,
+    context_limit: Option<u32>,
 }
 
 impl ChatAgent {
@@ -75,6 +77,7 @@ impl ChatAgent {
             control,
             pricing,
             billing,
+            context_limit: None,
         }
     }
 
@@ -94,6 +97,10 @@ impl ChatAgent {
         self.memory_config = memory_config;
     }
 
+    pub fn set_context_limit(&mut self, context_limit: Option<u32>) {
+        self.context_limit = context_limit.filter(|limit| *limit > 0);
+    }
+
     pub fn clear_history(&mut self) {
         self.history.clear();
         self.memory = AgentMemory::default();
@@ -101,11 +108,6 @@ impl ChatAgent {
 
     pub fn set_control(&mut self, control: ResponseControl) {
         self.control = control;
-    }
-
-    /// Build a ChatRequest for streaming (same as non-streaming).
-    pub fn build_stream_request(&self, prompt: String) -> crate::providers::ChatRequest {
-        self.request_with_user_prompt(prompt)
     }
 
     /// Record user prompt + assistant response into history after streaming completes.
@@ -125,6 +127,7 @@ impl ChatAgent {
         client: &dyn ProviderClient,
         prompt: String,
     ) -> Result<ChatResponse, AppError> {
+        let summary_metrics = self.preflight_compact_with_timeout(client, &prompt).await;
         let response = client
             .chat_completion(
                 &self.profile,
@@ -134,6 +137,10 @@ impl ChatAgent {
             .await?;
         self.commit_turn(prompt, response.text.clone());
         let mut response = response;
+        if let Some(summary_metrics) = summary_metrics {
+            response.metrics =
+                crate::chat::add_request_metrics(&response.metrics, &summary_metrics);
+        }
         if let Some(summary_metrics) = self.refresh_memory_with_timeout(client).await {
             response.metrics =
                 crate::chat::add_request_metrics(&response.metrics, &summary_metrics);
@@ -146,6 +153,7 @@ impl ChatAgent {
         client: &dyn ProviderClient,
         prompt: String,
     ) -> Result<(ChatResponse, ProviderExchangeDebug), AppError> {
+        let summary_metrics = self.preflight_compact_with_timeout(client, &prompt).await;
         let (response, debug) = client
             .chat_completion_with_debug(
                 &self.profile,
@@ -155,11 +163,30 @@ impl ChatAgent {
             .await?;
         self.commit_turn(prompt, response.text.clone());
         let mut response = response;
+        if let Some(summary_metrics) = summary_metrics {
+            response.metrics =
+                crate::chat::add_request_metrics(&response.metrics, &summary_metrics);
+        }
         if let Some(summary_metrics) = self.refresh_memory_with_timeout(client).await {
             response.metrics =
                 crate::chat::add_request_metrics(&response.metrics, &summary_metrics);
         }
         Ok((response, debug))
+    }
+
+    pub async fn prepare_stream_request(
+        &mut self,
+        client: &dyn ProviderClient,
+        prompt: &str,
+    ) -> (
+        crate::providers::ChatRequest,
+        Option<crate::providers::RequestMetrics>,
+    ) {
+        let summary_metrics = self.preflight_compact_with_timeout(client, prompt).await;
+        (
+            self.request_with_user_prompt(prompt.to_string()),
+            summary_metrics,
+        )
     }
 
     pub fn control(&self) -> &ResponseControl {
@@ -228,6 +255,82 @@ impl ChatAgent {
         else {
             return None;
         };
+        self.compact_history_range(client, range).await
+    }
+
+    async fn preflight_compact_with_timeout(
+        &mut self,
+        client: &dyn ProviderClient,
+        prompt: &str,
+    ) -> Option<crate::providers::RequestMetrics> {
+        timeout(
+            MEMORY_REFRESH_TIMEOUT,
+            self.preflight_compact_for_context_pressure(client, prompt),
+        )
+        .await
+        .ok()
+        .flatten()
+    }
+
+    async fn preflight_compact_for_context_pressure(
+        &mut self,
+        client: &dyn ProviderClient,
+        prompt: &str,
+    ) -> Option<crate::providers::RequestMetrics> {
+        let threshold = self.preflight_summary_threshold()?;
+        let mut accumulated = None;
+        let mut previous_tokens = None;
+
+        for _ in 0..MAX_PREFLIGHT_SUMMARY_PASSES {
+            let request = self.request_with_user_prompt(prompt.to_string());
+            let request_tokens = estimate_messages_tokens(&request.messages);
+            if request_tokens < threshold {
+                break;
+            }
+            if previous_tokens.is_some_and(|tokens| request_tokens >= tokens) {
+                break;
+            }
+            let Some(range) = self.memory.next_summary_range_for_pressure(
+                &self.history,
+                self.memory_config,
+                self.memory_config.recent_messages,
+            ) else {
+                break;
+            };
+            let summary_metrics = self.compact_history_range(client, range).await?;
+            accumulated = Some(match accumulated {
+                Some(current) => crate::chat::add_request_metrics(&current, &summary_metrics),
+                None => summary_metrics,
+            });
+            previous_tokens = Some(request_tokens);
+        }
+
+        accumulated
+    }
+
+    fn preflight_summary_threshold(&self) -> Option<u32> {
+        let context_limit = self.context_limit?;
+        let reserved_output = self
+            .control
+            .max_completion_tokens
+            .or(self.control.max_tokens)
+            .unwrap_or(0);
+        let available_input = context_limit.saturating_sub(reserved_output);
+        if available_input == 0 {
+            return None;
+        }
+        Some(
+            available_input
+                .saturating_mul(u32::from(self.memory_config.summarize_at_context_percent))
+                / 100,
+        )
+    }
+
+    async fn compact_history_range(
+        &mut self,
+        client: &dyn ProviderClient,
+        range: std::ops::Range<usize>,
+    ) -> Option<crate::providers::RequestMetrics> {
         let messages_to_summarize = format_messages_for_summary(&self.history[range.clone()]);
         if messages_to_summarize.trim().is_empty() {
             self.memory.summarized_message_count = range.end;
@@ -533,6 +636,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_preflight_summarizes_when_context_pressure_is_high() {
+        let client = FakeClient {
+            replies: std::sync::Mutex::new(vec![
+                "final answer".to_string(),
+                "pressure summary".to_string(),
+            ]),
+            metrics: std::sync::Mutex::new(Vec::new()),
+            seen_messages: std::sync::Mutex::new(Vec::new()),
+        };
+        let history = (0..6)
+            .map(|index| ChatMessage {
+                role: if index % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                content: format!("history message {index}"),
+            })
+            .collect::<Vec<_>>();
+        let mut agent = ChatAgent::new(
+            test_profile(),
+            "secret".to_string(),
+            history,
+            AgentMemory::default(),
+            ResponseControl::uncontrolled(),
+            None,
+            None,
+        );
+        agent.set_context_limit(Some(120));
+        agent.set_memory_config(MemoryConfig {
+            recent_messages: 4,
+            summarize_after_messages: 99,
+            summary_chunk_messages: 10,
+            summarize_at_context_percent: 80,
+            ..MemoryConfig::default()
+        });
+
+        let prompt = (0..55)
+            .map(|index| format!("huge{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        agent.respond(&client, prompt).await.expect("response");
+
+        let seen = client.seen_messages.lock().expect("seen messages");
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0][0].role, Role::System);
+        assert!(seen[0][0].content.contains("memory compaction module"));
+        assert!(
+            seen[1]
+                .iter()
+                .any(|message| message.content.contains("pressure summary"))
+        );
+        assert!(
+            seen[1]
+                .iter()
+                .all(|message| !message.content.contains("history message 0"))
+        );
+        assert_eq!(
+            agent.memory().session_summary.as_deref(),
+            Some("pressure summary")
+        );
+        assert_eq!(agent.memory().summarized_message_count, 2);
+    }
+
+    #[tokio::test]
     async fn agent_full_memory_strategy_sends_complete_history() {
         let client = FakeClient {
             replies: std::sync::Mutex::new(vec!["fresh answer".to_string()]),
@@ -574,6 +742,7 @@ mod tests {
             recent_messages: 2,
             summarize_after_messages: 4,
             summary_chunk_messages: 1,
+            summarize_at_context_percent: 80,
         });
 
         agent

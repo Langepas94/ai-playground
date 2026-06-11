@@ -257,6 +257,7 @@ async fn chat(
         .unwrap_or_default()
         .into_memory_config();
     let pricing = web_request_pricing(&request, &state.prices, &profile);
+    let context_limit = web_request_context_limit(&request, &state.prices, &profile);
     let mut agent = ChatAgent::new(
         profile.clone(),
         token,
@@ -270,6 +271,7 @@ async fn chat(
             .and_then(WebBilling::into_billing_lookup),
     );
     agent.set_memory_config(memory_config);
+    agent.set_context_limit(context_limit);
     let (response, provider_debug) = agent.respond_with_debug(&state.client, prompt).await?;
     let session_metrics = add_request_metrics(&session.metrics, &response.metrics);
     state
@@ -326,6 +328,7 @@ async fn chat_stream(
         .unwrap_or_default()
         .into_memory_config();
     let pricing = web_request_pricing(&request, &state.prices, &profile);
+    let context_limit = web_request_context_limit(&request, &state.prices, &profile);
     let mut agent = ChatAgent::new(
         profile.clone(),
         token.clone(),
@@ -339,7 +342,9 @@ async fn chat_stream(
             .and_then(WebBilling::into_billing_lookup),
     );
     agent.set_memory_config(memory_config);
-    let chat_request = agent.build_stream_request(prompt.clone());
+    agent.set_context_limit(context_limit);
+    let (chat_request, preflight_summary_metrics) =
+        agent.prepare_stream_request(&state.client, &prompt).await;
     let session_id = session.id.clone();
     let session_metrics_before = session.metrics.clone();
 
@@ -357,8 +362,12 @@ async fn chat_stream(
         match result {
             Ok(response) => {
                 let assistant_text = response.text.clone();
+                let mut response_metrics = response.metrics.clone();
+                if let Some(summary_metrics) = preflight_summary_metrics.clone() {
+                    response_metrics = add_request_metrics(&response_metrics, &summary_metrics);
+                }
                 let mut session_metrics =
-                    add_request_metrics(&session_metrics_before, &response.metrics);
+                    add_request_metrics(&session_metrics_before, &response_metrics);
                 agent.record_stream_response(prompt, assistant_text);
                 if let Some(summary_metrics) = agent.compact_memory(&client).await {
                     session_metrics = add_request_metrics(&session_metrics, &summary_metrics);
@@ -545,6 +554,7 @@ struct ChatWebRequest {
     token: String,
     token_provider: Option<String>,
     model: String,
+    context_limit: Option<u32>,
     system_prompt: Option<String>,
     prompt: String,
     attachments: Option<Vec<WebAttachment>>,
@@ -651,6 +661,7 @@ struct WebMemoryConfig {
     recent_messages: Option<usize>,
     summarize_after_messages: Option<usize>,
     summary_chunk_messages: Option<usize>,
+    summarize_at_context_percent: Option<u8>,
 }
 
 impl Default for WebMemoryConfig {
@@ -661,6 +672,7 @@ impl Default for WebMemoryConfig {
             recent_messages: Some(defaults.recent_messages),
             summarize_after_messages: Some(defaults.summarize_after_messages),
             summary_chunk_messages: Some(defaults.summary_chunk_messages),
+            summarize_at_context_percent: Some(defaults.summarize_at_context_percent),
         }
     }
 }
@@ -681,6 +693,10 @@ impl WebMemoryConfig {
                 .summary_chunk_messages
                 .unwrap_or(defaults.summary_chunk_messages)
                 .max(1),
+            summarize_at_context_percent: self
+                .summarize_at_context_percent
+                .unwrap_or(defaults.summarize_at_context_percent)
+                .clamp(1, 100),
         }
     }
 }
@@ -829,6 +845,21 @@ fn web_request_pricing(
         })
 }
 
+fn web_request_context_limit(
+    request: &ChatWebRequest,
+    prices: &LiteLlmPriceCatalog,
+    profile: &ProfileConfig,
+) -> Option<u32> {
+    request.context_limit.or_else(|| {
+        prices
+            .resolve(profile.provider, &profile.model)
+            .ok()
+            .flatten()
+            .and_then(|resolution| resolution.context_length)
+            .and_then(|limit| u32::try_from(limit).ok())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -898,6 +929,7 @@ mod tests {
             token: String::new(),
             token_provider: None,
             model: "deepseek-chat".to_string(),
+            context_limit: None,
             system_prompt: Some("Ты отвечаешь кратко.".to_string()),
             prompt: "Привет".to_string(),
             attachments: None,
@@ -926,6 +958,7 @@ mod tests {
             token: String::new(),
             token_provider: None,
             model: "deepseek-chat".to_string(),
+            context_limit: None,
             system_prompt: Some("Ты отвечаешь кратко.".to_string()),
             prompt: "Продолжи".to_string(),
             attachments: None,
@@ -972,6 +1005,7 @@ mod tests {
             token: String::new(),
             token_provider: None,
             model: "deepseek-chat".to_string(),
+            context_limit: None,
             system_prompt: None,
             prompt: "Продолжи".to_string(),
             attachments: None,
@@ -1012,6 +1046,7 @@ mod tests {
             recent_messages: Some(4),
             summarize_after_messages: Some(8),
             summary_chunk_messages: Some(0),
+            summarize_at_context_percent: Some(95),
         }
         .into_memory_config();
 
@@ -1019,6 +1054,7 @@ mod tests {
         assert_eq!(config.recent_messages, 4);
         assert_eq!(config.summarize_after_messages, 8);
         assert_eq!(config.summary_chunk_messages, 1);
+        assert_eq!(config.summarize_at_context_percent, 95);
     }
 
     #[test]
@@ -1051,6 +1087,7 @@ mod tests {
             token: String::new(),
             token_provider: None,
             model: "deepseek-chat".to_string(),
+            context_limit: None,
             system_prompt: None,
             prompt: "Привет".to_string(),
             attachments: None,
@@ -1069,6 +1106,62 @@ mod tests {
         assert!((pricing.input_per_million.unwrap() - 0.28).abs() < f64::EPSILON);
         assert!((pricing.output_per_million - 0.42).abs() < f64::EPSILON);
         assert!((pricing.cache_hit_input_per_million.unwrap() - 0.028).abs() < 1e-12);
+    }
+
+    #[test]
+    fn web_request_context_limit_prefers_request_then_catalog() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("prices.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "fetched_at_unix": 4102444800,
+              "source_url": "https://example.test/catalog.json",
+              "entries": {
+                "deepseek-chat": {
+                  "litellm_provider": "deepseek",
+                  "output_cost_per_token": 0.00000042,
+                  "max_input_tokens": 131072
+                }
+              }
+            }"#,
+        )
+        .expect("write price cache");
+        let prices = LiteLlmPriceCatalog::with_path(path);
+        let request = ChatWebRequest {
+            agent_id: Some(crate::chat::LOCAL_SESSION_AGENT_ID.to_string()),
+            provider: "deepseek".to_string(),
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            token: String::new(),
+            token_provider: None,
+            model: "deepseek-chat".to_string(),
+            context_limit: Some(32_000),
+            system_prompt: None,
+            prompt: "Привет".to_string(),
+            attachments: None,
+            session_id: None,
+            new_session: false,
+            messages: None,
+            control: WebResponseControl::default(),
+            memory: None,
+            pricing: None,
+            billing: None,
+        };
+        let profile = request.profile().expect("profile");
+
+        assert_eq!(
+            web_request_context_limit(&request, &prices, &profile),
+            Some(32_000)
+        );
+
+        let request_without_override = ChatWebRequest {
+            context_limit: None,
+            ..request
+        };
+        assert_eq!(
+            web_request_context_limit(&request_without_override, &prices, &profile),
+            Some(131_072)
+        );
     }
 
     /// Баг 2: WebPricing с только output ценой должен конвертироваться в Some(ModelPricing)

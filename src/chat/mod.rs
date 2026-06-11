@@ -50,6 +50,7 @@ pub struct SelectedProfile<'a> {
 pub struct RequestOptions {
     pub pricing: Option<ModelPricing>,
     pub billing: Option<BillingLookup>,
+    pub context_limit: Option<u32>,
 }
 
 pub async fn ask_once(
@@ -60,7 +61,7 @@ pub async fn ask_once(
     options: RequestOptions,
 ) -> Result<crate::providers::ChatResponse, AppError> {
     let token = resolve_profile_token(runtime, profile)?;
-    ChatAgent::new(
+    let mut agent = ChatAgent::new(
         profile.config.clone(),
         token,
         Vec::new(),
@@ -68,9 +69,9 @@ pub async fn ask_once(
         control.clone(),
         options.pricing,
         options.billing,
-    )
-    .respond(runtime.client, prompt)
-    .await
+    );
+    agent.set_context_limit(options.context_limit);
+    agent.respond(runtime.client, prompt).await
 }
 
 pub async fn compare_response_control(

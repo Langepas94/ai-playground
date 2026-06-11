@@ -38,6 +38,7 @@ pub async fn interactive_chat(
         options.billing,
     );
     agent.set_memory_config(memory_config);
+    agent.set_context_limit(options.context_limit);
     let mut goal_state = GoalState::new(goal.required_fields.clone());
     let mut pending_attachments: Vec<PathBuf> = Vec::new();
     println!(
@@ -337,6 +338,17 @@ pub async fn interactive_chat(
             }
             continue;
         }
+        if let Some(value) = line.strip_prefix("/memory percent ") {
+            match value.parse::<u8>() {
+                Ok(v) if (1..=100).contains(&v) => {
+                    memory_config.summarize_at_context_percent = v;
+                    agent.set_memory_config(memory_config);
+                    println!("Memory summarize-at-context percent: {v}");
+                }
+                _ => println!("Use /memory percent <1-100>."),
+            }
+            continue;
+        }
         if let Some(value) = line.strip_prefix("/completion-instruction ") {
             control.completion_instruction = Some(value.to_string());
             println!("Completion instruction updated.");
@@ -441,11 +453,12 @@ pub fn describe_goal(goal: &ConversationGoal, state: &GoalState) -> String {
 
 pub fn describe_memory(config: MemoryConfig, memory: &super::AgentMemory) -> String {
     format!(
-        "Memory: strategy={}, recent_messages={}, summarize_after_messages={}, summary_chunk_messages={}, summarized_message_count={}, summary={}",
+        "Memory: strategy={}, recent_messages={}, summarize_after_messages={}, summary_chunk_messages={}, summarize_at_context_percent={}, summarized_message_count={}, summary={}",
         config.strategy,
         config.recent_messages,
         config.summarize_after_messages,
         config.summary_chunk_messages,
+        config.summarize_at_context_percent,
         memory.summarized_message_count,
         memory
             .session_summary
