@@ -51,21 +51,30 @@ pub struct TokenGrowthReport {
 
 pub fn estimate_text_tokens(text: &str) -> u32 {
     let mut tokens = 0_u32;
-    let mut in_word = false;
+    let mut in_ascii_word = false;
+    // Non-ASCII letters/digits (Cyrillic, CJK, etc.) are tokenized at roughly
+    // 2 characters per token by modern BPE tokenizers (cl100k). Counting each
+    // such char as a separate token over-estimated Cyrillic text ~4x, which in
+    // turn inflated estimated cost when a provider omitted usage in the stream.
+    let mut non_ascii_alnum = 0_u32;
     for character in text.chars() {
         if character.is_ascii_alphanumeric() || character == '_' {
-            if !in_word {
+            if !in_ascii_word {
                 tokens = tokens.saturating_add(1);
-                in_word = true;
+                in_ascii_word = true;
             }
+        } else if character.is_alphanumeric() {
+            in_ascii_word = false;
+            non_ascii_alnum = non_ascii_alnum.saturating_add(1);
         } else {
-            in_word = false;
+            in_ascii_word = false;
             if character.is_whitespace() {
                 continue;
             }
-            tokens = tokens.saturating_add(if character.is_ascii() { 1 } else { 2 });
+            tokens = tokens.saturating_add(1);
         }
     }
+    tokens = tokens.saturating_add(non_ascii_alnum.div_ceil(2));
     tokens.max((text.chars().count() as u32).saturating_add(3) / 4)
 }
 
@@ -232,6 +241,29 @@ mod tests {
             cache_hit_input_per_million: None,
             cache_miss_input_per_million: None,
         }
+    }
+
+    #[test]
+    fn cyrillic_text_is_not_over_estimated() {
+        // Regression: each Cyrillic char was counted as 2 tokens, inflating
+        // estimated usage (and therefore cost) ~4x when a provider omitted usage.
+        // Cyrillic tokenizes at roughly 2 chars/token, so a 7-letter word must
+        // stay well under the old 14-token estimate.
+        let word = "бюджеты"; // 7 Cyrillic letters
+        let tokens = estimate_text_tokens(word);
+        assert!(
+            tokens <= 5,
+            "expected <=5 tokens for a 7-letter Cyrillic word, got {tokens}"
+        );
+
+        // A longer Russian sentence must not blow up either.
+        let sentence = "Расскажи мне новый анекдот про двух соседей пожалуйста";
+        let sentence_tokens = estimate_text_tokens(sentence);
+        let char_count = sentence.chars().count() as u32;
+        assert!(
+            sentence_tokens < char_count,
+            "estimate {sentence_tokens} should be below char count {char_count}"
+        );
     }
 
     #[test]

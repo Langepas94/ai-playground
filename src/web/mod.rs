@@ -368,20 +368,17 @@ async fn chat_stream(
             Ok((response, provider_debug)) => {
                 let assistant_text = response.text.clone();
                 let mut response_metrics = response.metrics.clone();
-                let mut summary_metrics = preflight_summary_metrics.clone();
+                let summary_metrics = preflight_summary_metrics.clone();
                 if let Some(summary_metrics) = preflight_summary_metrics.clone() {
                     response_metrics = add_request_metrics(&response_metrics, &summary_metrics);
                 }
-                let mut session_metrics =
+                let session_metrics =
                     add_request_metrics(&session_metrics_before, &response_metrics);
                 agent.record_stream_response(prompt, assistant_text);
-                if let Some(post_summary_metrics) = agent.compact_memory(&client).await {
-                    summary_metrics = Some(match summary_metrics {
-                        Some(current) => add_request_metrics(&current, &post_summary_metrics),
-                        None => post_summary_metrics.clone(),
-                    });
-                    session_metrics = add_request_metrics(&session_metrics, &post_summary_metrics);
-                }
+                // Persist + emit `done` BEFORE memory compaction. Compaction runs
+                // a separate LLM call that can take seconds; it must never block the
+                // user-facing `done` event (otherwise the stream appears to hang and
+                // the debug panel stays empty).
                 let _ = sessions.save_session(&session_key, &session_id, agent.history());
                 let _ = sessions.save_metrics(&session_id, &session_metrics);
                 let _ = sessions.save_memory(&session_id, agent.memory());
@@ -398,6 +395,16 @@ async fn chat_stream(
                     },
                 });
                 let _ = tx.send(format!("\x00DONE\x00{done_event}"));
+                drop(tx);
+
+                // Background compaction: update memory summary for the NEXT turn.
+                // Its cost folds into session metrics on the next request load.
+                if let Some(post_summary_metrics) = agent.compact_memory(&client).await {
+                    let compacted_session_metrics =
+                        add_request_metrics(&session_metrics, &post_summary_metrics);
+                    let _ = sessions.save_metrics(&session_id, &compacted_session_metrics);
+                    let _ = sessions.save_memory(&session_id, agent.memory());
+                }
             }
             Err(err) => {
                 let _ = tx.send(format!("\x00ERR\x00{err}"));
@@ -1419,7 +1426,10 @@ mod tests {
 
         let result = build_web_prompt(prompt, Some(attachments_vec.as_slice()));
 
-        assert!(result.contains("What is this?"), "original prompt must be preserved");
+        assert!(
+            result.contains("What is this?"),
+            "original prompt must be preserved"
+        );
         assert!(
             result.contains("--- data.txt ---"),
             "attachment name must appear as separator"
