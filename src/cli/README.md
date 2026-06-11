@@ -13,6 +13,7 @@ CLI отвечает за пользовательский ввод, dispatch к
 - `commands/chat.rs` - запуск интерактивной REPL-сессии.
 - `commands/compare.rs` - сравнение обычного/управляемого ответа и goal stop modes.
 - `commands/token_demo.rs` - локальная демонстрация роста токенов/стоимости и context overflow без provider API.
+- `commands/dist.rs` - загрузка и установка dev-сборок в локальный `bin` каталог.
 - `commands/setup.rs` - интерактивное создание профиля и optional token setup.
 - `commands/profile.rs` - add/list/use/remove профилей.
 - `commands/token.rs` - set/delete токенов через `SecretStore`.
@@ -59,3 +60,14 @@ rtk cargo test
 ```bash
 rtk cargo run --bin ai -- token-demo --context-limit 4096
 ```
+
+Для dev-сборок:
+
+```bash
+rtk cargo run --bin ai -- dist status
+rtk cargo run --bin ai -- dist install
+rtk cargo run --bin ai -- dist update
+```
+
+По умолчанию `dist` берет бинарь из `https://github.com/Langepas94/ai-playground/releases/download/dev/...`.
+Если нужно, можно переопределить URL через `--url` или репозиторий/канал через `AI_PLAYGROUND_DIST_REPO_URL` и `AI_PLAYGROUND_DIST_CHANNEL`.

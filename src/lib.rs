@@ -1,6 +1,7 @@
 pub mod chat;
 pub mod cli;
 pub mod config;
+pub mod dist;
 pub mod errors;
 pub mod pricing;
 pub mod providers;
