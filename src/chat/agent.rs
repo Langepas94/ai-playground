@@ -657,10 +657,15 @@ mod tests {
 
         let seen = client.seen_messages.lock().expect("seen messages");
         assert_eq!(seen.len(), 2);
-        assert_eq!(seen[0].len(), 13);
-        assert_eq!(seen[0][0].content, "history 8");
-        assert_eq!(seen[0][12].content, "current question");
-        assert_eq!(seen[1].len(), 2);
+        // No context_limit → no pressure preflight to summarize before sending.
+        // The main request therefore carries the FULL history plus the new
+        // prompt: not a single message is silently dropped by the sliding
+        // window. (Bounding happens via the summary built afterwards, which
+        // shrinks subsequent turns.)
+        assert_eq!(seen[0].len(), 21);
+        assert_eq!(seen[0][0].content, "history 0");
+        assert_eq!(seen[0][20].content, "current question");
+        // The post-response summarization fragment still covers the oldest turns.
         assert!(seen[1][1].content.contains("history 0"));
         assert_eq!(
             agent.memory().session_summary.as_deref(),
