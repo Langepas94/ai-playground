@@ -1265,6 +1265,13 @@
     function setDebug(debug) {
       $('providerRequest').textContent = prettyJson(debug?.provider_request);
       $('providerResponse').textContent = prettyJson(debug?.provider_response);
+      const statusCode = debug?.provider_response?.status;
+      if (statusCode) {
+        $('serverReqStatus').textContent = statusCode;
+        $('serverReqStatus').className = 'debug-status ok';
+        $('serverRespStatus').textContent = statusCode;
+        $('serverRespStatus').className = 'debug-status ok';
+      }
     }
 
     function setServerDebug(payload, responseText, httpStatus) {
@@ -1277,7 +1284,11 @@
         }));
       }
       $('providerRequest').textContent = prettyJson(displayPayload);
-      $('providerResponse').textContent = responseText ?? '';
+      if (httpStatus !== null && httpStatus >= 400) {
+        $('providerResponse').textContent = responseText ?? '';
+      } else if (httpStatus === null) {
+        $('providerResponse').textContent = '{}';
+      }
 
       const reqBadge = $('serverReqStatus');
       const respBadge = $('serverRespStatus');
@@ -1397,7 +1408,25 @@
     }
 
     function setSessionMetrics(metrics) {
-      $('metricSession').innerHTML = metrics && metrics.usage ? tokenLines(metrics.usage) : '—';
+      if (!metrics) {
+        $('metricSession').textContent = '—';
+        return;
+      }
+      const parts = [];
+      if (metrics.usage) {
+        parts.push(tokenLines(metrics.usage));
+      }
+      if (metrics.cost) {
+        const amount = Number(metrics.cost.amount);
+        const rate = parseFloat($('rubRate').value);
+        let costText = `${amount.toFixed(8)} ${metrics.cost.currency}`;
+        if (rate > 0 && metrics.cost.currency === 'USD') {
+          costText += ` ≈ ${(amount * rate).toFixed(6)} ₽`;
+        }
+        costText += ` (${metrics.cost.source})`;
+        parts.push(`<span class="metric-lines"><span class="metric-line"><em>cost</em><b>${escapeHtml(costText)}</b></span></span>`);
+      }
+      $('metricSession').innerHTML = parts.length ? parts.join('') : '—';
     }
 
     function tokenLines(usage) {
@@ -1653,7 +1682,9 @@
                 chatHistory = data.messages || chatHistory;
                 restoreSystemPromptFromHistory(chatHistory);
                 renderChatHistory(); // финальный рендер с метаданными
+                setMetrics(data.metrics);
                 setSessionMetrics(data.session_metrics);
+                setDebug(data.debug);
                 setStatus('Готово');
               } else if (eventType === 'error') {
                 throw new Error(eventData);
@@ -1719,9 +1750,8 @@
     }
 
     function updateComposerMeta() {
-      const hasBadge = $('contextWindowBadge').style.display !== 'none';
       const hasChips = pendingAttachments.length > 0;
-      $('composerMeta').style.display = (hasBadge || hasChips) ? 'flex' : 'none';
+      $('composerMeta').style.display = hasChips ? 'flex' : 'none';
     }
 
     function renderAttachmentChips() {
