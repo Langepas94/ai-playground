@@ -827,6 +827,7 @@
             <div class="metric"><span>Время запроса</span><strong id="metricTime">—</strong></div>
             <div class="metric"><span>Токены запроса</span><strong id="metricTokens">—</strong></div>
             <div class="metric"><span>Стоимость запроса</span><strong id="metricCost">—</strong></div>
+            <div class="metric"><span>Сжатие истории</span><strong id="metricSummary">—</strong></div>
             <div class="metric"><span>Токены диалога</span><strong id="metricSession">—</strong></div>
           </div>
         </div>
@@ -1408,17 +1409,18 @@
       forceNewSession = false;
       chatHistory = data.messages || [];
       restoreSystemPromptFromHistory(chatHistory);
-      setMetrics(null);
+      setMetrics(null, null);
       setSessionMetrics(data.metrics);
       if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
       renderChatHistory();
     }
 
-    function setMetrics(metrics) {
+    function setMetrics(metrics, summaryMetrics = null) {
       if (!metrics) {
         $('metricTime').textContent = '—';
         $('metricTokens').textContent = '—';
         $('metricCost').textContent = '—';
+        $('metricSummary').textContent = '—';
         return;
       }
       $('metricTime').textContent = `${metrics.elapsed_ms} ms`;
@@ -1435,6 +1437,26 @@
       } else {
         $('metricCost').textContent = 'unavailable';
       }
+      $('metricSummary').innerHTML = summaryMetrics ? summaryLines(summaryMetrics) : 'не запускалось';
+    }
+
+    function summaryLines(metrics) {
+      const parts = [];
+      parts.push(`<span class="metric-lines"><span class="metric-line"><em>time</em><b>${metrics.elapsed_ms} ms</b></span></span>`);
+      if (metrics.usage) {
+        parts.push(tokenLines(metrics.usage));
+      }
+      if (metrics.cost) {
+        const amount = Number(metrics.cost.amount);
+        const rate = parseFloat($('rubRate').value);
+        let costText = `${amount.toFixed(8)} ${metrics.cost.currency}`;
+        if (rate > 0 && metrics.cost.currency === 'USD') {
+          costText += ` ≈ ${(amount * rate).toFixed(6)} ₽`;
+        }
+        costText += ` (${metrics.cost.source})`;
+        parts.push(`<span class="metric-lines"><span class="metric-line"><em>cost</em><b>${escapeHtml(costText)}</b></span></span>`);
+      }
+      return parts.join('');
     }
 
     function setSessionMetrics(metrics) {
@@ -1643,7 +1665,7 @@
       $('send').disabled = true;
       setStatus('Жду ответ модели...');
       setDebug(null);
-      setMetrics(null);
+      setMetrics(null, null);
       const payload = chatPayload();
       setServerDebug(payload, null, null);
 
@@ -1713,7 +1735,7 @@
                 chatHistory = data.messages || chatHistory;
                 restoreSystemPromptFromHistory(chatHistory);
                 renderChatHistory(); // финальный рендер с метаданными
-                setMetrics(data.metrics);
+                setMetrics(data.metrics, data.summary_metrics);
                 setSessionMetrics(data.session_metrics);
                 setDebug(data.debug);
                 setStatus('Готово');
@@ -1872,7 +1894,7 @@
         setStatus(error.message, true);
       } finally {
         setDebug(null);
-        setMetrics(null);
+        setMetrics(null, null);
       }
     });
     init().catch((error) => setStatus(error.message, true));

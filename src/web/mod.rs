@@ -272,7 +272,9 @@ async fn chat(
     );
     agent.set_memory_config(memory_config);
     agent.set_context_limit(context_limit);
-    let (response, provider_debug) = agent.respond_with_debug(&state.client, prompt).await?;
+    let (response, provider_debug, summary_metrics) = agent
+        .respond_with_debug_and_summary_metrics(&state.client, prompt)
+        .await?;
     let session_metrics = add_request_metrics(&session.metrics, &response.metrics);
     state
         .sessions
@@ -285,6 +287,7 @@ async fn chat(
         text: response.text,
         finish_reason: response.finish_reason,
         metrics: response.metrics,
+        summary_metrics,
         session_metrics,
         messages: agent.history().to_vec(),
         debug: ChatDebugView {
@@ -363,14 +366,19 @@ async fn chat_stream(
             Ok((response, provider_debug)) => {
                 let assistant_text = response.text.clone();
                 let mut response_metrics = response.metrics.clone();
+                let mut summary_metrics = preflight_summary_metrics.clone();
                 if let Some(summary_metrics) = preflight_summary_metrics.clone() {
                     response_metrics = add_request_metrics(&response_metrics, &summary_metrics);
                 }
                 let mut session_metrics =
                     add_request_metrics(&session_metrics_before, &response_metrics);
                 agent.record_stream_response(prompt, assistant_text);
-                if let Some(summary_metrics) = agent.compact_memory(&client).await {
-                    session_metrics = add_request_metrics(&session_metrics, &summary_metrics);
+                if let Some(post_summary_metrics) = agent.compact_memory(&client).await {
+                    summary_metrics = Some(match summary_metrics {
+                        Some(current) => add_request_metrics(&current, &post_summary_metrics),
+                        None => post_summary_metrics.clone(),
+                    });
+                    session_metrics = add_request_metrics(&session_metrics, &post_summary_metrics);
                 }
                 let _ = sessions.save_session(&session_key, &session_id, agent.history());
                 let _ = sessions.save_metrics(&session_id, &session_metrics);
@@ -379,6 +387,7 @@ async fn chat_stream(
                     "done": true,
                     "session_id": session_id,
                     "metrics": response_metrics,
+                    "summary_metrics": summary_metrics,
                     "session_metrics": session_metrics,
                     "messages": agent.history(),
                     "debug": ChatDebugView {
@@ -800,6 +809,7 @@ struct ChatWebResponse {
     text: String,
     finish_reason: Option<String>,
     metrics: crate::providers::RequestMetrics,
+    summary_metrics: Option<crate::providers::RequestMetrics>,
     session_metrics: crate::providers::RequestMetrics,
     messages: Vec<ChatMessage>,
     debug: ChatDebugView,
@@ -1281,8 +1291,12 @@ mod tests {
     #[test]
     fn web_ui_stream_done_updates_request_metrics_and_debug() {
         assert!(
-            INDEX_HTML.contains("setMetrics(data.metrics);"),
+            INDEX_HTML.contains("setMetrics(data.metrics, data.summary_metrics);"),
             "streaming done handler must render per-request metrics so request cost is not blank"
+        );
+        assert!(
+            INDEX_HTML.contains("summary_metrics"),
+            "streaming done handler must receive separate summary metrics"
         );
         assert!(
             INDEX_HTML.contains("setDebug(data.debug);"),
@@ -1323,6 +1337,17 @@ mod tests {
         assert!(
             body.contains("metric-line\"><em>cost</em>"),
             "session cost should be visible in the metrics panel"
+        );
+    }
+
+    #[test]
+    fn web_ui_displays_summary_metrics_separately() {
+        assert!(INDEX_HTML.contains("Сжатие истории"));
+        assert!(INDEX_HTML.contains("id=\"metricSummary\""));
+        assert!(INDEX_HTML.contains("function summaryLines(metrics)"));
+        assert!(
+            INDEX_HTML.contains("не запускалось"),
+            "UI should explicitly say when no history summary request happened"
         );
     }
 

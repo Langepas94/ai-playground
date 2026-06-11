@@ -153,6 +153,24 @@ impl ChatAgent {
         client: &dyn ProviderClient,
         prompt: String,
     ) -> Result<(ChatResponse, ProviderExchangeDebug), AppError> {
+        let (response, debug, _) = self
+            .respond_with_debug_and_summary_metrics(client, prompt)
+            .await?;
+        Ok((response, debug))
+    }
+
+    pub async fn respond_with_debug_and_summary_metrics(
+        &mut self,
+        client: &dyn ProviderClient,
+        prompt: String,
+    ) -> Result<
+        (
+            ChatResponse,
+            ProviderExchangeDebug,
+            Option<crate::providers::RequestMetrics>,
+        ),
+        AppError,
+    > {
         let summary_metrics = self.preflight_compact_with_timeout(client, &prompt).await;
         let (response, debug) = client
             .chat_completion_with_debug(
@@ -163,15 +181,20 @@ impl ChatAgent {
             .await?;
         self.commit_turn(prompt, response.text.clone());
         let mut response = response;
-        if let Some(summary_metrics) = summary_metrics {
+        let mut total_summary_metrics = summary_metrics;
+        if let Some(summary_metrics) = &total_summary_metrics {
             response.metrics =
                 crate::chat::add_request_metrics(&response.metrics, &summary_metrics);
         }
         if let Some(summary_metrics) = self.refresh_memory_with_timeout(client).await {
+            total_summary_metrics = Some(match total_summary_metrics {
+                Some(current) => crate::chat::add_request_metrics(&current, &summary_metrics),
+                None => summary_metrics.clone(),
+            });
             response.metrics =
                 crate::chat::add_request_metrics(&response.metrics, &summary_metrics);
         }
-        Ok((response, debug))
+        Ok((response, debug, total_summary_metrics))
     }
 
     pub async fn prepare_stream_request(
