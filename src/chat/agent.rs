@@ -13,7 +13,12 @@ use tokio::time::{Duration, timeout};
 
 pub const LOCAL_SESSION_AGENT_ID: &str = "local-session-agent";
 const MEMORY_COMPACT_TIMEOUT: Duration = Duration::from_secs(30);
-const PREFLIGHT_COMPACT_TIMEOUT: Duration = Duration::from_secs(3);
+// Preflight compaction runs a full summarization LLM call (seconds for real
+// content) and only fires when the request already exceeds the context-pressure
+// threshold. A short timeout silently aborted it → history was never compressed
+// → the request overflowed the model window. It must be long enough for the
+// summarization call to finish; the wait only happens under genuine pressure.
+const PREFLIGHT_COMPACT_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_PREFLIGHT_SUMMARY_PASSES: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -933,5 +938,120 @@ mod tests {
         assert!(agent.context_limit().is_none());
         agent.set_context_limit(Some(8192));
         assert_eq!(agent.context_limit(), Some(8192));
+    }
+
+    /// Real summarization is a full LLM call that takes seconds. A short
+    /// preflight timeout silently aborted it, so history under context pressure
+    /// was never compressed. This client delays each reply to emulate a slow
+    /// provider; the preflight must still complete the summary.
+    struct SlowClient {
+        delay: Duration,
+        reply: String,
+    }
+
+    #[async_trait]
+    impl ProviderClient for SlowClient {
+        async fn list_models(
+            &self,
+            _profile: &ProfileConfig,
+            _token: &str,
+        ) -> Result<Vec<String>, AppError> {
+            Ok(Vec::new())
+        }
+
+        async fn chat_completion(
+            &self,
+            _profile: &ProfileConfig,
+            _token: &str,
+            _request: ChatRequest,
+        ) -> Result<ChatResponse, AppError> {
+            tokio::time::sleep(self.delay).await;
+            Ok(ChatResponse {
+                text: self.reply.clone(),
+                finish_reason: Some("stop".to_string()),
+                metrics: crate::providers::RequestMetrics {
+                    elapsed_ms: 1,
+                    usage: None,
+                    cost: None,
+                },
+            })
+        }
+
+        async fn chat_completion_with_debug(
+            &self,
+            profile: &ProfileConfig,
+            token: &str,
+            request: ChatRequest,
+        ) -> Result<(ChatResponse, ProviderExchangeDebug), AppError> {
+            let response = self.chat_completion(profile, token, request).await?;
+            Ok((
+                response,
+                ProviderExchangeDebug {
+                    request: crate::providers::HttpDebugRequest {
+                        method: "POST".to_string(),
+                        url: "https://example.test/v1/chat/completions".to_string(),
+                        headers: Default::default(),
+                        body: serde_json::json!({}),
+                    },
+                    response: crate::providers::HttpDebugResponse {
+                        status: 200,
+                        headers: Default::default(),
+                        body: serde_json::json!({}),
+                    },
+                },
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn preflight_summary_survives_slow_provider() {
+        // 3.5s is longer than the old 3s preflight timeout but well under the
+        // current one — proves the timeout now tolerates real summarization.
+        let client = SlowClient {
+            delay: Duration::from_millis(3500),
+            reply: "compressed summary".to_string(),
+        };
+        let history = (0..6)
+            .map(|index| ChatMessage {
+                role: if index % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                content: format!("history message {index}"),
+            })
+            .collect::<Vec<_>>();
+        let mut agent = ChatAgent::new(
+            test_profile(),
+            "secret".to_string(),
+            history,
+            AgentMemory::default(),
+            ResponseControl::uncontrolled(),
+            None,
+            None,
+        );
+        agent.set_context_limit(Some(120));
+        agent.set_memory_config(MemoryConfig {
+            recent_messages: 4,
+            summarize_after_messages: 99,
+            summary_chunk_messages: 10,
+            summarize_at_context_percent: 80,
+            ..MemoryConfig::default()
+        });
+
+        let prompt = (0..55)
+            .map(|index| format!("huge{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let (_request, summary_metrics) = agent.prepare_stream_request(&client, &prompt).await;
+
+        assert!(
+            summary_metrics.is_some(),
+            "preflight summarization must complete despite slow provider"
+        );
+        assert_eq!(
+            agent.memory().session_summary.as_deref(),
+            Some("compressed summary")
+        );
     }
 }
