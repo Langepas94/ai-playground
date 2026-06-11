@@ -1114,6 +1114,48 @@ mod tests {
     }
 
     #[test]
+    fn web_model_view_includes_deepseek_catalog_pricing_when_provider_models_are_bare() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("prices.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "fetched_at_unix": 4102444800,
+              "source_url": "https://example.test/catalog.json",
+              "entries": {
+                "deepseek-ai/deepseek-chat": {
+                  "litellm_provider": "deepseek-ai",
+                  "input_cost_per_token": 0.00000028,
+                  "output_cost_per_token": 0.00000042,
+                  "max_input_tokens": 131072,
+                  "source": "https://example.test/deepseek"
+                }
+              }
+            }"#,
+        )
+        .expect("write price cache");
+        let prices = LiteLlmPriceCatalog::with_path(path);
+        let view = ModelView::from_model_info(
+            crate::providers::ModelInfo {
+                id: "deepseek-chat".to_string(),
+                pricing: None,
+                context_length: None,
+            },
+            &prices,
+            ProviderKind::DeepSeek,
+        );
+
+        let pricing = view.pricing.expect("catalog pricing");
+        assert!((pricing.input_per_million.unwrap() - 0.28).abs() < f64::EPSILON);
+        assert!((pricing.output_per_million - 0.42).abs() < f64::EPSILON);
+        assert_eq!(view.context_length, Some(131_072));
+        assert_eq!(
+            view.pricing_source.expect("pricing source").matched_model,
+            "deepseek-ai/deepseek-chat"
+        );
+    }
+
+    #[test]
     fn web_request_context_limit_prefers_request_then_catalog() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("prices.json");
@@ -1294,6 +1336,18 @@ mod tests {
         assert!(
             !INDEX_HTML.contains(">memory_strategy<"),
             "context settings should not expose raw API field names as labels"
+        );
+    }
+
+    #[test]
+    fn web_ui_resolves_pricing_after_model_options_are_loaded() {
+        let marker = "function setModelOptions(models, selectedModel)";
+        let start = INDEX_HTML.find(marker).expect("setModelOptions");
+        let body = &INDEX_HTML[start..INDEX_HTML.len().min(start + 1_400)];
+
+        assert!(
+            body.contains("resolveSelectedModelPricing();"),
+            "selected model pricing must be resolved after loading model options, including DeepSeek models with bare /models metadata"
         );
     }
 }
