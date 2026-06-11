@@ -246,6 +246,79 @@ async fn chat_completion_debug_redacts_auth_and_keeps_json_bodies() {
 }
 
 #[tokio::test]
+async fn stream_chat_completion_debug_keeps_metrics_cost_and_response_body() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(bearer_token("secret"))
+        .and(body_string_contains("\"stream\":true"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hello \"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"back\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":500,\"total_tokens\":1500}}\n\n",
+            "data: [DONE]\n\n"
+        )))
+        .mount(&server)
+        .await;
+
+    let profile = ProfileConfig {
+        provider: ProviderKind::OpenAiCompatible,
+        model: "test-model".to_string(),
+        base_url: server.uri(),
+        token_ref: "openai-compatible:test".to_string(),
+    };
+    let client = ReqwestProviderClient::new().expect("client");
+    let streamed_chunks = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let chunks_for_callback = streamed_chunks.clone();
+    let (response, debug) = client
+        .stream_chat_completion_with_debug(
+            &profile,
+            "secret",
+            ChatRequest {
+                model: "test-model".to_string(),
+                messages: vec![ChatMessage {
+                    role: Role::User,
+                    content: "hello".to_string(),
+                }],
+                control: ResponseControl::uncontrolled(),
+                pricing: Some(ModelPricing {
+                    currency: "USD".to_string(),
+                    input_per_million: Some(2.0),
+                    output_per_million: 10.0,
+                    cache_hit_input_per_million: None,
+                    cache_miss_input_per_million: None,
+                }),
+                billing: None,
+            },
+            move |chunk| {
+                chunks_for_callback
+                    .lock()
+                    .expect("chunks")
+                    .push(chunk.to_string());
+            },
+        )
+        .await
+        .expect("stream chat");
+
+    assert_eq!(
+        streamed_chunks.lock().expect("chunks").join(""),
+        "hello back"
+    );
+    assert_eq!(response.text, "hello back");
+    let usage = response.metrics.usage.expect("stream usage");
+    assert_eq!(usage.input_tokens, 1000);
+    assert_eq!(usage.output_tokens, 500);
+    let cost = response.metrics.cost.expect("stream configured cost");
+    assert!((cost.amount - 0.007).abs() < f64::EPSILON);
+    assert_eq!(cost.source, CostSource::ConfiguredPricing);
+    assert_eq!(debug.request.headers["authorization"], "Bearer [redacted]");
+    assert_eq!(debug.request.body["stream"], true);
+    assert_eq!(debug.response.status, 200);
+    assert_eq!(debug.response.body["message"]["content"], "hello back");
+    assert_eq!(debug.response.body["usage"]["input_tokens"], 1000);
+    assert_eq!(debug.response.body["cost"]["source"], "configured-pricing");
+}
+
+#[tokio::test]
 async fn chat_completion_falls_back_to_reasoning_content_when_content_is_empty() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

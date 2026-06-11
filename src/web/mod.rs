@@ -1235,4 +1235,52 @@ mod tests {
         let mp = pricing.into_model_pricing().expect("Some");
         assert_eq!(mp.currency, "USD");
     }
+
+    #[test]
+    fn web_ui_stream_done_updates_request_metrics_and_debug() {
+        assert!(
+            INDEX_HTML.contains("setMetrics(data.metrics);"),
+            "streaming done handler must render per-request metrics so request cost is not blank"
+        );
+        assert!(
+            INDEX_HTML.contains("setDebug(data.debug);"),
+            "streaming done handler must replace temporary HTTP debug with provider JSON"
+        );
+        assert!(
+            INDEX_HTML.contains("setSessionMetrics(data.session_metrics);"),
+            "streaming done handler must keep cumulative session metrics visible"
+        );
+    }
+
+    #[test]
+    fn web_ui_composer_meta_only_shows_for_attachments() {
+        let marker = "function updateComposerMeta()";
+        let start = INDEX_HTML.find(marker).expect("updateComposerMeta");
+        let body = &INDEX_HTML[start..INDEX_HTML.len().min(start + 320)];
+
+        assert!(
+            body.contains("pendingAttachments.length > 0"),
+            "composer meta should be driven by real attachment chips"
+        );
+        assert!(
+            !body.contains("contextWindowBadge"),
+            "context badge must not force an empty blue composer meta rectangle above the chat"
+        );
+    }
+
+    #[test]
+    fn web_ui_session_metrics_include_cumulative_cost() {
+        let marker = "function setSessionMetrics(metrics)";
+        let start = INDEX_HTML.find(marker).expect("setSessionMetrics");
+        let body = &INDEX_HTML[start..INDEX_HTML.len().min(start + 900)];
+
+        assert!(
+            body.contains("metrics.cost"),
+            "session metrics should render accumulated cost, not only tokens"
+        );
+        assert!(
+            body.contains("metric-line\"><em>cost</em>"),
+            "session cost should be visible in the metrics panel"
+        );
+    }
 }
