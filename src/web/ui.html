@@ -699,6 +699,7 @@
                   <label>recent_messages<input id="memoryRecentMessages" type="number" min="0" step="1" value="12"></label>
                   <label>summarize_after<input id="memorySummarizeAfterMessages" type="number" min="0" step="1" value="18"></label>
                 </div>
+                <label>summarize_at_context_%<input id="memorySummarizeAtContextPercent" type="number" min="1" max="100" step="1" value="80"></label>
                 <label>summary_chunk_messages<input id="memorySummaryChunkMessages" type="number" min="1" step="1" value="10"></label>
               </div>
             </details>
@@ -1092,6 +1093,7 @@
         agent_id: $('agentMode').value,
         ...providerPayload(),
         model: selectedModel(),
+        context_limit: modelContextById.get(selectedModel()) ?? null,
         system_prompt: textValue('systemPrompt'),
         prompt: $('prompt').value,
         attachments: pendingAttachments.length ? pendingAttachments.map(a => ({name: a.name, content: a.content})) : null,
@@ -1142,7 +1144,8 @@
         strategy: $('memoryStrategy').value,
         recent_messages: numberValue('memoryRecentMessages'),
         summarize_after_messages: numberValue('memorySummarizeAfterMessages'),
-        summary_chunk_messages: numberValue('memorySummaryChunkMessages')
+        summary_chunk_messages: numberValue('memorySummaryChunkMessages'),
+        summarize_at_context_percent: numberValue('memorySummarizeAtContextPercent')
       };
     }
 

@@ -485,6 +485,12 @@ pub struct MemoryArgs {
         help = "Minimum new old messages to merge into summary at once"
     )]
     pub memory_summary_chunk_messages: usize,
+    #[arg(
+        long,
+        default_value_t = chat::memory::DEFAULT_SUMMARIZE_AT_CONTEXT_PERCENT,
+        help = "Preflight summary threshold as percent of the available context window"
+    )]
+    pub memory_summarize_at_context_percent: u8,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
@@ -595,6 +601,7 @@ impl From<&MemoryArgs> for chat::MemoryConfig {
             recent_messages: args.memory_recent_messages,
             summarize_after_messages: args.memory_summarize_after_messages,
             summary_chunk_messages: args.memory_summary_chunk_messages,
+            summarize_at_context_percent: args.memory_summarize_at_context_percent.clamp(1, 100),
         }
     }
 }

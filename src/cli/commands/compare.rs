@@ -1,5 +1,5 @@
 use crate::cli::args::{CompareArgs, CompareGoalArgs};
-use crate::cli::request_pricing;
+use crate::cli::request_model_runtime_info;
 use crate::{
     chat,
     config::AppConfig,
@@ -13,7 +13,9 @@ pub async fn run_compare(args: &CompareArgs, secrets: &dyn SecretStore) -> Resul
     let (name, profile) = config.selected_profile(args.profile.as_deref())?;
     let control = ResponseControl::from(&args.control);
     let client = ReqwestProviderClient::new()?;
-    let pricing = request_pricing(&args.pricing, &client, secrets, &config, &name, profile).await?;
+    let runtime_info =
+        request_model_runtime_info(&args.pricing, &client, secrets, &config, &name, profile)
+            .await?;
     let billing = args.billing.billing_lookup();
     eprintln!("Waiting for unrestricted and controlled provider responses...");
     let (unrestricted, controlled) = chat::compare_response_control(
@@ -28,7 +30,11 @@ pub async fn run_compare(args: &CompareArgs, secrets: &dyn SecretStore) -> Resul
         },
         args.prompt.clone(),
         control,
-        chat::RequestOptions { pricing, billing },
+        chat::RequestOptions {
+            pricing: runtime_info.pricing,
+            billing,
+            context_limit: runtime_info.context_limit,
+        },
     )
     .await?;
     println!("## Without constraints\n{}\n", unrestricted.text);
@@ -56,7 +62,9 @@ pub async fn run_compare_goal(
         ));
     }
     let client = ReqwestProviderClient::new()?;
-    let pricing = request_pricing(&args.pricing, &client, secrets, &config, &name, profile).await?;
+    let runtime_info =
+        request_model_runtime_info(&args.pricing, &client, secrets, &config, &name, profile)
+            .await?;
     let billing = args.billing.billing_lookup();
     eprintln!("Waiting for state, instruction, and combined goal-stop responses...");
     let comparison = chat::compare_goal_stop(
@@ -71,7 +79,11 @@ pub async fn run_compare_goal(
         },
         args.prompt.clone(),
         args.required_field.clone(),
-        chat::RequestOptions { pricing, billing },
+        chat::RequestOptions {
+            pricing: runtime_info.pricing,
+            billing,
+            context_limit: runtime_info.context_limit,
+        },
     )
     .await?;
     print_goal_run("State-based stop", &comparison.state);

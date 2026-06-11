@@ -1,5 +1,5 @@
 use crate::cli::args::AskArgs;
-use crate::cli::request_pricing;
+use crate::cli::request_model_runtime_info;
 use crate::{
     chat,
     config::AppConfig,
@@ -13,7 +13,9 @@ pub async fn run_ask(args: &AskArgs, secrets: &dyn SecretStore) -> Result<(), Ap
     let (name, profile) = config.selected_profile(args.profile.as_deref())?;
     eprintln!("Waiting for provider response...");
     let client = ReqwestProviderClient::new()?;
-    let pricing = request_pricing(&args.pricing, &client, secrets, &config, &name, profile).await?;
+    let runtime_info =
+        request_model_runtime_info(&args.pricing, &client, secrets, &config, &name, profile)
+            .await?;
     let billing = args.billing.billing_lookup();
     let prompt = build_prompt_with_files(&args.prompt, &args.file)?;
     let response = chat::ask_once(
@@ -28,7 +30,11 @@ pub async fn run_ask(args: &AskArgs, secrets: &dyn SecretStore) -> Result<(), Ap
         },
         prompt,
         ResponseControl::from(&args.control),
-        chat::RequestOptions { pricing, billing },
+        chat::RequestOptions {
+            pricing: runtime_info.pricing,
+            billing,
+            context_limit: runtime_info.context_limit,
+        },
     )
     .await?;
     println!("{}", response.text);
