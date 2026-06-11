@@ -70,4 +70,5 @@ rtk cargo run --bin ai -- dist update
 ```
 
 По умолчанию `dist` берет бинарь из `https://github.com/Langepas94/ai-playground/releases/download/dev/...`.
+Свежий релиз `dev` публикуется GitHub Actions автоматически при каждом push в ветку `dev`.
 Если нужно, можно переопределить URL через `--url` или репозиторий/канал через `AI_PLAYGROUND_DIST_REPO_URL` и `AI_PLAYGROUND_DIST_CHANNEL`.
