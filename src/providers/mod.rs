@@ -594,7 +594,6 @@ impl ProviderClient for ReqwestProviderClient {
         }
         result
     }
-
 }
 
 impl ReqwestProviderClient {

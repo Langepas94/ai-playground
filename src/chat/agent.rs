@@ -86,6 +86,14 @@ impl ChatAgent {
         &self.memory
     }
 
+    pub fn memory_config(&self) -> MemoryConfig {
+        self.memory_config
+    }
+
+    pub fn set_memory_config(&mut self, memory_config: MemoryConfig) {
+        self.memory_config = memory_config;
+    }
+
     pub fn clear_history(&mut self) {
         self.history.clear();
         self.memory = AgentMemory::default();
@@ -103,6 +111,10 @@ impl ChatAgent {
     /// Record user prompt + assistant response into history after streaming completes.
     pub fn record_stream_response(&mut self, prompt: String, answer: String) {
         self.commit_turn(prompt, answer);
+    }
+
+    pub async fn compact_memory(&mut self, client: &dyn ProviderClient) {
+        self.refresh_memory_with_timeout(client).await;
     }
 
     pub async fn respond(
@@ -345,6 +357,12 @@ mod tests {
             None,
             None,
         );
+        agent.set_memory_config(MemoryConfig {
+            recent_messages: 12,
+            summarize_after_messages: 18,
+            summary_chunk_messages: 1,
+            ..MemoryConfig::default()
+        });
 
         agent
             .respond(&client, "first question".to_string())
@@ -482,6 +500,57 @@ mod tests {
         assert_eq!(
             agent.memory().session_summary.as_deref(),
             Some("summary of older turns")
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_full_memory_strategy_sends_complete_history() {
+        let client = FakeClient {
+            replies: std::sync::Mutex::new(vec!["fresh answer".to_string()]),
+            seen_messages: std::sync::Mutex::new(Vec::new()),
+        };
+        let history = (0..20)
+            .map(|index| ChatMessage {
+                role: if index % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                content: format!("history {index}"),
+            })
+            .collect::<Vec<_>>();
+        let mut agent = ChatAgent::new(
+            test_profile(),
+            "secret".to_string(),
+            history,
+            AgentMemory {
+                session_summary: Some("summary should not be sent".to_string()),
+                summarized_message_count: 8,
+            },
+            ResponseControl::uncontrolled(),
+            None,
+            None,
+        );
+        agent.set_memory_config(MemoryConfig {
+            strategy: crate::chat::memory::MemoryStrategy::Full,
+            recent_messages: 2,
+            summarize_after_messages: 4,
+            summary_chunk_messages: 1,
+        });
+
+        agent
+            .respond(&client, "current question".to_string())
+            .await
+            .expect("response");
+
+        let seen = client.seen_messages.lock().expect("seen messages");
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].len(), 21);
+        assert_eq!(seen[0][0].content, "history 0");
+        assert_eq!(seen[0][20].content, "current question");
+        assert_eq!(
+            agent.memory().session_summary.as_deref(),
+            Some("summary should not be sent")
         );
     }
 

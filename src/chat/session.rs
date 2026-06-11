@@ -7,10 +7,11 @@ use crate::{
 };
 
 use super::{
-    ChatAgent, ChatRuntime, LocalSessionStore, RequestOptions, SelectedProfile,
+    ChatAgent, ChatRuntime, LocalSessionStore, MemoryConfig, RequestOptions, SelectedProfile,
     format_request_metrics,
     goal::{ConversationGoal, ConversationStopMode, GoalState},
     history::save_history,
+    memory::MemoryStrategy,
     session_key,
 };
 
@@ -20,6 +21,7 @@ pub async fn interactive_chat(
     mut control: ResponseControl,
     options: RequestOptions,
     mut goal: ConversationGoal,
+    mut memory_config: MemoryConfig,
 ) -> Result<(), AppError> {
     let token = crate::chat::resolve_profile_token(runtime, profile)?;
     let store = LocalSessionStore::new()?;
@@ -35,6 +37,7 @@ pub async fn interactive_chat(
         options.pricing,
         options.billing,
     );
+    agent.set_memory_config(memory_config);
     let mut goal_state = GoalState::new(goal.required_fields.clone());
     let mut pending_attachments: Vec<PathBuf> = Vec::new();
     println!(
@@ -47,7 +50,7 @@ pub async fn interactive_chat(
         println!("Loaded {} local history messages.", agent.history().len());
     }
     println!(
-        "Use /exit, /profile, /model, /clear, /save, /control, /format, /answer-format, /max-tokens, /temperature, /top-p, /presence-penalty, /frequency-penalty, /seed, /stop, /goal, /attach <path>."
+        "Use /exit, /profile, /model, /clear, /save, /control, /memory, /format, /answer-format, /max-tokens, /temperature, /top-p, /presence-penalty, /frequency-penalty, /seed, /stop, /goal, /attach <path>."
     );
 
     loop {
@@ -92,6 +95,10 @@ pub async fn interactive_chat(
             }
             "/goal" => {
                 println!("{}", describe_goal(&goal, &goal_state));
+                continue;
+            }
+            "/memory" => {
+                println!("{}", describe_memory(memory_config, agent.memory()));
                 continue;
             }
             "/control clear" => {
@@ -286,6 +293,50 @@ pub async fn interactive_chat(
             }
             continue;
         }
+        if let Some(value) = line.strip_prefix("/memory strategy ") {
+            match parse_memory_strategy(value) {
+                Some(strategy) => {
+                    memory_config.strategy = strategy;
+                    agent.set_memory_config(memory_config);
+                    println!("Memory strategy: {strategy}");
+                }
+                None => println!("Use /memory strategy full|summary."),
+            }
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("/memory recent ") {
+            match value.parse::<usize>() {
+                Ok(v) => {
+                    memory_config.recent_messages = v;
+                    agent.set_memory_config(memory_config);
+                    println!("Memory recent messages: {v}");
+                }
+                Err(_) => println!("Use /memory recent <number>."),
+            }
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("/memory after ") {
+            match value.parse::<usize>() {
+                Ok(v) => {
+                    memory_config.summarize_after_messages = v;
+                    agent.set_memory_config(memory_config);
+                    println!("Memory summarize-after messages: {v}");
+                }
+                Err(_) => println!("Use /memory after <number>."),
+            }
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("/memory chunk ") {
+            match value.parse::<usize>() {
+                Ok(v) if v > 0 => {
+                    memory_config.summary_chunk_messages = v;
+                    agent.set_memory_config(memory_config);
+                    println!("Memory summary chunk messages: {v}");
+                }
+                _ => println!("Use /memory chunk <positive-number>."),
+            }
+            continue;
+        }
         if let Some(value) = line.strip_prefix("/completion-instruction ") {
             control.completion_instruction = Some(value.to_string());
             println!("Completion instruction updated.");
@@ -388,6 +439,31 @@ pub fn describe_goal(goal: &ConversationGoal, state: &GoalState) -> String {
     )
 }
 
+pub fn describe_memory(config: MemoryConfig, memory: &super::AgentMemory) -> String {
+    format!(
+        "Memory: strategy={}, recent_messages={}, summarize_after_messages={}, summary_chunk_messages={}, summarized_message_count={}, summary={}",
+        config.strategy,
+        config.recent_messages,
+        config.summarize_after_messages,
+        config.summary_chunk_messages,
+        memory.summarized_message_count,
+        memory
+            .session_summary
+            .as_deref()
+            .map(str::trim)
+            .filter(|summary| !summary.is_empty())
+            .unwrap_or("none")
+    )
+}
+
+pub fn parse_memory_strategy(value: &str) -> Option<MemoryStrategy> {
+    match value {
+        "full" => Some(MemoryStrategy::Full),
+        "summary" => Some(MemoryStrategy::Summary),
+        _ => None,
+    }
+}
+
 fn parse_stop_mode(value: &str) -> Option<ConversationStopMode> {
     match value {
         "manual" => Some(ConversationStopMode::Manual),
@@ -435,10 +511,7 @@ fn build_message_with_attachments(
     let mut parts = vec![message.to_string()];
     for path in attachments {
         let content = std::fs::read_to_string(path).map_err(|error| {
-            AppError::InvalidInput(format!(
-                "Cannot read file '{}': {error}",
-                path.display()
-            ))
+            AppError::InvalidInput(format!("Cannot read file '{}': {error}", path.display()))
         })?;
         let label = path
             .file_name()
