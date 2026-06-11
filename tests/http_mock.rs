@@ -12,6 +12,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
+use std::time::Instant;
 use wiremock::{
     Mock, MockServer, Request, ResponseTemplate,
     matchers::{bearer_token, body_string_contains, header, header_exists, method, path},
@@ -705,4 +706,75 @@ async fn rate_limit_maps_retry_after_from_provider() {
         }
         other => panic!("unexpected error: {other:?}"),
     }
+}
+
+/// Business rule: stream MUST complete immediately after [DONE] signal.
+/// Provider keeps connection open after [DONE] (normal TCP behaviour with
+/// keep-alive or HTTP/2). Client must NOT wait for connection close —
+/// that caused indefinite hangs where history was never saved and subsequent
+/// responses erased prior messages.
+#[tokio::test]
+async fn stream_completes_immediately_after_done_without_waiting_for_connection_close() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    // Bind a raw TCP listener. We'll send the HTTP response manually:
+    // headers + SSE body with [DONE], then hold the connection open.
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+
+    tokio::spawn(async move {
+        if let Ok((mut stream, _)) = listener.accept().await {
+            // Drain the request headers
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+
+            let body = concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+                "data: [DONE]\n\n",
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{}\r\n",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+            // Deliberately keep connection open (no final 0-length chunk, no close).
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        }
+    });
+
+    let profile = ProfileConfig {
+        provider: ProviderKind::OpenAiCompatible,
+        model: "test-model".to_string(),
+        base_url: format!("http://{addr}"),
+        token_ref: String::new(),
+    };
+    let client = ReqwestProviderClient::new().expect("client");
+    let started = Instant::now();
+    let (response, _debug) = client
+        .stream_chat_completion_with_debug(
+            &profile,
+            "",
+            ChatRequest {
+                model: "test-model".to_string(),
+                messages: vec![ChatMessage {
+                    role: Role::User,
+                    content: "hi".to_string(),
+                }],
+                control: ResponseControl::uncontrolled(),
+                pricing: None,
+                billing: None,
+            },
+            |_| {},
+        )
+        .await
+        .expect("stream");
+
+    assert_eq!(response.text, "hello");
+    assert!(
+        started.elapsed().as_secs() < 5,
+        "stream hung waiting for connection close: {:?}",
+        started.elapsed()
+    );
 }
