@@ -12,7 +12,8 @@ use super::token_accounting::{TokenEstimate, estimate_exchange, estimate_message
 use tokio::time::{Duration, timeout};
 
 pub const LOCAL_SESSION_AGENT_ID: &str = "local-session-agent";
-const MEMORY_REFRESH_TIMEOUT: Duration = Duration::from_millis(250);
+const MEMORY_COMPACT_TIMEOUT: Duration = Duration::from_secs(30);
+const PREFLIGHT_COMPACT_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_PREFLIGHT_SUMMARY_PASSES: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,7 +267,7 @@ impl ChatAgent {
         &mut self,
         client: &dyn ProviderClient,
     ) -> Option<crate::providers::RequestMetrics> {
-        timeout(MEMORY_REFRESH_TIMEOUT, self.refresh_memory(client))
+        timeout(MEMORY_COMPACT_TIMEOUT, self.refresh_memory(client))
             .await
             .ok()
             .flatten()
@@ -291,7 +292,7 @@ impl ChatAgent {
         prompt: &str,
     ) -> Option<crate::providers::RequestMetrics> {
         timeout(
-            MEMORY_REFRESH_TIMEOUT,
+            PREFLIGHT_COMPACT_TIMEOUT,
             self.preflight_compact_for_context_pressure(client, prompt),
         )
         .await
