@@ -208,31 +208,53 @@ fn resolve_from_cache(
 ) -> Option<PricingResolution> {
     let model = model.trim();
     let candidates = model_candidates(provider, model);
-    for candidate in candidates {
-        if let Some(entry) = cache.entries.get(&candidate) {
+    for candidate in &candidates {
+        if let Some(entry) = cache.entries.get(candidate.as_str()) {
             if !provider_matches(provider, entry) {
                 continue;
             }
-            let pricing = pricing_from_entry(entry)?;
-            return Some(PricingResolution {
-                pricing,
-                source: PriceSource::LiteLlmCatalog,
-                source_url: entry
-                    .source
-                    .clone()
-                    .unwrap_or_else(|| cache.source_url.clone()),
-                fetched_at_unix: cache.fetched_at_unix,
-                stale: is_stale(cache.fetched_at_unix, ttl),
-                matched_model: candidate,
-                context_length: entry
-                    .max_input_tokens
-                    .as_ref()
-                    .and_then(parse_u64_value)
-                    .or_else(|| entry.max_tokens.as_ref().and_then(parse_u64_value)),
-            });
+            return resolution_from_entry(cache, candidate, entry, ttl);
         }
     }
+    let model_names = normalized_model_names(model);
+    for (candidate, entry) in &cache.entries {
+        if !provider_matches(provider, entry) {
+            continue;
+        }
+        if !model_names
+            .iter()
+            .any(|name| catalog_key_matches_model(candidate, name))
+        {
+            continue;
+        }
+        return resolution_from_entry(cache, candidate, entry, ttl);
+    }
     None
+}
+
+fn resolution_from_entry(
+    cache: &PriceCache,
+    matched_model: &str,
+    entry: &LiteLlmModelEntry,
+    ttl: Duration,
+) -> Option<PricingResolution> {
+    let pricing = pricing_from_entry(entry)?;
+    Some(PricingResolution {
+        pricing,
+        source: PriceSource::LiteLlmCatalog,
+        source_url: entry
+            .source
+            .clone()
+            .unwrap_or_else(|| cache.source_url.clone()),
+        fetched_at_unix: cache.fetched_at_unix,
+        stale: is_stale(cache.fetched_at_unix, ttl),
+        matched_model: matched_model.to_string(),
+        context_length: entry
+            .max_input_tokens
+            .as_ref()
+            .and_then(parse_u64_value)
+            .or_else(|| entry.max_tokens.as_ref().and_then(parse_u64_value)),
+    })
 }
 
 fn pricing_from_entry(entry: &LiteLlmModelEntry) -> Option<ModelPricing> {
@@ -282,14 +304,30 @@ fn per_token_to_per_million(value: f64) -> f64 {
 }
 
 fn model_candidates(provider: ProviderKind, model: &str) -> Vec<String> {
-    let mut candidates = vec![model.to_string()];
-    for prefix in provider_prefixes(provider) {
-        candidates.push(format!("{prefix}/{model}"));
-    }
-    if provider == ProviderKind::OpenAiCompatible {
-        candidates.push(format!("openai/{model}"));
+    let mut candidates = Vec::new();
+    for name in normalized_model_names(model) {
+        candidates.push(name.clone());
+        for prefix in provider_prefixes(provider) {
+            candidates.push(format!("{prefix}/{name}"));
+        }
+        if provider == ProviderKind::OpenAiCompatible {
+            candidates.push(format!("openai/{name}"));
+        }
     }
     dedupe(candidates)
+}
+
+fn normalized_model_names(model: &str) -> Vec<String> {
+    let model = model.trim();
+    let mut values = vec![model.to_string()];
+    if let Some((_, bare)) = model.rsplit_once('/') {
+        values.push(bare.to_string());
+    }
+    values.push(model.to_ascii_lowercase());
+    if let Some((_, bare)) = model.rsplit_once('/') {
+        values.push(bare.to_ascii_lowercase());
+    }
+    dedupe(values)
 }
 
 fn provider_prefixes(provider: ProviderKind) -> &'static [&'static str] {
@@ -308,6 +346,9 @@ fn provider_prefixes(provider: ProviderKind) -> &'static [&'static str] {
 }
 
 fn provider_matches(provider: ProviderKind, entry: &LiteLlmModelEntry) -> bool {
+    if provider == ProviderKind::OpenRouter {
+        return true;
+    }
     let Some(entry_provider) = entry.litellm_provider.as_deref() else {
         return true;
     };
@@ -320,6 +361,14 @@ fn provider_matches(provider: ProviderKind, entry: &LiteLlmModelEntry) -> bool {
         .iter()
         .any(|candidate| *candidate == entry_provider)
         || (provider == ProviderKind::OpenAiCompatible && entry_provider == "openai")
+}
+
+fn catalog_key_matches_model(catalog_key: &str, model_name: &str) -> bool {
+    catalog_key == model_name
+        || catalog_key
+            .rsplit_once('/')
+            .map(|(_, bare)| bare == model_name)
+            .unwrap_or(false)
 }
 
 fn dedupe(values: Vec<String>) -> Vec<String> {
@@ -439,6 +488,46 @@ mod tests {
         .expect("price");
 
         assert_eq!(resolved.matched_model, "gigachat/GigaChat-2-Pro");
+    }
+
+    #[test]
+    fn resolves_openrouter_prices_for_any_underlying_provider() {
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "anthropic/claude-3-5-sonnet".to_string(),
+            entry("anthropic", 0.000003, 0.000015),
+        );
+
+        let resolved = resolve_from_cache(
+            &cache(entries),
+            ProviderKind::OpenRouter,
+            "anthropic/claude-3-5-sonnet",
+            PRICE_CACHE_TTL,
+        )
+        .expect("openrouter price");
+
+        assert_eq!(resolved.matched_model, "anthropic/claude-3-5-sonnet");
+        assert!((resolved.pricing.input_per_million.unwrap() - 3.0).abs() < f64::EPSILON);
+        assert!((resolved.pricing.output_per_million - 15.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn resolves_prices_when_provider_returns_prefixed_model_but_catalog_has_bare_key() {
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "moonshot-v1-8k".to_string(),
+            entry("moonshot", 0.000001, 0.000001),
+        );
+
+        let resolved = resolve_from_cache(
+            &cache(entries),
+            ProviderKind::Kimi,
+            "moonshot/moonshot-v1-8k",
+            PRICE_CACHE_TTL,
+        )
+        .expect("kimi price");
+
+        assert_eq!(resolved.matched_model, "moonshot-v1-8k");
     }
 
     #[test]
