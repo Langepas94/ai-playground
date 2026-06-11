@@ -2,14 +2,21 @@ use std::{net::SocketAddr, sync::Arc};
 
 use axum::{
     Json, Router,
-    extract::State,
-    response::Html,
+    extract::{DefaultBodyLimit, State},
+    response::{
+        Html,
+        sse::{Event, Sse},
+    },
     routing::{get, post},
 };
+use futures_util::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 
 use crate::{
+    chat::memory::{MemoryConfig, MemoryStrategy},
     chat::{
         AgentMemory, ChatAgent, LocalSessionStore, add_request_metrics, available_agents,
         selected_agent, web_session_key,
@@ -56,8 +63,10 @@ pub async fn serve(addr: SocketAddr) -> Result<(), AppError> {
         .route("/api/models", post(models))
         .route("/api/agent/session", post(chat_session))
         .route("/api/agent/chat", post(chat))
+        .route("/api/agent/chat/stream", post(chat_stream))
         .route("/api/chat/session", post(chat_session))
         .route("/api/chat", post(chat))
+        .layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // 50 MB — для вложений
         .with_state(AppState {
             client,
             secrets,
@@ -194,6 +203,11 @@ async fn chat(
     };
     let memory = state.sessions.load_memory(&session.id)?;
     let control = request.control.clone().into_control();
+    let memory_config = request
+        .memory
+        .clone()
+        .unwrap_or_default()
+        .into_memory_config();
     let mut agent = ChatAgent::new(
         profile.clone(),
         token,
@@ -209,9 +223,8 @@ async fn chat(
             .clone()
             .and_then(WebBilling::into_billing_lookup),
     );
-    let (response, provider_debug) = agent
-        .respond_with_debug(&state.client, prompt)
-        .await?;
+    agent.set_memory_config(memory_config);
+    let (response, provider_debug) = agent.respond_with_debug(&state.client, prompt).await?;
     let session_metrics = add_request_metrics(&session.metrics, &response.metrics);
     state
         .sessions
@@ -231,6 +244,111 @@ async fn chat(
             provider_response: provider_debug.response,
         },
     }))
+}
+
+async fn chat_stream(
+    State(state): State<AppState>,
+    Json(request): Json<ChatWebRequest>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, WebError> {
+    let agent_spec = selected_agent(request.agent_id.as_deref())?;
+    let profile = request.profile()?;
+    validate_base_url(&profile.provider.to_string(), &profile.base_url)?;
+    if request.prompt.trim().is_empty() {
+        return Err(AppError::InvalidInput("Prompt is required".to_string()).into());
+    }
+    let prompt = build_web_prompt(&request.prompt, request.attachments.as_deref());
+    let token = resolve_web_token(
+        state.secrets.as_ref(),
+        &profile,
+        &request.token,
+        request.token_provider.as_deref(),
+    )?;
+    let session_key = web_session_key(agent_spec.id, &profile.provider.to_string(), &profile.model);
+    let session = if request.new_session {
+        state.sessions.create_session()?
+    } else {
+        match request.session_id.as_deref().and_then(blank_str_to_none) {
+            Some(session_id) => state.sessions.load_session(session_id)?,
+            None => state.sessions.load_or_create_latest(&session_key)?,
+        }
+    };
+    let memory = state.sessions.load_memory(&session.id)?;
+    let control = request.control.clone().into_control();
+    let memory_config = request
+        .memory
+        .clone()
+        .unwrap_or_default()
+        .into_memory_config();
+    let mut agent = ChatAgent::new(
+        profile.clone(),
+        token.clone(),
+        request.initial_history(session.messages),
+        memory,
+        control,
+        request
+            .pricing
+            .clone()
+            .and_then(WebPricing::into_model_pricing),
+        request
+            .billing
+            .clone()
+            .and_then(WebBilling::into_billing_lookup),
+    );
+    agent.set_memory_config(memory_config);
+    let chat_request = agent.build_stream_request(prompt.clone());
+    let session_id = session.id.clone();
+    let session_metrics_before = session.metrics.clone();
+
+    let (tx, rx) = mpsc::unbounded_channel::<String>();
+    let client = state.client.clone();
+    let sessions = state.sessions.clone();
+
+    tokio::spawn(async move {
+        let tx_token = tx.clone();
+        let result = client
+            .stream_chat_completion(&profile, &token, chat_request, move |chunk| {
+                let _ = tx_token.send(chunk.to_string());
+            })
+            .await;
+        match result {
+            Ok(response) => {
+                let assistant_text = response.text.clone();
+                let session_metrics =
+                    add_request_metrics(&session_metrics_before, &response.metrics);
+                agent.record_stream_response(prompt, assistant_text);
+                agent.compact_memory(&client).await;
+                let _ = sessions.save_session(&session_key, &session_id, agent.history());
+                let _ = sessions.save_metrics(&session_id, &session_metrics);
+                let _ = sessions.save_memory(&session_id, agent.memory());
+                let done_event = serde_json::json!({
+                    "done": true,
+                    "session_id": session_id,
+                    "session_metrics": session_metrics,
+                    "messages": agent.history(),
+                });
+                let _ = tx.send(format!("\x00DONE\x00{done_event}"));
+            }
+            Err(err) => {
+                let _ = tx.send(format!("\x00ERR\x00{err}"));
+            }
+        }
+    });
+
+    let sse_stream = stream::unfold(rx, |mut rx| async move {
+        let msg = rx.recv().await?;
+        if let Some(payload) = msg.strip_prefix("\x00DONE\x00") {
+            let event = Event::default().event("done").data(payload.to_string());
+            Some((Ok(event), rx))
+        } else if let Some(payload) = msg.strip_prefix("\x00ERR\x00") {
+            let event = Event::default().event("error").data(payload.to_string());
+            Some((Ok(event), rx))
+        } else {
+            let event = Event::default().event("token").data(msg);
+            Some((Ok(event), rx))
+        }
+    });
+
+    Ok(Sse::new(sse_stream))
 }
 
 async fn chat_session(
@@ -358,6 +476,7 @@ struct ChatWebRequest {
     new_session: bool,
     messages: Option<Vec<ChatMessage>>,
     control: WebResponseControl,
+    memory: Option<WebMemoryConfig>,
     pricing: Option<WebPricing>,
     billing: Option<WebBilling>,
 }
@@ -448,6 +567,46 @@ struct WebResponseControl {
     quote_question: bool,
     format_instruction: Option<String>,
     completion_instruction: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WebMemoryConfig {
+    strategy: Option<String>,
+    recent_messages: Option<usize>,
+    summarize_after_messages: Option<usize>,
+    summary_chunk_messages: Option<usize>,
+}
+
+impl Default for WebMemoryConfig {
+    fn default() -> Self {
+        let defaults = MemoryConfig::default();
+        Self {
+            strategy: Some(defaults.strategy.to_string()),
+            recent_messages: Some(defaults.recent_messages),
+            summarize_after_messages: Some(defaults.summarize_after_messages),
+            summary_chunk_messages: Some(defaults.summary_chunk_messages),
+        }
+    }
+}
+
+impl WebMemoryConfig {
+    fn into_memory_config(self) -> MemoryConfig {
+        let defaults = MemoryConfig::default();
+        MemoryConfig {
+            strategy: match self.strategy.as_deref() {
+                Some("full") => MemoryStrategy::Full,
+                _ => MemoryStrategy::Summary,
+            },
+            recent_messages: self.recent_messages.unwrap_or(defaults.recent_messages),
+            summarize_after_messages: self
+                .summarize_after_messages
+                .unwrap_or(defaults.summarize_after_messages),
+            summary_chunk_messages: self
+                .summary_chunk_messages
+                .unwrap_or(defaults.summary_chunk_messages)
+                .max(1),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -568,7 +727,10 @@ fn build_web_prompt(prompt: &str, attachments: Option<&[WebAttachment]>) -> Stri
     }
     let mut parts = vec![prompt.to_string()];
     for attachment in non_empty {
-        parts.push(format!("--- {} ---\n{}", attachment.name, attachment.content));
+        parts.push(format!(
+            "--- {} ---\n{}",
+            attachment.name, attachment.content
+        ));
     }
     parts.join("\n\n")
 }
@@ -649,6 +811,7 @@ mod tests {
             new_session: false,
             messages: None,
             control: WebResponseControl::default(),
+            memory: None,
             pricing: None,
             billing: None,
         };
@@ -689,6 +852,7 @@ mod tests {
                 },
             ]),
             control: WebResponseControl::default(),
+            memory: None,
             pricing: None,
             billing: None,
         };
@@ -724,6 +888,7 @@ mod tests {
                 content: "client".to_string(),
             }]),
             control: WebResponseControl::default(),
+            memory: None,
             pricing: None,
             billing: None,
         };
@@ -744,6 +909,22 @@ mod tests {
             Err(AppError::InvalidInput(_))
         ));
         assert!(selected_agent(Some(crate::chat::LOCAL_SESSION_AGENT_ID)).is_ok());
+    }
+
+    #[test]
+    fn web_memory_config_maps_strategy_and_limits() {
+        let config = WebMemoryConfig {
+            strategy: Some("full".to_string()),
+            recent_messages: Some(4),
+            summarize_after_messages: Some(8),
+            summary_chunk_messages: Some(0),
+        }
+        .into_memory_config();
+
+        assert_eq!(config.strategy, MemoryStrategy::Full);
+        assert_eq!(config.recent_messages, 4);
+        assert_eq!(config.summarize_after_messages, 8);
+        assert_eq!(config.summary_chunk_messages, 1);
     }
 
     /// Баг 2: WebPricing с только output ценой должен конвертироваться в Some(ModelPricing)

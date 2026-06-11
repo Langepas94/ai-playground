@@ -413,6 +413,12 @@
       background: #fff1f2;
       color: #8f1d2c;
     }
+    .message.streaming {
+      justify-self: start;
+      background: #ffffff;
+      color: #172033;
+      opacity: 0.85;
+    }
     .message-role {
       color: inherit;
       opacity: .62;
@@ -683,6 +689,17 @@
               <summary>System prompt</summary>
               <div class="panel-body">
                 <label>system_prompt<textarea id="systemPrompt" placeholder="Необязательная системная инструкция для модели"></textarea></label>
+              </div>
+            </details>
+            <details class="panel" open>
+              <summary>Контекст</summary>
+              <div class="panel-body">
+                <label>memory_strategy<select id="memoryStrategy"><option value="summary">summary</option><option value="full">full</option></select></label>
+                <div class="row">
+                  <label>recent_messages<input id="memoryRecentMessages" type="number" min="0" step="1" value="12"></label>
+                  <label>summarize_after<input id="memorySummarizeAfterMessages" type="number" min="0" step="1" value="18"></label>
+                </div>
+                <label>summary_chunk_messages<input id="memorySummaryChunkMessages" type="number" min="1" step="1" value="10"></label>
               </div>
             </details>
             <div class="row">
@@ -1079,6 +1096,7 @@
         session_id: chatSessionId,
         new_session: forceNewSession,
         messages: chatHistory,
+        memory: memoryPayload(),
         pricing: pricingPayload(),
         billing: billingPayload(),
         control: {
@@ -1114,6 +1132,15 @@
           format_instruction: textValue('formatInstruction'),
           completion_instruction: textValue('completionInstruction')
         }
+      };
+    }
+
+    function memoryPayload() {
+      return {
+        strategy: $('memoryStrategy').value,
+        recent_messages: numberValue('memoryRecentMessages'),
+        summarize_after_messages: numberValue('memorySummarizeAfterMessages'),
+        summary_chunk_messages: numberValue('memorySummaryChunkMessages')
       };
     }
 
@@ -1441,9 +1468,9 @@
         badge.title = `Максимальный контекст: ${ctx.toLocaleString()} токенов`;
         badge.style.color = '';
       } else {
-        badge.textContent = '— загрузите модели';
+        badge.textContent = '—';
         badge.style.color = '#aaa';
-        badge.title = '';
+        badge.title = 'Данные недоступны для этого провайдера';
       }
     }
 
@@ -1479,6 +1506,7 @@
       updateProviderDocLink();
       await refreshTokenStatus();
       await loadChatSession();
+      await loadModels().catch(() => {}); // автозагрузка; ошибка не критична
       setStatus('Готово');
     }
 
@@ -1487,14 +1515,16 @@
       setStatus('Загружаю модели...');
       try {
         const data = await requestJson('/api/models', providerPayload());
-        const current = selectedModel();
+        const modelBefore = selectedModel();
         const modelIds = data.models.map((model) => model.id);
-        const fallback = modelIds[0] || current;
-        setModelOptions(data.models, modelIds.includes(current) ? current : fallback);
+        const fallback = modelIds[0] || modelBefore;
+        setModelOptions(data.models, modelIds.includes(modelBefore) ? modelBefore : fallback);
         persistModelPricing();
-        $('customModel').value = '';
-        await loadChatSession();
         await refreshTokenStatus();
+        // Перезагружаем сессию только если модель изменилась
+        if (selectedModel() !== modelBefore) {
+          await loadChatSession();
+        }
         setStatus(data.models.length ? `Загружено моделей: ${data.models.length}; выбрана ${$('model').value}` : 'Провайдер вернул пустой список моделей');
       } catch (error) {
         setStatus(error.message, true);
@@ -1509,12 +1539,24 @@
       setDebug(null);
       setMetrics(null);
       const payload = chatPayload();
-      setServerDebug(payload, null, null); // показываем payload до отправки
-      let response;
-      let rawText = '';
+      setServerDebug(payload, null, null);
+
+      // Оптимистично добавляем сообщение пользователя в историю
+      const userText = $('prompt').value;
+      const userMsg = { role: 'user', content: userText };
+      chatHistory = [...chatHistory, userMsg];
+      renderChatHistory();
+      $('prompt').value = '';
+      pendingAttachments = [];
+      renderAttachmentChips();
+
+      let assistantEl = null; // DOM-элемент для стриминга
+      let accText = '';
+
       try {
+        let response;
         try {
-          response = await fetch('/api/agent/chat', {
+          response = await fetch('/api/agent/chat/stream', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
@@ -1523,33 +1565,90 @@
           setServerDebug(payload, 'network error — сервер недоступен', null);
           throw new Error('Локальный сервер недоступен. Запустите `ai web` и обновите страницу.');
         }
-        rawText = await response.text();
-        let data = {};
-        try { data = rawText ? JSON.parse(rawText) : {}; } catch { data = { error: rawText || 'Request failed' }; }
-        setServerDebug(payload, rawText, response.status);
+
+        setServerDebug(payload, `HTTP ${response.status}`, response.status);
+
         if (!response.ok) {
-          throw new Error(data.error || rawText || 'Request failed');
+          const errText = await response.text();
+          setServerDebug(payload, errText, response.status);
+          throw new Error(errText || 'Request failed');
         }
-        chatSessionId = data.session_id || chatSessionId;
-        forceNewSession = false;
-        if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
-        chatHistory = data.messages || chatHistory;
-        restoreSystemPromptFromHistory(chatHistory);
-        renderChatHistory();
-        $('prompt').value = '';
-        pendingAttachments = [];
-        renderAttachmentChips();
-        setMetrics(data.metrics);
-        setSessionMetrics(data.session_metrics);
+
+        // Создаём заглушку для ответа ассистента
+        assistantEl = appendStreamingMessage();
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let sseBuffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          sseBuffer += decoder.decode(value, { stream: true });
+          const lines = sseBuffer.split('\n');
+          sseBuffer = lines.pop(); // последняя неполная строка
+
+          let eventType = null;
+          let eventData = null;
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              eventType = line.slice(7).trim();
+            } else if (line.startsWith('data: ')) {
+              eventData = line.slice(6);
+            } else if (line === '' && eventType && eventData !== null) {
+              if (eventType === 'token') {
+                accText += eventData;
+                updateStreamingMessage(assistantEl, accText);
+              } else if (eventType === 'done') {
+                const data = JSON.parse(eventData);
+                chatSessionId = data.session_id || chatSessionId;
+                forceNewSession = false;
+                if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
+                chatHistory = data.messages || chatHistory;
+                restoreSystemPromptFromHistory(chatHistory);
+                renderChatHistory(); // финальный рендер с метаданными
+                setSessionMetrics(data.session_metrics);
+                setStatus('Готово');
+              } else if (eventType === 'error') {
+                throw new Error(eventData);
+              }
+              eventType = null;
+              eventData = null;
+            }
+          }
+        }
         await refreshTokenStatus();
-        setDebug(data.debug);
-        setStatus(data.finish_reason ? `Готово: ${data.finish_reason}` : 'Готово');
       } catch (error) {
+        // Откатываем оптимистичное сообщение пользователя если ответа не было
+        if (!accText) {
+          chatHistory = chatHistory.slice(0, -1);
+          $('prompt').value = userText;
+        }
+        if (assistantEl) assistantEl.remove();
+        renderChatHistory();
         renderConversationError(error.message);
         setStatus(error.message, true);
       } finally {
         $('send').disabled = false;
       }
+    }
+
+    function appendStreamingMessage() {
+      const conv = $('conversation');
+      const empty = conv.querySelector('.conversation-empty');
+      if (empty) empty.remove();
+      const div = document.createElement('div');
+      div.className = 'message assistant streaming';
+      div.textContent = '▍';
+      conv.appendChild(div);
+      conv.scrollTop = conv.scrollHeight;
+      return div;
+    }
+
+    function updateStreamingMessage(el, text) {
+      el.textContent = text + '▍';
+      const conv = $('conversation');
+      conv.scrollTop = conv.scrollHeight;
     }
 
     const PROVIDER_DOCS = {
@@ -1633,6 +1732,7 @@
       applyProviderDefaults();
       updateProviderDocLink();
       loadChatSession();
+      loadModels().catch(() => {});
     });
     document.querySelectorAll('.tab-button').forEach((button) => {
       button.addEventListener('click', () => selectInspectorTab(button.dataset.tab));

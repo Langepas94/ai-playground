@@ -27,6 +27,7 @@ pub async fn run_chat(args: &ChatArgs, secrets: &dyn SecretStore) -> Result<(), 
         ResponseControl::from(&args.control),
         chat::RequestOptions { pricing, billing },
         chat::ConversationGoal::from(&args.goal),
+        chat::MemoryConfig::from(&args.memory),
     )
     .await
 }

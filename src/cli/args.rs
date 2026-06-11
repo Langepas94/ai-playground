@@ -209,6 +209,8 @@ pub struct ChatArgs {
     pub billing: BillingArgs,
     #[command(flatten)]
     pub goal: ConversationGoalArgs,
+    #[command(flatten)]
+    pub memory: MemoryArgs,
 }
 
 #[derive(Debug, Args)]
@@ -418,6 +420,35 @@ pub struct ConversationGoalArgs {
     pub goal_stop_mode: CliConversationStopMode,
 }
 
+#[derive(Debug, Clone, Args)]
+pub struct MemoryArgs {
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = CliMemoryStrategy::Summary,
+        help = "How the local agent sends chat history to the provider"
+    )]
+    pub memory_strategy: CliMemoryStrategy,
+    #[arg(
+        long,
+        default_value_t = chat::memory::DEFAULT_RECENT_MESSAGES,
+        help = "How many latest messages are sent as-is in summary strategy"
+    )]
+    pub memory_recent_messages: usize,
+    #[arg(
+        long,
+        default_value_t = chat::memory::DEFAULT_SUMMARIZE_AFTER_MESSAGES,
+        help = "History length in messages before old context can be summarized"
+    )]
+    pub memory_summarize_after_messages: usize,
+    #[arg(
+        long,
+        default_value_t = chat::memory::DEFAULT_SUMMARY_CHUNK_MESSAGES,
+        help = "Minimum new old messages to merge into summary at once"
+    )]
+    pub memory_summary_chunk_messages: usize,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
 pub enum CliResponseFormat {
     #[default]
@@ -444,6 +475,13 @@ pub enum CliConversationStopMode {
     State,
     Instruction,
     Combined,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+pub enum CliMemoryStrategy {
+    Full,
+    #[default]
+    Summary,
 }
 
 impl From<&ResponseControlArgs> for ResponseControl {
@@ -505,6 +543,20 @@ impl From<&ConversationGoalArgs> for chat::ConversationGoal {
                 CliConversationStopMode::Instruction => chat::ConversationStopMode::Instruction,
                 CliConversationStopMode::Combined => chat::ConversationStopMode::Combined,
             },
+        }
+    }
+}
+
+impl From<&MemoryArgs> for chat::MemoryConfig {
+    fn from(args: &MemoryArgs) -> Self {
+        Self {
+            strategy: match args.memory_strategy {
+                CliMemoryStrategy::Full => chat::memory::MemoryStrategy::Full,
+                CliMemoryStrategy::Summary => chat::memory::MemoryStrategy::Summary,
+            },
+            recent_messages: args.memory_recent_messages,
+            summarize_after_messages: args.memory_summarize_after_messages,
+            summary_chunk_messages: args.memory_summary_chunk_messages,
         }
     }
 }

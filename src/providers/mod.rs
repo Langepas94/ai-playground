@@ -597,6 +597,26 @@ impl ProviderClient for ReqwestProviderClient {
 }
 
 impl ReqwestProviderClient {
+    pub async fn stream_chat_completion(
+        &self,
+        profile: &ProfileConfig,
+        token: &str,
+        request: ChatRequest,
+        on_token: impl Fn(&str) + Send,
+    ) -> Result<ChatResponse, AppError> {
+        let spec = profile.provider.spec();
+        let access_token = self.bearer_token(profile, token).await?;
+        openai_compatible::stream_chat_completion(
+            &self.client,
+            spec,
+            profile,
+            &access_token,
+            request,
+            on_token,
+        )
+        .await
+    }
+
     async fn bearer_token(&self, profile: &ProfileConfig, token: &str) -> Result<String, AppError> {
         match profile.provider {
             ProviderKind::GigaChat => {

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ai-web",
+      "runtimeExecutable": "/Users/artem/Documents/Ai tech rust/target/debug/ai",
+      "runtimeArgs": ["web", "--listen", "127.0.0.1:8787"],
+      "port": 8787
+    }
+  ]
+}
