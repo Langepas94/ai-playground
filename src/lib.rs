@@ -2,6 +2,7 @@ pub mod chat;
 pub mod cli;
 pub mod config;
 pub mod errors;
+pub mod pricing;
 pub mod providers;
 pub mod secrets;
 pub mod toon_codec;

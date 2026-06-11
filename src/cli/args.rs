@@ -40,6 +40,10 @@ pub enum Command {
     CompareGoal(CompareGoalArgs),
     #[command(about = "Show how agent tokens, cost, and context overflow grow across dialogue")]
     TokenDemo(TokenDemoArgs),
+    Pricing {
+        #[command(subcommand)]
+        command: PricingCommand,
+    },
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -96,6 +100,14 @@ pub enum TokenCommand {
 #[derive(Debug, Subcommand)]
 pub enum ModelsCommand {
     List(ProfileArg),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PricingCommand {
+    #[command(about = "Download the latest LiteLLM model price catalog")]
+    Sync,
+    #[command(about = "Show local model price catalog status")]
+    Status,
 }
 
 #[derive(Debug, Args)]

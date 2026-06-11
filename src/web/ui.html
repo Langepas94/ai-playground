@@ -713,6 +713,7 @@
             <details class="panel">
               <summary>Цена</summary>
               <div class="panel-body">
+                <div id="priceSource" class="hint">Источник цены: проверяется</div>
                 <div class="row">
                   <label>input / 1M<input id="priceInput" type="number" min="0" step="0.000001" placeholder="Например 0.07"></label>
                   <label>output / 1M<input id="priceOutput" type="number" min="0" step="0.000001" placeholder="Например 1.10"></label>
@@ -829,6 +830,7 @@
     let agents = [];
     let providers = [];
     let modelPricingById = new Map();
+    let modelPricingSourceById = new Map();
     let modelContextById = new Map();
     let userPricingOverrides = new Map();
     let currentConstraints = new Map();
@@ -1176,6 +1178,7 @@
         currency: $('priceCurrency').value
       });
       persistUserOverrides();
+      updatePriceSource('Источник цены: manual override');
     }
 
     function applySelectedModelPricing() {
@@ -1187,6 +1190,7 @@
         $('priceCacheHitInput').value = override_.cache_hit_input_per_million;
         $('priceCacheMissInput').value = override_.cache_miss_input_per_million;
         $('priceCurrency').value = override_.currency || 'USD';
+        updatePriceSource('manual override');
         return;
       }
       const pricing = selectedModelPricing();
@@ -1195,6 +1199,43 @@
       $('priceCacheHitInput').value = pricing?.cache_hit_input_per_million ?? '';
       $('priceCacheMissInput').value = pricing?.cache_miss_input_per_million ?? '';
       $('priceCurrency').value = pricing?.currency || 'USD';
+      updatePriceSource(priceSourceText(model));
+    }
+
+    function priceSourceText(model) {
+      const source = modelPricingSourceById.get(model);
+      if (!source) return modelPricingById.has(model) ? 'Источник цены: provider /models' : 'Источник цены: не найден';
+      const stale = source.stale ? ' · stale' : '';
+      const matched = source.matched_model && source.matched_model !== model ? ` · ${source.matched_model}` : '';
+      const label = `Источник цены: ${source.source}${matched}${stale}`;
+      if (!source.source_url) return label;
+      return `${escapeHtml(label)} · <a href="${escapeHtml(source.source_url)}" target="_blank" rel="noopener">открыть источник</a>`;
+    }
+
+    function updatePriceSource(text) {
+      $('priceSource').innerHTML = text || 'Источник цены: не найден';
+    }
+
+    async function resolveSelectedModelPricing() {
+      const model = selectedModel();
+      if (!model || modelPricingById.has(model) || userPricingOverrides.has(model)) {
+        applySelectedModelPricing();
+        return;
+      }
+      updatePriceSource('Источник цены: ищу в LiteLLM catalog...');
+      try {
+        const data = await requestJson('/api/pricing/resolve', {
+          provider: currentProvider(),
+          model
+        });
+        if (data.pricing) {
+          modelPricingById.set(model, data.pricing.pricing);
+          modelPricingSourceById.set(model, data.pricing);
+          if (data.pricing.context_length != null) modelContextById.set(model, data.pricing.context_length);
+        }
+      } catch {}
+      applySelectedModelPricing();
+      updateContextBadge();
     }
 
     function billingPayload() {
@@ -1431,6 +1472,7 @@
       $('customModel').value = '';
       // Reset maps for new provider, then restore from cache
       modelPricingById = new Map();
+      modelPricingSourceById = new Map();
       modelContextById = new Map();
       userPricingOverrides = new Map();
       restoreModelPricing();
@@ -1447,6 +1489,7 @@
       // Merge API pricing and context_length INTO existing maps
       for (const model of uniqueModels) {
         if (model.pricing) modelPricingById.set(model.id, model.pricing);
+        if (model.pricing_source) modelPricingSourceById.set(model.id, model.pricing_source);
         if (model.context_length != null) modelContextById.set(model.id, model.context_length);
       }
       $('model').innerHTML = uniqueModels.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.id)}</option>`).join('');
@@ -1740,8 +1783,8 @@
     $('token').addEventListener('input', markTokenOverrideProvider);
     $('saveToken').addEventListener('click', saveTokenOverride);
     $('agentMode').addEventListener('change', () => { chatSessionId = null; chatHistory = []; renderChatHistory(); loadChatSession(); });
-    $('model').addEventListener('change', () => { applySelectedModelPricing(); updateContextBadge(); persistSelectedModel(); loadChatSession(); });
-    $('customModel').addEventListener('input', () => { applySelectedModelPricing(); updateContextBadge(); persistSelectedModel(); loadChatSession(); });
+    $('model').addEventListener('change', () => { resolveSelectedModelPricing(); updateContextBadge(); persistSelectedModel(); loadChatSession(); });
+    $('customModel').addEventListener('input', () => { resolveSelectedModelPricing(); updateContextBadge(); persistSelectedModel(); loadChatSession(); });
     $('baseUrl').addEventListener('input', refreshTokenStatus);
     ['priceInput', 'priceOutput', 'priceCacheHitInput', 'priceCacheMissInput', 'priceCurrency'].forEach((id) => {
       $(id).addEventListener('input', saveCurrentPricingOverride);

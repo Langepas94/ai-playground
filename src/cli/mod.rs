@@ -20,11 +20,14 @@ pub(crate) use profile_input::{
     profile_name_from_parts, select_profile_name,
 };
 
-use args::{Command, ConfigCommand, ModelsCommand, ProfileCommand, ProfileUseArgs, TokenCommand};
+use args::{
+    Command, ConfigCommand, ModelsCommand, PricingCommand, ProfileCommand, ProfileUseArgs,
+    TokenCommand,
+};
 use commands::{
     run_ask, run_chat, run_compare, run_compare_goal, run_config_path, run_doctor, run_models_list,
-    run_profile_add, run_profile_list, run_profile_remove, run_profile_use, run_setup,
-    run_token_delete, run_token_demo, run_token_set,
+    run_pricing_status, run_pricing_sync, run_profile_add, run_profile_list, run_profile_remove,
+    run_profile_use, run_setup, run_token_delete, run_token_demo, run_token_set,
 };
 
 #[derive(Debug, Parser)]
@@ -71,10 +74,18 @@ async fn run_with_store(cli: &Cli, secrets: &dyn SecretStore) -> Result<(), AppE
             run_token_demo(args);
             Ok(())
         }
+        Command::Pricing { command } => pricing_command(command).await,
         Command::Config { command } => match command {
             ConfigCommand::Path => run_config_path(),
         },
         Command::Doctor(args) => run_doctor(args, secrets),
+    }
+}
+
+async fn pricing_command(command: &PricingCommand) -> Result<(), AppError> {
+    match command {
+        PricingCommand::Sync => run_pricing_sync().await,
+        PricingCommand::Status => run_pricing_status(),
     }
 }
 
