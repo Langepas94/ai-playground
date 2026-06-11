@@ -479,6 +479,10 @@ impl ReqwestProviderClient {
             gigachat_oauth_url,
         })
     }
+
+    pub fn http_client(&self) -> &Client {
+        &self.client
+    }
 }
 
 fn add_extra_root_certificates(mut builder: ClientBuilder) -> Result<ClientBuilder, AppError> {
