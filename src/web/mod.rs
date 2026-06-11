@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+use tokio::time::{Duration, sleep};
 
 use crate::{
     chat::memory::{MemoryConfig, MemoryStrategy},
@@ -23,6 +24,7 @@ use crate::{
     },
     config::ProfileConfig,
     errors::AppError,
+    pricing::{LiteLlmPriceCatalog, PriceCatalogStatus, PricingResolution},
     providers::{
         AnswerFormat, BillingLookup, BillingProvider, ChatMessage, HttpDebugRequest,
         HttpDebugResponse, ModelPricing, ProviderKind, ReqwestProviderClient, ResponseControl,
@@ -48,12 +50,15 @@ struct AppState {
     client: ReqwestProviderClient,
     secrets: Arc<dyn SecretStore>,
     sessions: LocalSessionStore,
+    prices: LiteLlmPriceCatalog,
 }
 
 pub async fn serve(addr: SocketAddr) -> Result<(), AppError> {
     let client = ReqwestProviderClient::new()?;
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
     let sessions = LocalSessionStore::new()?;
+    let prices = LiteLlmPriceCatalog::new()?;
+    spawn_price_sync_task(client.clone(), prices.clone());
     let app = Router::new()
         .route("/", get(index))
         .route("/api/agents", get(agents))
@@ -61,6 +66,9 @@ pub async fn serve(addr: SocketAddr) -> Result<(), AppError> {
         .route("/api/token/status", post(token_status))
         .route("/api/token/save", post(token_save))
         .route("/api/models", post(models))
+        .route("/api/pricing/status", get(pricing_status))
+        .route("/api/pricing/sync", post(pricing_sync))
+        .route("/api/pricing/resolve", post(pricing_resolve))
         .route("/api/agent/session", post(chat_session))
         .route("/api/agent/chat", post(chat))
         .route("/api/agent/chat/stream", post(chat_stream))
@@ -71,6 +79,7 @@ pub async fn serve(addr: SocketAddr) -> Result<(), AppError> {
             client,
             secrets,
             sessions,
+            prices,
         });
     let listener = TcpListener::bind(addr)
         .await
@@ -84,6 +93,16 @@ pub async fn serve(addr: SocketAddr) -> Result<(), AppError> {
     axum::serve(listener, app)
         .await
         .map_err(|error| AppError::Terminal(error.to_string()))
+}
+
+fn spawn_price_sync_task(client: ReqwestProviderClient, prices: LiteLlmPriceCatalog) {
+    tokio::spawn(async move {
+        let _ = prices.sync_if_stale(client.http_client()).await;
+        loop {
+            sleep(Duration::from_secs(24 * 60 * 60)).await;
+            let _ = prices.sync(client.http_client()).await;
+        }
+    });
 }
 
 async fn index() -> Html<&'static str> {
@@ -133,10 +152,39 @@ async fn models(
         &request.token,
         request.token_provider.as_deref(),
     )?;
+    let _ = state.prices.sync_if_stale(state.client.http_client()).await;
     let mut models = state.client.list_model_info(&profile, &token).await?;
     models.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(Json(ModelsResponse {
-        models: models.into_iter().map(ModelView::from).collect(),
+        models: models
+            .into_iter()
+            .map(|model| ModelView::from_model_info(model, &state.prices, profile.provider))
+            .collect(),
+    }))
+}
+
+async fn pricing_status(
+    State(state): State<AppState>,
+) -> Result<Json<PriceCatalogStatus>, WebError> {
+    Ok(Json(state.prices.status()?))
+}
+
+async fn pricing_sync(State(state): State<AppState>) -> Result<Json<PriceCatalogStatus>, WebError> {
+    Ok(Json(state.prices.sync(state.client.http_client()).await?))
+}
+
+async fn pricing_resolve(
+    State(state): State<AppState>,
+    Json(request): Json<PricingResolveRequest>,
+) -> Result<Json<PricingResolveResponse>, WebError> {
+    let provider = parse_provider(&request.provider)?;
+    let _ = state.prices.sync_if_stale(state.client.http_client()).await;
+    Ok(Json(PricingResolveResponse {
+        pricing: state
+            .prices
+            .resolve(provider, &request.model)
+            .ok()
+            .flatten(),
     }))
 }
 
@@ -208,16 +256,14 @@ async fn chat(
         .clone()
         .unwrap_or_default()
         .into_memory_config();
+    let pricing = web_request_pricing(&request, &state.prices, &profile);
     let mut agent = ChatAgent::new(
         profile.clone(),
         token,
         request.initial_history(session.messages),
         memory,
         control,
-        request
-            .pricing
-            .clone()
-            .and_then(WebPricing::into_model_pricing),
+        pricing,
         request
             .billing
             .clone()
@@ -279,16 +325,14 @@ async fn chat_stream(
         .clone()
         .unwrap_or_default()
         .into_memory_config();
+    let pricing = web_request_pricing(&request, &state.prices, &profile);
     let mut agent = ChatAgent::new(
         profile.clone(),
         token.clone(),
         request.initial_history(session.messages),
         memory,
         control,
-        request
-            .pricing
-            .clone()
-            .and_then(WebPricing::into_model_pricing),
+        pricing,
         request
             .billing
             .clone()
@@ -444,15 +488,45 @@ struct TokenStatusResponse {
 struct ModelView {
     id: String,
     pricing: Option<ModelPricing>,
+    pricing_source: Option<PricingResolution>,
+    context_length: Option<u64>,
 }
 
-impl From<crate::providers::ModelInfo> for ModelView {
-    fn from(model: crate::providers::ModelInfo) -> Self {
+impl ModelView {
+    fn from_model_info(
+        model: crate::providers::ModelInfo,
+        prices: &LiteLlmPriceCatalog,
+        provider: ProviderKind,
+    ) -> Self {
+        let catalog_resolution = prices.resolve(provider, &model.id).ok().flatten();
+        let pricing = model.pricing.clone().or_else(|| {
+            catalog_resolution
+                .as_ref()
+                .map(|resolution| resolution.pricing.clone())
+        });
+        let context_length = model.context_length.or_else(|| {
+            catalog_resolution
+                .as_ref()
+                .and_then(|resolution| resolution.context_length)
+        });
         Self {
             id: model.id,
-            pricing: model.pricing,
+            pricing,
+            pricing_source: catalog_resolution,
+            context_length,
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct PricingResolveRequest {
+    provider: String,
+    model: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PricingResolveResponse {
+    pricing: Option<PricingResolution>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -735,6 +809,24 @@ fn build_web_prompt(prompt: &str, attachments: Option<&[WebAttachment]>) -> Stri
     parts.join("\n\n")
 }
 
+fn web_request_pricing(
+    request: &ChatWebRequest,
+    prices: &LiteLlmPriceCatalog,
+    profile: &ProfileConfig,
+) -> Option<ModelPricing> {
+    request
+        .pricing
+        .clone()
+        .and_then(WebPricing::into_model_pricing)
+        .or_else(|| {
+            prices
+                .resolve(profile.provider, &profile.model)
+                .ok()
+                .flatten()
+                .map(|resolution| resolution.pricing)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -925,6 +1017,56 @@ mod tests {
         assert_eq!(config.recent_messages, 4);
         assert_eq!(config.summarize_after_messages, 8);
         assert_eq!(config.summary_chunk_messages, 1);
+    }
+
+    #[test]
+    fn web_request_pricing_falls_back_to_litellm_catalog() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("prices.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "fetched_at_unix": 4102444800,
+              "source_url": "https://example.test/catalog.json",
+              "entries": {
+                "deepseek-chat": {
+                  "litellm_provider": "deepseek",
+                  "input_cost_per_token": 0.00000028,
+                  "output_cost_per_token": 0.00000042,
+                  "cache_read_input_token_cost": 0.000000028,
+                  "max_input_tokens": 131072,
+                  "source": "https://example.test/deepseek"
+                }
+              }
+            }"#,
+        )
+        .expect("write price cache");
+        let prices = LiteLlmPriceCatalog::with_path(path);
+        let request = ChatWebRequest {
+            agent_id: Some(crate::chat::LOCAL_SESSION_AGENT_ID.to_string()),
+            provider: "deepseek".to_string(),
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            token: String::new(),
+            token_provider: None,
+            model: "deepseek-chat".to_string(),
+            system_prompt: None,
+            prompt: "Привет".to_string(),
+            attachments: None,
+            session_id: None,
+            new_session: false,
+            messages: None,
+            control: WebResponseControl::default(),
+            memory: None,
+            pricing: None,
+            billing: None,
+        };
+        let profile = request.profile().expect("profile");
+
+        let pricing = web_request_pricing(&request, &prices, &profile).expect("pricing");
+
+        assert!((pricing.input_per_million.unwrap() - 0.28).abs() < f64::EPSILON);
+        assert!((pricing.output_per_million - 0.42).abs() < f64::EPSILON);
+        assert!((pricing.cache_hit_input_per_million.unwrap() - 0.028).abs() < 1e-12);
     }
 
     /// Баг 2: WebPricing с только output ценой должен конвертироваться в Some(ModelPricing)
