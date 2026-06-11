@@ -357,10 +357,12 @@ async fn chat_stream(
         match result {
             Ok(response) => {
                 let assistant_text = response.text.clone();
-                let session_metrics =
+                let mut session_metrics =
                     add_request_metrics(&session_metrics_before, &response.metrics);
                 agent.record_stream_response(prompt, assistant_text);
-                agent.compact_memory(&client).await;
+                if let Some(summary_metrics) = agent.compact_memory(&client).await {
+                    session_metrics = add_request_metrics(&session_metrics, &summary_metrics);
+                }
                 let _ = sessions.save_session(&session_key, &session_id, agent.history());
                 let _ = sessions.save_metrics(&session_id, &session_metrics);
                 let _ = sessions.save_memory(&session_id, agent.memory());
