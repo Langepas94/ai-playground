@@ -6,6 +6,7 @@ use crate::providers::{ChatMessage, Role};
 pub const DEFAULT_RECENT_MESSAGES: usize = 12;
 pub const DEFAULT_SUMMARIZE_AFTER_MESSAGES: usize = 18;
 pub const DEFAULT_SUMMARY_CHUNK_MESSAGES: usize = 10;
+pub const DEFAULT_SUMMARIZE_AT_CONTEXT_PERCENT: u8 = 80;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -29,6 +30,7 @@ pub struct MemoryConfig {
     pub recent_messages: usize,
     pub summarize_after_messages: usize,
     pub summary_chunk_messages: usize,
+    pub summarize_at_context_percent: u8,
 }
 
 impl Default for MemoryConfig {
@@ -38,6 +40,7 @@ impl Default for MemoryConfig {
             recent_messages: DEFAULT_RECENT_MESSAGES,
             summarize_after_messages: DEFAULT_SUMMARIZE_AFTER_MESSAGES,
             summary_chunk_messages: DEFAULT_SUMMARY_CHUNK_MESSAGES,
+            summarize_at_context_percent: DEFAULT_SUMMARIZE_AT_CONTEXT_PERCENT,
         }
     }
 }
@@ -104,6 +107,22 @@ impl AgentMemory {
         }
         Some(self.summarized_message_count..end)
     }
+
+    pub fn next_summary_range_for_pressure(
+        &self,
+        history: &[ChatMessage],
+        config: MemoryConfig,
+        keep_recent_messages: usize,
+    ) -> Option<std::ops::Range<usize>> {
+        if config.strategy == MemoryStrategy::Full {
+            return None;
+        }
+        let end = history.len().saturating_sub(keep_recent_messages);
+        if end <= self.summarized_message_count {
+            return None;
+        }
+        Some(self.summarized_message_count..end)
+    }
 }
 
 pub fn format_messages_for_summary(messages: &[ChatMessage]) -> String {
@@ -154,6 +173,7 @@ mod tests {
                 recent_messages: 2,
                 summarize_after_messages: 3,
                 summary_chunk_messages: 1,
+                summarize_at_context_percent: 80,
             },
         );
 
@@ -186,6 +206,7 @@ mod tests {
                     recent_messages: 2,
                     summarize_after_messages: 4,
                     summary_chunk_messages: 1,
+                    summarize_at_context_percent: 80,
                 },
             )
             .expect("summary range");
@@ -210,6 +231,7 @@ mod tests {
             recent_messages: 1,
             summarize_after_messages: 2,
             summary_chunk_messages: 1,
+            summarize_at_context_percent: 80,
         };
 
         let context = memory.build_context(&history, config);
@@ -239,9 +261,42 @@ mod tests {
                 recent_messages: 2,
                 summarize_after_messages: 4,
                 summary_chunk_messages: 4,
+                summarize_at_context_percent: 80,
             },
         );
 
         assert!(range.is_none());
+    }
+
+    #[test]
+    fn memory_pressure_range_can_summarize_more_than_recent_window_policy() {
+        let memory = AgentMemory {
+            session_summary: None,
+            summarized_message_count: 0,
+        };
+        let history = vec![
+            message(Role::User, "1"),
+            message(Role::Assistant, "2"),
+            message(Role::User, "3"),
+            message(Role::Assistant, "4"),
+            message(Role::User, "5"),
+            message(Role::Assistant, "6"),
+        ];
+
+        let range = memory
+            .next_summary_range_for_pressure(
+                &history,
+                MemoryConfig {
+                    strategy: MemoryStrategy::Summary,
+                    recent_messages: 5,
+                    summarize_after_messages: 20,
+                    summary_chunk_messages: 10,
+                    summarize_at_context_percent: 80,
+                },
+                4,
+            )
+            .expect("pressure range");
+
+        assert_eq!(range, 0..2);
     }
 }

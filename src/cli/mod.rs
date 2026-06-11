@@ -14,7 +14,7 @@ mod pricing;
 mod profile_input;
 
 pub(crate) use input::read_stdin_line;
-pub(crate) use pricing::request_pricing;
+pub(crate) use pricing::request_model_runtime_info;
 pub(crate) use profile_input::{
     collect_profile_input, collect_profile_input_with_optional_setup_token,
     profile_name_from_parts, select_profile_name,
