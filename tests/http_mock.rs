@@ -313,9 +313,22 @@ async fn stream_chat_completion_debug_keeps_metrics_cost_and_response_body() {
     assert_eq!(debug.request.headers["authorization"], "Bearer [redacted]");
     assert_eq!(debug.request.body["stream"], true);
     assert_eq!(debug.response.status, 200);
-    assert_eq!(debug.response.body["message"]["content"], "hello back");
-    assert_eq!(debug.response.body["usage"]["input_tokens"], 1000);
-    assert_eq!(debug.response.body["cost"]["source"], "configured-pricing");
+    assert_eq!(
+        debug.response.body[0]["choices"][0]["delta"]["content"],
+        "hello "
+    );
+    assert_eq!(
+        debug.response.body[1]["choices"][0]["delta"]["content"],
+        "back"
+    );
+    assert_eq!(
+        debug.response.body[1]["usage"]["prompt_tokens"], 1000,
+        "stream debug must keep provider usage field names"
+    );
+    assert!(
+        debug.response.body.get("cost").is_none(),
+        "stream debug must not inject app-calculated cost into provider response"
+    );
 }
 
 #[tokio::test]
@@ -374,10 +387,21 @@ async fn stream_chat_completion_estimates_usage_and_cost_when_provider_omits_usa
     assert_eq!(cost.currency, "USD");
     assert_eq!(cost.source, CostSource::ConfiguredPricing);
     assert_eq!(
-        debug.response.body["usage"]["input_tokens"],
-        usage.input_tokens
+        debug.response.body[0]["choices"][0]["delta"]["content"],
+        "hello "
     );
-    assert_eq!(debug.response.body["cost"]["source"], "configured-pricing");
+    assert_eq!(
+        debug.response.body[1]["choices"][0]["delta"]["content"],
+        "back"
+    );
+    assert!(
+        debug.response.body[0].get("usage").is_none(),
+        "debug must not show estimated usage as provider JSON"
+    );
+    assert!(
+        debug.response.body.get("cost").is_none(),
+        "debug must not show estimated cost as provider JSON"
+    );
 }
 
 #[tokio::test]
