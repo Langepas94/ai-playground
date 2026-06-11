@@ -435,6 +435,33 @@
       line-height: 1.5;
       font-size: 14px;
     }
+    .summary-divider {
+      justify-self: center;
+      max-width: 90%;
+      margin: 4px 0;
+      padding: 5px 12px;
+      border-radius: 999px;
+      background: #eef3ff;
+      border: 1px solid #c9d8ff;
+      color: #2d4a8a;
+      font-size: 12.5px;
+      font-weight: 600;
+      text-align: center;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .summary-banner {
+      margin: 6px 0 0;
+      padding: 8px 12px;
+      border-radius: 7px;
+      background: #eef3ff;
+      border: 1px solid #c9d8ff;
+      color: #2d4a8a;
+      font-size: 13px;
+      animation: fadeIn 0.25s ease;
+    }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; } }
     .message {
       max-width: min(78%, 820px);
       display: grid;
@@ -913,6 +940,7 @@
     let chatSessionId = null;
     let forceNewSession = false;
     let pendingAttachments = []; // [{name, content}]
+    let summaryMarkers = []; // индексы видимых сообщений, после которых сработал summary
 
     function pricingCacheKey(provider, modelId) {
       return `ai_pricing:${provider}:${modelId}`;
@@ -1390,16 +1418,32 @@
         conversation.innerHTML = '<p class="conversation-empty">Ответ появится здесь.</p>';
         return;
       }
-      conversation.innerHTML = visibleMessages.map((message) => {
+      const markerSet = new Set(summaryMarkers);
+      conversation.innerHTML = visibleMessages.map((message, index) => {
         const isUser = message.role === 'user';
         const role = isUser ? 'Вы' : selectedAgent()?.name || 'Агент';
         const side = isUser ? 'user' : 'assistant';
-        return `<article class="message ${side}">
+        const divider = markerSet.has(index)
+          ? '<div class="summary-divider">🗜 Старая история сжата в краткую память (summary)</div>'
+          : '';
+        return `${divider}<article class="message ${side}">
           <span class="message-role">${escapeHtml(role)}</span>
           <span class="message-content">${escapeHtml(message.content || '')}</span>
         </article>`;
       }).join('');
       conversation.scrollTop = conversation.scrollHeight;
+    }
+
+    // Помечает, что на этом ходу сработал summary, и перерисовывает диалог с
+    // разделителем перед текущим обменом (старое сжато в краткую память).
+    function noteSummary(summaryMetrics) {
+      if (!summaryMetrics) return;
+      const visibleCount = chatHistory.filter((message) => message.role !== 'system').length;
+      const idx = Math.max(0, visibleCount - 2);
+      if (!summaryMarkers.includes(idx)) {
+        summaryMarkers.push(idx);
+        renderChatHistory();
+      }
     }
 
     function renderConversationError(message) {
@@ -1428,6 +1472,7 @@
         const data = await requestJson('/api/agent/session', sessionPayload());
         chatSessionId = data.session_id || null;
         forceNewSession = false;
+        summaryMarkers = [];
         chatHistory = data.messages || [];
         restoreSystemPromptFromHistory(chatHistory);
         setSessionMetrics(data.metrics);
@@ -1448,6 +1493,7 @@
       const data = await requestJson('/api/agent/session', sessionPayload(true));
       chatSessionId = data.session_id || null;
       forceNewSession = false;
+      summaryMarkers = [];
       chatHistory = data.messages || [];
       restoreSystemPromptFromHistory(chatHistory);
       setMetrics(null, null);
@@ -1796,7 +1842,8 @@
                 setMetrics(data.metrics, data.summary_metrics);
                 setSessionMetrics(data.session_metrics);
                 setDebug(data.debug);
-                setStatus('Готово');
+                noteSummary(data.summary_metrics);
+                setStatus(data.summary_metrics ? '🗜 Контекст сжат в summary · Готово' : 'Готово');
               } else if (eventType === 'error') {
                 throw new Error(eventData);
               }
@@ -1889,7 +1936,8 @@
         setMetrics(data.metrics, data.summary_metrics);
         setSessionMetrics(data.session_metrics);
         setDebug(data.debug);
-        setStatus('Готово');
+        noteSummary(data.summary_metrics);
+        setStatus(data.summary_metrics ? '🗜 Контекст сжат в summary · Готово' : 'Готово');
         await refreshTokenStatus();
       } catch (error) {
         const aborted = error.name === 'AbortError' || error === 'stream timeout';
@@ -2025,7 +2073,7 @@
     });
     $('token').addEventListener('input', markTokenOverrideProvider);
     $('saveToken').addEventListener('click', saveTokenOverride);
-    $('agentMode').addEventListener('change', () => { chatSessionId = null; chatHistory = []; renderChatHistory(); loadChatSession(); });
+    $('agentMode').addEventListener('change', () => { chatSessionId = null; chatHistory = []; summaryMarkers = []; renderChatHistory(); loadChatSession(); });
     $('model').addEventListener('change', () => { resolveSelectedModelPricing(); updateContextBadge(); persistSelectedModel(); loadChatSession(); });
     $('customModel').addEventListener('input', () => { resolveSelectedModelPricing(); updateContextBadge(); persistSelectedModel(); loadChatSession(); });
     $('baseUrl').addEventListener('input', refreshTokenStatus);
