@@ -113,8 +113,11 @@ impl ChatAgent {
         self.commit_turn(prompt, answer);
     }
 
-    pub async fn compact_memory(&mut self, client: &dyn ProviderClient) {
-        self.refresh_memory_with_timeout(client).await;
+    pub async fn compact_memory(
+        &mut self,
+        client: &dyn ProviderClient,
+    ) -> Option<crate::providers::RequestMetrics> {
+        self.refresh_memory_with_timeout(client).await
     }
 
     pub async fn respond(
@@ -130,7 +133,11 @@ impl ChatAgent {
             )
             .await?;
         self.commit_turn(prompt, response.text.clone());
-        self.refresh_memory_with_timeout(client).await;
+        let mut response = response;
+        if let Some(summary_metrics) = self.refresh_memory_with_timeout(client).await {
+            response.metrics =
+                crate::chat::add_request_metrics(&response.metrics, &summary_metrics);
+        }
         Ok(response)
     }
 
@@ -147,7 +154,11 @@ impl ChatAgent {
             )
             .await?;
         self.commit_turn(prompt, response.text.clone());
-        self.refresh_memory_with_timeout(client).await;
+        let mut response = response;
+        if let Some(summary_metrics) = self.refresh_memory_with_timeout(client).await {
+            response.metrics =
+                crate::chat::add_request_metrics(&response.metrics, &summary_metrics);
+        }
         Ok((response, debug))
     }
 
@@ -197,21 +208,30 @@ impl ChatAgent {
         });
     }
 
-    async fn refresh_memory_with_timeout(&mut self, client: &dyn ProviderClient) {
-        let _ = timeout(MEMORY_REFRESH_TIMEOUT, self.refresh_memory(client)).await;
+    async fn refresh_memory_with_timeout(
+        &mut self,
+        client: &dyn ProviderClient,
+    ) -> Option<crate::providers::RequestMetrics> {
+        timeout(MEMORY_REFRESH_TIMEOUT, self.refresh_memory(client))
+            .await
+            .ok()
+            .flatten()
     }
 
-    async fn refresh_memory(&mut self, client: &dyn ProviderClient) {
+    async fn refresh_memory(
+        &mut self,
+        client: &dyn ProviderClient,
+    ) -> Option<crate::providers::RequestMetrics> {
         let Some(range) = self
             .memory
             .next_summary_range(&self.history, self.memory_config)
         else {
-            return;
+            return None;
         };
         let messages_to_summarize = format_messages_for_summary(&self.history[range.clone()]);
         if messages_to_summarize.trim().is_empty() {
             self.memory.summarized_message_count = range.end;
-            return;
+            return None;
         }
         let previous_summary = self
             .memory
@@ -244,8 +264,10 @@ impl ChatAgent {
             if !summary.is_empty() {
                 self.memory.session_summary = Some(summary.to_string());
                 self.memory.summarized_message_count = range.end;
+                return Some(response.metrics);
             }
         }
+        None
     }
 }
 
@@ -264,6 +286,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct FakeClient {
         replies: std::sync::Mutex<Vec<String>>,
+        metrics: std::sync::Mutex<Vec<crate::providers::RequestMetrics>>,
         seen_messages: std::sync::Mutex<Vec<Vec<ChatMessage>>>,
     }
 
@@ -293,14 +316,17 @@ mod tests {
                 .expect("replies")
                 .pop()
                 .unwrap_or_else(|| "ok".to_string());
-            Ok(ChatResponse {
-                text,
-                finish_reason: Some("stop".to_string()),
-                metrics: crate::providers::RequestMetrics {
+            let metrics = self.metrics.lock().expect("metrics").pop().unwrap_or(
+                crate::providers::RequestMetrics {
                     elapsed_ms: 1,
                     usage: None,
                     cost: None,
                 },
+            );
+            Ok(ChatResponse {
+                text,
+                finish_reason: Some("stop".to_string()),
+                metrics,
             })
         }
 
@@ -346,6 +372,7 @@ mod tests {
                 "second answer".to_string(),
                 "first answer".to_string(),
             ]),
+            metrics: std::sync::Mutex::new(Vec::new()),
             seen_messages: std::sync::Mutex::new(Vec::new()),
         };
         let mut agent = ChatAgent::new(
@@ -387,6 +414,7 @@ mod tests {
     async fn agent_uses_custom_system_prompt_without_default_agent_prompt() {
         let client = FakeClient {
             replies: std::sync::Mutex::new(vec!["answer".to_string()]),
+            metrics: std::sync::Mutex::new(Vec::new()),
             seen_messages: std::sync::Mutex::new(Vec::new()),
         };
         let mut agent = ChatAgent::new(
@@ -463,6 +491,7 @@ mod tests {
                 "summary of older turns".to_string(),
                 "fresh answer".to_string(),
             ]),
+            metrics: std::sync::Mutex::new(Vec::new()),
             seen_messages: std::sync::Mutex::new(Vec::new()),
         };
         let history = (0..20)
@@ -507,6 +536,15 @@ mod tests {
     async fn agent_full_memory_strategy_sends_complete_history() {
         let client = FakeClient {
             replies: std::sync::Mutex::new(vec!["fresh answer".to_string()]),
+            metrics: std::sync::Mutex::new(vec![crate::providers::RequestMetrics {
+                elapsed_ms: 1,
+                usage: None,
+                cost: Some(crate::providers::RequestCost {
+                    amount: 0.1,
+                    currency: "USD".to_string(),
+                    source: crate::providers::CostSource::ConfiguredPricing,
+                }),
+            }]),
             seen_messages: std::sync::Mutex::new(Vec::new()),
         };
         let history = (0..20)
@@ -552,6 +590,65 @@ mod tests {
             agent.memory().session_summary.as_deref(),
             Some("summary should not be sent")
         );
+    }
+
+    #[tokio::test]
+    async fn agent_adds_summary_cost_into_final_response_metrics() {
+        let client = FakeClient {
+            replies: std::sync::Mutex::new(vec![
+                "summary of older turns".to_string(),
+                "final answer".to_string(),
+            ]),
+            metrics: std::sync::Mutex::new(vec![
+                crate::providers::RequestMetrics {
+                    elapsed_ms: 1,
+                    usage: None,
+                    cost: Some(crate::providers::RequestCost {
+                        amount: 0.25,
+                        currency: "USD".to_string(),
+                        source: crate::providers::CostSource::ConfiguredPricing,
+                    }),
+                },
+                crate::providers::RequestMetrics {
+                    elapsed_ms: 2,
+                    usage: None,
+                    cost: Some(crate::providers::RequestCost {
+                        amount: 0.75,
+                        currency: "USD".to_string(),
+                        source: crate::providers::CostSource::ConfiguredPricing,
+                    }),
+                },
+            ]),
+            seen_messages: std::sync::Mutex::new(Vec::new()),
+        };
+        let history = (0..20)
+            .map(|index| ChatMessage {
+                role: if index % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                content: format!("history {index}"),
+            })
+            .collect::<Vec<_>>();
+        let mut agent = ChatAgent::new(
+            test_profile(),
+            "secret".to_string(),
+            history,
+            AgentMemory::default(),
+            ResponseControl::uncontrolled(),
+            None,
+            None,
+        );
+
+        let response = agent
+            .respond(&client, "current question".to_string())
+            .await
+            .expect("response");
+
+        let cost = response.metrics.cost.expect("combined cost");
+        assert!((cost.amount - 1.0).abs() < f64::EPSILON);
+        assert_eq!(cost.currency, "USD");
     }
 
     #[test]
