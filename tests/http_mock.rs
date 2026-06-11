@@ -319,6 +319,68 @@ async fn stream_chat_completion_debug_keeps_metrics_cost_and_response_body() {
 }
 
 #[tokio::test]
+async fn stream_chat_completion_estimates_usage_and_cost_when_provider_omits_usage() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(bearer_token("secret"))
+        .and(body_string_contains("\"stream\":true"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hello \"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"back\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        )))
+        .mount(&server)
+        .await;
+
+    let profile = ProfileConfig {
+        provider: ProviderKind::OpenAiCompatible,
+        model: "test-model".to_string(),
+        base_url: server.uri(),
+        token_ref: "openai-compatible:test".to_string(),
+    };
+    let client = ReqwestProviderClient::new().expect("client");
+    let (response, debug) = client
+        .stream_chat_completion_with_debug(
+            &profile,
+            "secret",
+            ChatRequest {
+                model: "test-model".to_string(),
+                messages: vec![ChatMessage {
+                    role: Role::User,
+                    content: "hello".to_string(),
+                }],
+                control: ResponseControl::uncontrolled(),
+                pricing: Some(ModelPricing {
+                    currency: "USD".to_string(),
+                    input_per_million: Some(2.0),
+                    output_per_million: 10.0,
+                    cache_hit_input_per_million: None,
+                    cache_miss_input_per_million: None,
+                }),
+                billing: None,
+            },
+            |_| {},
+        )
+        .await
+        .expect("stream chat");
+
+    assert_eq!(response.text, "hello back");
+    let usage = response.metrics.usage.expect("estimated usage");
+    assert!(usage.input_tokens > 0);
+    assert!(usage.output_tokens > 0);
+    let cost = response.metrics.cost.expect("estimated cost");
+    assert!(cost.amount > 0.0);
+    assert_eq!(cost.currency, "USD");
+    assert_eq!(cost.source, CostSource::ConfiguredPricing);
+    assert_eq!(
+        debug.response.body["usage"]["input_tokens"],
+        usage.input_tokens
+    );
+    assert_eq!(debug.response.body["cost"]["source"], "configured-pricing");
+}
+
+#[tokio::test]
 async fn chat_completion_falls_back_to_reasoning_content_when_content_is_empty() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
