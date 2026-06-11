@@ -651,6 +651,7 @@
             </div>
             <div class="send-row">
               <button id="send" type="button">Отправить</button>
+              <button id="stopBtn" class="secondary" type="button" style="display:none">Стоп</button>
               <button id="clear" class="secondary" type="button">Новая сессия</button>
             </div>
           </div>
@@ -1659,8 +1660,11 @@
       }
     }
 
+    let activeAbortController = null;
+
     async function sendPrompt() {
       $('send').disabled = true;
+      $('stopBtn').style.display = '';
       setStatus('Жду ответ модели...');
       setDebug(null);
       setMetrics(null, null);
@@ -1676,8 +1680,17 @@
       pendingAttachments = [];
       renderAttachmentChips();
 
-      let assistantEl = null; // DOM-элемент для стриминга
+      let assistantEl = null;
       let accText = '';
+      const abortController = new AbortController();
+      activeAbortController = abortController;
+      let lastTokenAt = Date.now();
+      const STREAM_TIMEOUT_MS = 5 * 60 * 1000;
+      const timeoutId = setInterval(() => {
+        if (Date.now() - lastTokenAt > STREAM_TIMEOUT_MS) {
+          abortController.abort('stream timeout');
+        }
+      }, 5000);
 
       try {
         let response;
@@ -1686,6 +1699,7 @@
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
+            signal: abortController.signal,
           });
         } catch {
           setServerDebug(payload, 'network error — сервер недоступен', null);
@@ -1723,6 +1737,7 @@
               eventData = line.slice(6);
             } else if (line === '' && eventType && eventData !== null) {
               if (eventType === 'token') {
+                lastTokenAt = Date.now();
                 accText += eventData;
                 updateStreamingMessage(assistantEl, accText);
               } else if (eventType === 'done') {
@@ -1747,17 +1762,32 @@
         }
         await refreshTokenStatus();
       } catch (error) {
-        // Откатываем оптимистичное сообщение пользователя если ответа не было
-        if (!accText) {
-          chatHistory = chatHistory.slice(0, -1);
-          $('prompt').value = userText;
+        const aborted = error.name === 'AbortError' || error === 'stream timeout';
+        if (aborted && accText) {
+          // Partial response — keep what arrived, finalize streaming bubble
+          if (assistantEl) {
+            assistantEl.classList.remove('streaming');
+            assistantEl.textContent = accText;
+          }
+          chatHistory = [...chatHistory, { role: 'assistant', content: accText }];
+          renderChatHistory();
+          setStatus('Остановлено', true);
+        } else {
+          if (!accText) {
+            chatHistory = chatHistory.slice(0, -1);
+            $('prompt').value = userText;
+          }
+          if (assistantEl) assistantEl.remove();
+          renderChatHistory();
+          const msg = aborted ? 'Запрос отменён' : error.message;
+          renderConversationError(msg);
+          setStatus(msg, true);
         }
-        if (assistantEl) assistantEl.remove();
-        renderChatHistory();
-        renderConversationError(error.message);
-        setStatus(error.message, true);
       } finally {
+        clearInterval(timeoutId);
+        activeAbortController = null;
         $('send').disabled = false;
+        $('stopBtn').style.display = 'none';
       }
     }
 
@@ -1879,6 +1909,7 @@
     });
     $('loadModels').addEventListener('click', loadModels);
     $('send').addEventListener('click', sendPrompt);
+$('stopBtn').addEventListener('click', () => { if (activeAbortController) activeAbortController.abort('user stop'); });
     $('clear').addEventListener('click', async () => {
       try {
         await startNewChatSession();

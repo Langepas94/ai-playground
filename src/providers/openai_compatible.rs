@@ -499,6 +499,7 @@ pub async fn stream_chat_completion_with_debug(
     let mut usage: Option<OpenAiUsage> = None;
     let mut buf = String::new();
     let mut stream_events = Vec::new();
+    let mut stream_done = false;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| map_network_error(spec, EndpointCategory::Chat, e))?;
         buf.push_str(&String::from_utf8_lossy(&chunk));
@@ -508,6 +509,7 @@ pub async fn stream_chat_completion_with_debug(
             buf = buf[pos + 1..].to_string();
             if let Some(data) = line.strip_prefix("data: ") {
                 if data == "[DONE]" {
+                    stream_done = true;
                     break;
                 }
                 if let Ok(event_json) = serde_json::from_str::<serde_json::Value>(data) {
@@ -528,6 +530,9 @@ pub async fn stream_chat_completion_with_debug(
                     }
                 }
             }
+        }
+        if stream_done {
+            break;
         }
     }
     let elapsed_ms = started.elapsed().as_millis();
