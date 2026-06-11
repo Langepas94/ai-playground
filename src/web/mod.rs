@@ -1283,4 +1283,17 @@ mod tests {
             "session cost should be visible in the metrics panel"
         );
     }
+
+    #[test]
+    fn web_ui_context_settings_use_human_labels() {
+        assert!(INDEX_HTML.contains("Как хранить историю"));
+        assert!(INDEX_HTML.contains("Свежие сообщения без сжатия"));
+        assert!(INDEX_HTML.contains("Начинать сжатие после"));
+        assert!(INDEX_HTML.contains("Сжимать при заполнении контекста"));
+        assert!(INDEX_HTML.contains("Размер порции summary"));
+        assert!(
+            !INDEX_HTML.contains(">memory_strategy<"),
+            "context settings should not expose raw API field names as labels"
+        );
+    }
 }
