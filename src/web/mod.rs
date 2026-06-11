@@ -355,12 +355,12 @@ async fn chat_stream(
     tokio::spawn(async move {
         let tx_token = tx.clone();
         let result = client
-            .stream_chat_completion(&profile, &token, chat_request, move |chunk| {
+            .stream_chat_completion_with_debug(&profile, &token, chat_request, move |chunk| {
                 let _ = tx_token.send(chunk.to_string());
             })
             .await;
         match result {
-            Ok(response) => {
+            Ok((response, provider_debug)) => {
                 let assistant_text = response.text.clone();
                 let mut response_metrics = response.metrics.clone();
                 if let Some(summary_metrics) = preflight_summary_metrics.clone() {
@@ -378,8 +378,13 @@ async fn chat_stream(
                 let done_event = serde_json::json!({
                     "done": true,
                     "session_id": session_id,
+                    "metrics": response_metrics,
                     "session_metrics": session_metrics,
                     "messages": agent.history(),
+                    "debug": ChatDebugView {
+                        provider_request: provider_debug.request,
+                        provider_response: provider_debug.response,
+                    },
                 });
                 let _ = tx.send(format!("\x00DONE\x00{done_event}"));
             }
@@ -800,7 +805,7 @@ struct ChatWebResponse {
     debug: ChatDebugView,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct ChatDebugView {
     provider_request: HttpDebugRequest,
     provider_response: HttpDebugResponse,
