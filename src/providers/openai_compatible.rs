@@ -433,17 +433,38 @@ pub async fn stream_chat_completion(
     request: ChatRequest,
     on_token: impl Fn(&str),
 ) -> Result<ChatResponse, AppError> {
+    let (response, _) =
+        stream_chat_completion_with_debug(client, spec, profile, token, request, on_token).await?;
+    Ok(response)
+}
+
+pub async fn stream_chat_completion_with_debug(
+    client: &Client,
+    spec: ProviderSpec,
+    profile: &ProfileConfig,
+    token: &str,
+    request: ChatRequest,
+    on_token: impl Fn(&str),
+) -> Result<(ChatResponse, ProviderExchangeDebug), AppError> {
     let url = endpoint(&profile.base_url, "chat/completions");
     let pricing = request.pricing.clone();
     let started = Instant::now();
     let mut payload = chat_payload_for_provider(spec.kind, request);
     payload.stream = Some(true);
+    let body = serde_json::to_value(&payload).map_err(|error| AppError::Json(error.to_string()))?;
+    let provider_request = HttpDebugRequest {
+        method: "POST".to_string(),
+        url: url.clone(),
+        headers: debug_request_headers(spec),
+        body,
+    };
     let response = authorized(client.post(&url), spec, token)
         .json(&payload)
         .send()
         .await
         .map_err(|error| map_network_error(spec, EndpointCategory::Chat, error))?;
     let status = response.status();
+    let headers = debug_response_headers(response.headers());
     if !status.is_success() {
         let raw = response
             .text()
@@ -493,7 +514,7 @@ pub async fn stream_chat_completion(
     let elapsed_ms = started.elapsed().as_millis();
     let tu = usage.as_ref().map(|u| token_usage(u));
     let cost = usage.map(|u| request_cost(u, pricing.as_ref())).flatten();
-    Ok(ChatResponse {
+    let response = ChatResponse {
         text: full_text,
         finish_reason,
         metrics: RequestMetrics {
@@ -501,7 +522,28 @@ pub async fn stream_chat_completion(
             usage: tu,
             cost,
         },
-    })
+    };
+    let provider_response = HttpDebugResponse {
+        status: status.as_u16(),
+        headers,
+        body: serde_json::json!({
+            "streamed": true,
+            "message": {
+                "role": "assistant",
+                "content": response.text,
+            },
+            "finish_reason": response.finish_reason,
+            "usage": response.metrics.usage,
+            "cost": response.metrics.cost,
+        }),
+    };
+    Ok((
+        response,
+        ProviderExchangeDebug {
+            request: provider_request,
+            response: provider_response,
+        },
+    ))
 }
 
 #[derive(Debug, Deserialize)]
