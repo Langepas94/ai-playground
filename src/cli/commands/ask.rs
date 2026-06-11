@@ -46,9 +46,9 @@ pub fn build_prompt_with_files(
     }
     let mut parts = vec![prompt.to_string()];
     for path in files {
-        let content = std::fs::read_to_string(path).map_err(|error| AppError::InvalidInput(
-            format!("Cannot read file '{}': {error}", path.display()),
-        ))?;
+        let content = std::fs::read_to_string(path).map_err(|error| {
+            AppError::InvalidInput(format!("Cannot read file '{}': {error}", path.display()))
+        })?;
         let label = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())

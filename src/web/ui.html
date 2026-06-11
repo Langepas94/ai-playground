@@ -691,6 +691,17 @@
                 <label>system_prompt<textarea id="systemPrompt" placeholder="Необязательная системная инструкция для модели"></textarea></label>
               </div>
             </details>
+            <details class="panel" open>
+              <summary>Контекст</summary>
+              <div class="panel-body">
+                <label>memory_strategy<select id="memoryStrategy"><option value="summary">summary</option><option value="full">full</option></select></label>
+                <div class="row">
+                  <label>recent_messages<input id="memoryRecentMessages" type="number" min="0" step="1" value="12"></label>
+                  <label>summarize_after<input id="memorySummarizeAfterMessages" type="number" min="0" step="1" value="18"></label>
+                </div>
+                <label>summary_chunk_messages<input id="memorySummaryChunkMessages" type="number" min="1" step="1" value="10"></label>
+              </div>
+            </details>
             <div class="row">
               <label>max_tokens<input id="maxTokens" type="number" min="1" step="1" placeholder="Пусто = без лимита"></label>
               <label>temperature<input id="temperature" type="number" min="0" max="2" step="0.1" value="1"></label>
@@ -1085,6 +1096,7 @@
         session_id: chatSessionId,
         new_session: forceNewSession,
         messages: chatHistory,
+        memory: memoryPayload(),
         pricing: pricingPayload(),
         billing: billingPayload(),
         control: {
@@ -1120,6 +1132,15 @@
           format_instruction: textValue('formatInstruction'),
           completion_instruction: textValue('completionInstruction')
         }
+      };
+    }
+
+    function memoryPayload() {
+      return {
+        strategy: $('memoryStrategy').value,
+        recent_messages: numberValue('memoryRecentMessages'),
+        summarize_after_messages: numberValue('memorySummarizeAfterMessages'),
+        summary_chunk_messages: numberValue('memorySummaryChunkMessages')
       };
     }
 
