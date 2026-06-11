@@ -77,9 +77,15 @@ impl AgentMemory {
                 ),
             });
         }
+        // Never silently drop messages that the summary does not yet cover.
+        // The recent window is a *floor* on how much raw history to send; any
+        // older messages not yet folded into `session_summary` must still go in
+        // raw, otherwise a failed/absent summarization loses them entirely
+        // (e.g. the very first user message vanishing from the request).
         let recent_start = history.len().saturating_sub(config.recent_messages);
+        let tail_start = self.summarized_message_count.min(recent_start);
         context.extend(
-            history[recent_start..]
+            history[tail_start..]
                 .iter()
                 .filter(|message| message.role != Role::System)
                 .cloned(),
@@ -156,7 +162,9 @@ mod tests {
     fn memory_context_layers_summary_before_recent_messages() {
         let memory = AgentMemory {
             session_summary: Some("User likes concise answers.".to_string()),
-            summarized_message_count: 2,
+            // Summary covers system + old user + old assistant (indices 0..3),
+            // which lines up with the recent window — no orphaned messages.
+            summarized_message_count: 3,
         };
         let history = vec![
             message(Role::System, "Base system prompt"),
@@ -182,6 +190,42 @@ mod tests {
         assert!(context[1].content.contains("User likes concise answers."));
         assert_eq!(context[2].content, "recent user");
         assert_eq!(context[3].content, "recent assistant");
+    }
+
+    #[test]
+    fn build_context_never_drops_unsummarized_messages() {
+        // No summary yet (summarization hasn't run / timed out). Even though the
+        // recent window is smaller than the history, NOT A SINGLE message may be
+        // dropped — otherwise the first message silently disappears from the
+        // request without being captured anywhere.
+        let memory = AgentMemory {
+            session_summary: None,
+            summarized_message_count: 0,
+        };
+        let history = vec![
+            message(Role::User, "FIRST important details"),
+            message(Role::Assistant, "answer 1"),
+            message(Role::User, "second"),
+            message(Role::Assistant, "answer 2"),
+            message(Role::User, "third"),
+            message(Role::Assistant, "answer 3"),
+        ];
+
+        let context = memory.build_context(
+            &history,
+            MemoryConfig {
+                strategy: MemoryStrategy::Summary,
+                recent_messages: 2, // window much smaller than history
+                summarize_after_messages: 5,
+                summary_chunk_messages: 5,
+                summarize_at_context_percent: 1,
+            },
+        );
+
+        // All six messages are present; nothing was lost to the sliding window.
+        assert_eq!(context.len(), 6);
+        assert_eq!(context[0].content, "FIRST important details");
+        assert_eq!(context[5].content, "answer 3");
     }
 
     #[test]
