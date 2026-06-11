@@ -48,6 +48,45 @@
       font-size: 14px;
       text-align: right;
     }
+    .status.busy {
+      color: var(--accent, #2d6cdf);
+      font-weight: 600;
+    }
+    .status.busy::before {
+      content: "";
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      margin-right: 7px;
+      vertical-align: -1px;
+      border: 2px solid currentColor;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .stream-toggle {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      color: var(--muted);
+      white-space: nowrap;
+      cursor: pointer;
+    }
+    .stream-toggle input { width: 16px; min-height: 16px; padding: 0; cursor: pointer; }
+    .typing-dots span {
+      display: inline-block;
+      width: 6px; height: 6px;
+      margin: 0 1px;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: 0.4;
+      animation: typing 1.2s infinite;
+    }
+    .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+    .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes typing { 0%, 60%, 100% { opacity: 0.3; } 30% { opacity: 1; } }
     .layout {
       min-height: calc(100vh - 86px);
       display: grid;
@@ -653,6 +692,9 @@
               <button id="send" type="button">Отправить</button>
               <button id="stopBtn" class="secondary" type="button" style="display:none">Стоп</button>
               <button id="clear" class="secondary" type="button">Новая сессия</button>
+              <label class="stream-toggle" title="По чанкам — слова появляются в реальном времени. Одним ответом — ждать готовый текст целиком.">
+                <input id="streamMode" type="checkbox" checked> Стримить по чанкам
+              </label>
             </div>
           </div>
         </div>
@@ -907,9 +949,9 @@
     }
     let tokenProvider = null;
 
-    function setStatus(text, isError = false) {
+    function setStatus(text, isError = false, busy = false) {
       status.textContent = text;
-      status.className = isError ? 'status error' : 'status';
+      status.className = isError ? 'status error' : (busy ? 'status busy' : 'status');
     }
 
     function selectInspectorTab(name) {
@@ -1663,9 +1705,12 @@
     let activeAbortController = null;
 
     async function sendPrompt() {
+      if (!$('streamMode').checked) {
+        return sendPromptFull();
+      }
       $('send').disabled = true;
       $('stopBtn').style.display = '';
-      setStatus('Жду ответ модели...');
+      setStatus('Жду ответ модели...', false, true);
       setDebug(null);
       setMetrics(null, null);
       const payload = chatPayload();
@@ -1791,6 +1836,90 @@
       }
     }
 
+    // Режим "одним ответом": ждём готовый текст целиком, без чанков.
+    async function sendPromptFull() {
+      $('send').disabled = true;
+      $('stopBtn').style.display = '';
+      setStatus('Модель готовит полный ответ…', false, true);
+      setDebug(null);
+      setMetrics(null, null);
+      const payload = chatPayload();
+      setServerDebug(payload, null, null);
+
+      const userText = $('prompt').value;
+      chatHistory = [...chatHistory, { role: 'user', content: userText }];
+      renderChatHistory();
+      $('prompt').value = '';
+      pendingAttachments = [];
+      renderAttachmentChips();
+
+      const waitingEl = appendWaitingMessage();
+      const abortController = new AbortController();
+      activeAbortController = abortController;
+      const timeoutId = setTimeout(() => abortController.abort('stream timeout'), 5 * 60 * 1000);
+
+      try {
+        let response;
+        try {
+          response = await fetch('/api/agent/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+            signal: abortController.signal,
+          });
+        } catch {
+          setServerDebug(payload, 'network error — сервер недоступен', null);
+          throw new Error('Локальный сервер недоступен. Запустите `ai web` и обновите страницу.');
+        }
+
+        setServerDebug(payload, `HTTP ${response.status}`, response.status);
+        if (!response.ok) {
+          const errText = await response.text();
+          setServerDebug(payload, errText, response.status);
+          throw new Error(errText || 'Request failed');
+        }
+
+        const data = await response.json();
+        chatSessionId = data.session_id || chatSessionId;
+        forceNewSession = false;
+        if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
+        chatHistory = data.messages || chatHistory;
+        restoreSystemPromptFromHistory(chatHistory);
+        renderChatHistory();
+        setMetrics(data.metrics, data.summary_metrics);
+        setSessionMetrics(data.session_metrics);
+        setDebug(data.debug);
+        setStatus('Готово');
+        await refreshTokenStatus();
+      } catch (error) {
+        const aborted = error.name === 'AbortError' || error === 'stream timeout';
+        chatHistory = chatHistory.slice(0, -1);
+        $('prompt').value = userText;
+        renderChatHistory();
+        const msg = aborted ? 'Запрос отменён' : error.message;
+        renderConversationError(msg);
+        setStatus(msg, true);
+      } finally {
+        clearTimeout(timeoutId);
+        activeAbortController = null;
+        if (waitingEl && waitingEl.parentNode) waitingEl.remove();
+        $('send').disabled = false;
+        $('stopBtn').style.display = 'none';
+      }
+    }
+
+    function appendWaitingMessage() {
+      const conv = $('conversation');
+      const empty = conv.querySelector('.conversation-empty');
+      if (empty) empty.remove();
+      const div = document.createElement('div');
+      div.className = 'message assistant streaming';
+      div.innerHTML = '<span class="typing-dots"><span></span><span></span><span></span></span>';
+      conv.appendChild(div);
+      conv.scrollTop = conv.scrollHeight;
+      return div;
+    }
+
     function appendStreamingMessage() {
       const conv = $('conversation');
       const empty = conv.querySelector('.conversation-empty');
@@ -1910,6 +2039,11 @@
     $('loadModels').addEventListener('click', loadModels);
     $('send').addEventListener('click', sendPrompt);
 $('stopBtn').addEventListener('click', () => { if (activeAbortController) activeAbortController.abort('user stop'); });
+    // Запоминаем выбор режима стрима между сессиями
+    if (localStorage.getItem('ai_stream_mode') === 'off') $('streamMode').checked = false;
+    $('streamMode').addEventListener('change', () => {
+      localStorage.setItem('ai_stream_mode', $('streamMode').checked ? 'on' : 'off');
+    });
     $('clear').addEventListener('click', async () => {
       try {
         await startNewChatSession();
