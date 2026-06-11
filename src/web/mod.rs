@@ -256,6 +256,7 @@ async fn chat(
         .clone()
         .unwrap_or_default()
         .into_memory_config();
+    let _ = state.prices.sync_if_stale(state.client.http_client()).await;
     let pricing = web_request_pricing(&request, &state.prices, &profile);
     let context_limit = web_request_context_limit(&request, &state.prices, &profile);
     let mut agent = ChatAgent::new(
@@ -330,6 +331,7 @@ async fn chat_stream(
         .clone()
         .unwrap_or_default()
         .into_memory_config();
+    let _ = state.prices.sync_if_stale(state.client.http_client()).await;
     let pricing = web_request_pricing(&request, &state.prices, &profile);
     let context_limit = web_request_context_limit(&request, &state.prices, &profile);
     let mut agent = ChatAgent::new(
@@ -1073,7 +1075,7 @@ mod tests {
     }
 
     #[test]
-    fn web_request_pricing_falls_back_to_litellm_catalog() {
+    fn web_request_pricing_uses_official_deepseek_pricing_before_stale_catalog() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("prices.json");
         std::fs::write(
@@ -1118,13 +1120,13 @@ mod tests {
 
         let pricing = web_request_pricing(&request, &prices, &profile).expect("pricing");
 
-        assert!((pricing.input_per_million.unwrap() - 0.28).abs() < f64::EPSILON);
-        assert!((pricing.output_per_million - 0.42).abs() < f64::EPSILON);
-        assert!((pricing.cache_hit_input_per_million.unwrap() - 0.028).abs() < 1e-12);
+        assert!((pricing.input_per_million.unwrap() - 0.14).abs() < f64::EPSILON);
+        assert!((pricing.output_per_million - 0.28).abs() < f64::EPSILON);
+        assert!((pricing.cache_hit_input_per_million.unwrap() - 0.0028).abs() < 1e-12);
     }
 
     #[test]
-    fn web_model_view_includes_deepseek_catalog_pricing_when_provider_models_are_bare() {
+    fn web_model_view_includes_official_deepseek_pricing_when_provider_models_are_bare() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("prices.json");
         std::fs::write(
@@ -1156,12 +1158,12 @@ mod tests {
         );
 
         let pricing = view.pricing.expect("catalog pricing");
-        assert!((pricing.input_per_million.unwrap() - 0.28).abs() < f64::EPSILON);
-        assert!((pricing.output_per_million - 0.42).abs() < f64::EPSILON);
-        assert_eq!(view.context_length, Some(131_072));
+        assert!((pricing.input_per_million.unwrap() - 0.14).abs() < f64::EPSILON);
+        assert!((pricing.output_per_million - 0.28).abs() < f64::EPSILON);
+        assert_eq!(view.context_length, Some(1_000_000));
         assert_eq!(
             view.pricing_source.expect("pricing source").matched_model,
-            "deepseek-ai/deepseek-chat"
+            "deepseek-v4-flash"
         );
     }
 
@@ -1217,7 +1219,7 @@ mod tests {
         };
         assert_eq!(
             web_request_context_limit(&request_without_override, &prices, &profile),
-            Some(131_072)
+            Some(1_000_000)
         );
     }
 
@@ -1381,6 +1383,23 @@ mod tests {
         assert!(
             body.contains("resolveSelectedModelPricing();"),
             "selected model pricing must be resolved after loading model options, including DeepSeek models with bare /models metadata"
+        );
+    }
+
+    #[test]
+    fn web_ui_resolves_context_even_when_model_pricing_is_cached() {
+        assert!(
+            INDEX_HTML.contains("const needsPricing = !modelPricingById.has(model)"),
+            "UI should track pricing resolution separately"
+        );
+        assert!(
+            INDEX_HTML.contains("const needsContext = !modelContextById.has(model)"),
+            "UI must still resolve context window when pricing is already cached"
+        );
+        assert!(
+            INDEX_HTML
+                .contains("if (needsPricing) modelPricingById.set(model, data.pricing.pricing);"),
+            "catalog pricing should not overwrite manual/provider pricing while resolving context"
         );
     }
 }
