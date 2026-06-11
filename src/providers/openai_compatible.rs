@@ -9,6 +9,7 @@ use reqwest::{StatusCode, header::RETRY_AFTER};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    chat::token_accounting::{estimate_cost, estimate_messages_tokens, estimate_text_tokens},
     config::ProfileConfig,
     errors::{AppError, EndpointCategory, HttpProblem, ProviderHttpError, map_http_status},
     providers::{
@@ -71,6 +72,7 @@ pub async fn chat_completion(
     let url = endpoint(&profile.base_url, "chat/completions");
     let pricing = request.pricing.clone();
     let billing = request.billing.clone();
+    let request_messages = request.messages.clone();
     let billing_window_start = unix_seconds().saturating_sub(60);
     let billing_before =
         billing_cost_before_request(client, billing.as_ref(), billing_window_start)
@@ -85,8 +87,13 @@ pub async fn chat_completion(
         .await
         .map_err(|error| map_network_error(spec, EndpointCategory::Chat, error))?;
     let raw = response_text_or_error(response, spec, EndpointCategory::Chat).await?;
-    let mut parsed =
-        parse_chat_response(spec, &raw, started.elapsed().as_millis(), pricing.as_ref())?;
+    let mut parsed = parse_chat_response(
+        spec,
+        &raw,
+        started.elapsed().as_millis(),
+        pricing.as_ref(),
+        Some(&request_messages),
+    )?;
     apply_billing_cost(
         client,
         billing.as_ref(),
@@ -108,6 +115,7 @@ pub async fn chat_completion_with_debug(
     let url = endpoint(&profile.base_url, "chat/completions");
     let pricing = request.pricing.clone();
     let billing = request.billing.clone();
+    let request_messages = request.messages.clone();
     let billing_window_start = unix_seconds().saturating_sub(60);
     let billing_before =
         billing_cost_before_request(client, billing.as_ref(), billing_window_start)
@@ -144,7 +152,13 @@ pub async fn chat_completion_with_debug(
             short_reason(&raw),
         )));
     }
-    let mut parsed = parse_chat_response(spec, &raw, elapsed_ms, pricing.as_ref())?;
+    let mut parsed = parse_chat_response(
+        spec,
+        &raw,
+        elapsed_ms,
+        pricing.as_ref(),
+        Some(&request_messages),
+    )?;
     apply_billing_cost(
         client,
         billing.as_ref(),
@@ -448,6 +462,7 @@ pub async fn stream_chat_completion_with_debug(
 ) -> Result<(ChatResponse, ProviderExchangeDebug), AppError> {
     let url = endpoint(&profile.base_url, "chat/completions");
     let pricing = request.pricing.clone();
+    let request_messages = request.messages.clone();
     let started = Instant::now();
     let mut payload = chat_payload_for_provider(spec.kind, request);
     payload.stream = Some(true);
@@ -512,16 +527,21 @@ pub async fn stream_chat_completion_with_debug(
         }
     }
     let elapsed_ms = started.elapsed().as_millis();
-    let tu = usage.as_ref().map(|u| token_usage(u));
-    let cost = usage.map(|u| request_cost(u, pricing.as_ref())).flatten();
+    let mut metrics = RequestMetrics {
+        elapsed_ms,
+        usage: usage.as_ref().map(token_usage),
+        cost: usage.and_then(|u| request_cost(u, pricing.as_ref())),
+    };
+    apply_estimated_usage_and_cost(
+        &mut metrics,
+        &request_messages,
+        &full_text,
+        pricing.as_ref(),
+    );
     let response = ChatResponse {
         text: full_text,
         finish_reason,
-        metrics: RequestMetrics {
-            elapsed_ms,
-            usage: tu,
-            cost,
-        },
+        metrics,
     };
     let provider_response = HttpDebugResponse {
         status: status.as_u16(),
@@ -648,6 +668,7 @@ fn parse_chat_response(
     raw: &str,
     elapsed_ms: u128,
     pricing: Option<&ModelPricing>,
+    request_messages: Option<&[ChatMessage]>,
 ) -> Result<ChatResponse, AppError> {
     let parsed: OpenAiChatResponse = serde_json::from_str(raw).map_err(|error| {
         AppError::ProviderHttp(ProviderHttpError {
@@ -673,7 +694,7 @@ fn parse_chat_response(
         .filter(|content| !content.is_empty())
         .or(choice.message.reasoning_content)
         .unwrap_or_default();
-    Ok(ChatResponse {
+    let mut response = ChatResponse {
         text: content,
         finish_reason: choice.finish_reason,
         metrics: RequestMetrics {
@@ -681,7 +702,44 @@ fn parse_chat_response(
             usage: parsed.usage.as_ref().map(token_usage),
             cost: parsed.usage.and_then(|usage| request_cost(usage, pricing)),
         },
-    })
+    };
+    if let Some(request_messages) = request_messages {
+        apply_estimated_usage_and_cost(
+            &mut response.metrics,
+            request_messages,
+            &response.text,
+            pricing,
+        );
+    }
+    Ok(response)
+}
+
+fn apply_estimated_usage_and_cost(
+    metrics: &mut RequestMetrics,
+    request_messages: &[ChatMessage],
+    response_text: &str,
+    pricing: Option<&ModelPricing>,
+) {
+    if metrics.usage.is_none() {
+        let input_tokens = estimate_messages_tokens(request_messages);
+        let output_tokens = estimate_text_tokens(response_text);
+        metrics.usage = Some(TokenUsage {
+            input_tokens,
+            output_tokens,
+            total_tokens: input_tokens.saturating_add(output_tokens),
+            ..TokenUsage::default()
+        });
+    }
+    if metrics.cost.is_none() {
+        if let (Some(usage), Some(pricing)) = (metrics.usage.as_ref(), pricing) {
+            let cost = estimate_cost(usage.input_tokens, usage.output_tokens, pricing);
+            metrics.cost = Some(RequestCost {
+                amount: cost.amount,
+                currency: cost.currency,
+                source: CostSource::ConfiguredPricing,
+            });
+        }
+    }
 }
 
 fn token_usage(usage: &OpenAiUsage) -> TokenUsage {
@@ -934,7 +992,7 @@ mod tests {
             }
         }"#;
 
-        let response = parse_chat_response(spec(), raw, 123, None).expect("parse response");
+        let response = parse_chat_response(spec(), raw, 123, None, None).expect("parse response");
 
         assert_eq!(response.text, "hello");
         assert_eq!(response.finish_reason.as_deref(), Some("stop"));
@@ -980,7 +1038,7 @@ mod tests {
             }
         }"#;
 
-        let response = parse_chat_response(spec(), raw, 123, None).expect("parse response");
+        let response = parse_chat_response(spec(), raw, 123, None, None).expect("parse response");
         let usage = response.metrics.usage.expect("usage");
 
         assert_eq!(usage.input_tokens, 51);
@@ -1009,7 +1067,7 @@ mod tests {
             }
         }"#;
 
-        let response = parse_chat_response(spec(), raw, 123, None).expect("parse response");
+        let response = parse_chat_response(spec(), raw, 123, None, None).expect("parse response");
 
         assert_eq!(response.metrics.cost, None);
     }
@@ -1036,7 +1094,7 @@ mod tests {
         };
 
         let response =
-            parse_chat_response(spec(), raw, 123, Some(&pricing)).expect("parse response");
+            parse_chat_response(spec(), raw, 123, Some(&pricing), None).expect("parse response");
 
         let cost = response.metrics.cost.expect("configured cost");
         assert!((cost.amount - 0.007).abs() < f64::EPSILON);
@@ -1068,7 +1126,7 @@ mod tests {
         };
 
         let response =
-            parse_chat_response(spec(), raw, 123, Some(&pricing)).expect("parse response");
+            parse_chat_response(spec(), raw, 123, Some(&pricing), None).expect("parse response");
 
         assert_eq!(
             response
@@ -1118,7 +1176,7 @@ mod tests {
             cache_miss_input_per_million: None,
         };
 
-        let response = parse_chat_response(spec(), raw, 1, Some(&pricing)).expect("parse");
+        let response = parse_chat_response(spec(), raw, 1, Some(&pricing), None).expect("parse");
 
         let cost = response
             .metrics
@@ -1176,14 +1234,45 @@ mod tests {
             cache_miss_input_per_million: None,
         };
 
-        let response = parse_chat_response(spec(), raw, 1, Some(&pricing)).expect("parse");
+        let response = parse_chat_response(spec(), raw, 1, Some(&pricing), None).expect("parse");
 
         let cost = response.metrics.cost.expect("cost");
         assert_eq!(cost.amount, 0.042);
         assert_eq!(cost.source, CostSource::ProviderReported);
     }
 
-    /// Без usage нет стоимости
+    #[test]
+    fn missing_provider_usage_gets_estimated_tokens_and_cost_when_request_is_known() {
+        let raw = r#"{ "choices": [{ "message": { "content": "ok" } }] }"#;
+        let pricing = ModelPricing {
+            currency: "USD".to_string(),
+            input_per_million: Some(2.0),
+            output_per_million: 10.0,
+            cache_hit_input_per_million: None,
+            cache_miss_input_per_million: None,
+        };
+        let request_messages = vec![ChatMessage {
+            role: crate::providers::Role::User,
+            content: "hello".to_string(),
+        }];
+
+        let response = parse_chat_response(spec(), raw, 1, Some(&pricing), Some(&request_messages))
+            .expect("parse");
+
+        let usage = response.metrics.usage.expect("estimated usage");
+        assert!(usage.input_tokens > 0);
+        assert!(usage.output_tokens > 0);
+        assert_eq!(
+            usage.total_tokens,
+            usage.input_tokens.saturating_add(usage.output_tokens)
+        );
+        let cost = response.metrics.cost.expect("estimated configured cost");
+        assert!(cost.amount > 0.0);
+        assert_eq!(cost.currency, "USD");
+        assert_eq!(cost.source, CostSource::ConfiguredPricing);
+    }
+
+    /// Без usage и без контекста запроса parser сам по себе не угадывает стоимость
     #[test]
     fn no_usage_in_response_means_no_cost() {
         let raw = r#"{ "choices": [{ "message": { "content": "ok" } }] }"#;
@@ -1195,7 +1284,7 @@ mod tests {
             cache_miss_input_per_million: None,
         };
 
-        let response = parse_chat_response(spec(), raw, 1, Some(&pricing)).expect("parse");
+        let response = parse_chat_response(spec(), raw, 1, Some(&pricing), None).expect("parse");
 
         assert!(response.metrics.cost.is_none());
         assert!(response.metrics.usage.is_none());
