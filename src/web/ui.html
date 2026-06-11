@@ -1252,7 +1252,13 @@
 
     async function resolveSelectedModelPricing() {
       const model = selectedModel();
-      if (!model || modelPricingById.has(model) || userPricingOverrides.has(model)) {
+      if (!model) {
+        applySelectedModelPricing();
+        return;
+      }
+      const needsPricing = !modelPricingById.has(model) && !userPricingOverrides.has(model);
+      const needsContext = !modelContextById.has(model);
+      if (!needsPricing && !needsContext) {
         applySelectedModelPricing();
         return;
       }
@@ -1263,7 +1269,7 @@
           model
         });
         if (data.pricing) {
-          modelPricingById.set(model, data.pricing.pricing);
+          if (needsPricing) modelPricingById.set(model, data.pricing.pricing);
           modelPricingSourceById.set(model, data.pricing);
           if (data.pricing.context_length != null) modelContextById.set(model, data.pricing.context_length);
         }

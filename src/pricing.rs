@@ -33,6 +33,7 @@ pub struct PricingResolution {
 #[serde(rename_all = "kebab-case")]
 pub enum PriceSource {
     LiteLlmCatalog,
+    OfficialProviderDocs,
     ProviderModelsApi,
     ManualOverride,
 }
@@ -41,6 +42,7 @@ impl std::fmt::Display for PriceSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::LiteLlmCatalog => write!(f, "litellm-catalog"),
+            Self::OfficialProviderDocs => write!(f, "official-provider-docs"),
             Self::ProviderModelsApi => write!(f, "provider-models-api"),
             Self::ManualOverride => write!(f, "manual-override"),
         }
@@ -131,7 +133,17 @@ impl LiteLlmPriceCatalog {
         provider: ProviderKind,
         model: &str,
     ) -> Result<Option<PricingResolution>, AppError> {
-        let cache = self.load_cache()?;
+        let cache = match self.load_cache() {
+            Ok(cache) => cache,
+            Err(error) => {
+                if let Some(resolution) =
+                    official_provider_resolution(provider, model, unix_seconds(), false)
+                {
+                    return Ok(Some(resolution));
+                }
+                return Err(error);
+            }
+        };
         Ok(resolve_from_cache(&cache, provider, model, self.ttl))
     }
 
@@ -207,6 +219,14 @@ fn resolve_from_cache(
     ttl: Duration,
 ) -> Option<PricingResolution> {
     let model = model.trim();
+    if let Some(resolution) = official_provider_resolution(
+        provider,
+        model,
+        cache.fetched_at_unix,
+        is_stale(cache.fetched_at_unix, ttl),
+    ) {
+        return Some(resolution);
+    }
     let candidates = model_candidates(provider, model);
     for candidate in &candidates {
         if let Some(entry) = cache.entries.get(candidate.as_str()) {
@@ -230,6 +250,52 @@ fn resolve_from_cache(
         return resolution_from_entry(cache, candidate, entry, ttl);
     }
     None
+}
+
+fn official_provider_resolution(
+    provider: ProviderKind,
+    model: &str,
+    fetched_at_unix: u64,
+    stale: bool,
+) -> Option<PricingResolution> {
+    match provider {
+        ProviderKind::DeepSeek => official_deepseek_resolution(model, fetched_at_unix, stale),
+        _ => None,
+    }
+}
+
+fn official_deepseek_resolution(
+    model: &str,
+    fetched_at_unix: u64,
+    stale: bool,
+) -> Option<PricingResolution> {
+    let normalized = model.trim().to_ascii_lowercase();
+    let bare = normalized.rsplit('/').next().unwrap_or(&normalized);
+    let tier = match bare {
+        "deepseek-v4-flash"
+        | "deepseek-v4-flash-thinking"
+        | "deepseek-chat"
+        | "deepseek-reasoner" => Some(("deepseek-v4-flash", 0.14, 0.28, 0.0028)),
+        "deepseek-v4-pro" | "deepseek-v4-pro-thinking" | "deepseek-pro" => {
+            Some(("deepseek-v4-pro", 0.435, 0.87, 0.003625))
+        }
+        _ => None,
+    }?;
+    Some(PricingResolution {
+        pricing: ModelPricing {
+            currency: "USD".to_string(),
+            input_per_million: Some(tier.1),
+            output_per_million: tier.2,
+            cache_hit_input_per_million: Some(tier.3),
+            cache_miss_input_per_million: Some(tier.1),
+        },
+        source: PriceSource::OfficialProviderDocs,
+        source_url: "https://api-docs.deepseek.com/quick_start/pricing".to_string(),
+        fetched_at_unix,
+        stale,
+        matched_model: tier.0.to_string(),
+        context_length: Some(1_000_000),
+    })
 }
 
 fn resolution_from_entry(
@@ -432,43 +498,93 @@ mod tests {
         )
         .expect("price");
 
-        assert_eq!(resolved.matched_model, "deepseek-chat");
-        assert_eq!(resolved.context_length, Some(128_000));
-        assert!((resolved.pricing.input_per_million.unwrap() - 0.28).abs() < f64::EPSILON);
-        assert!((resolved.pricing.output_per_million - 0.42).abs() < f64::EPSILON);
+        assert_eq!(resolved.source, PriceSource::OfficialProviderDocs);
+        assert_eq!(resolved.matched_model, "deepseek-v4-flash");
+        assert_eq!(resolved.context_length, Some(1_000_000));
+        assert!((resolved.pricing.input_per_million.unwrap() - 0.14).abs() < f64::EPSILON);
+        assert!((resolved.pricing.output_per_million - 0.28).abs() < f64::EPSILON);
     }
 
     #[test]
     fn resolves_deepseek_prices_with_catalog_provider_aliases() {
         let mut entries = BTreeMap::new();
         entries.insert(
-            "deepseek-ai/deepseek-chat".to_string(),
+            "deepseek-ai/deepseek-coder".to_string(),
             entry("deepseek-ai", 0.00000028, 0.00000042),
         );
         entries.insert(
-            "deepseek-reasoner".to_string(),
-            entry("deepseek-reasoner", 0.00000055, 0.00000219),
+            "deepseek-special".to_string(),
+            entry("deepseek-special", 0.00000055, 0.00000219),
         );
 
         let chat = resolve_from_cache(
             &cache(entries.clone()),
             ProviderKind::DeepSeek,
-            "deepseek-chat",
+            "deepseek-coder",
             PRICE_CACHE_TTL,
         )
-        .expect("deepseek chat price");
-        assert_eq!(chat.matched_model, "deepseek-ai/deepseek-chat");
+        .expect("deepseek coder price");
+        assert_eq!(chat.matched_model, "deepseek-ai/deepseek-coder");
         assert!((chat.pricing.output_per_million - 0.42).abs() < f64::EPSILON);
 
         let reasoner = resolve_from_cache(
             &cache(entries),
             ProviderKind::DeepSeek,
-            "deepseek-reasoner",
+            "deepseek-special",
             PRICE_CACHE_TTL,
         )
-        .expect("deepseek reasoner price");
-        assert_eq!(reasoner.matched_model, "deepseek-reasoner");
+        .expect("deepseek special price");
+        assert_eq!(reasoner.matched_model, "deepseek-special");
         assert!((reasoner.pricing.output_per_million - 2.19).abs() < 1e-12);
+    }
+
+    #[test]
+    fn resolves_deepseek_v4_official_prices_without_cache_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let catalog = LiteLlmPriceCatalog::with_path(dir.path().join("missing.json"));
+
+        let pro = catalog
+            .resolve(ProviderKind::DeepSeek, "deepseek-v4-pro")
+            .expect("resolve")
+            .expect("official deepseek pro pricing");
+        assert_eq!(pro.source, PriceSource::OfficialProviderDocs);
+        assert_eq!(pro.matched_model, "deepseek-v4-pro");
+        assert_eq!(pro.context_length, Some(1_000_000));
+        assert!((pro.pricing.input_per_million.unwrap() - 0.435).abs() < f64::EPSILON);
+        assert!((pro.pricing.output_per_million - 0.87).abs() < f64::EPSILON);
+        assert!((pro.pricing.cache_hit_input_per_million.unwrap() - 0.003625).abs() < f64::EPSILON);
+
+        let flash = catalog
+            .resolve(ProviderKind::DeepSeek, "deepseek-v4-flash")
+            .expect("resolve")
+            .expect("official deepseek flash pricing");
+        assert_eq!(flash.matched_model, "deepseek-v4-flash");
+        assert_eq!(flash.context_length, Some(1_000_000));
+        assert!((flash.pricing.input_per_million.unwrap() - 0.14).abs() < f64::EPSILON);
+        assert!((flash.pricing.output_per_million - 0.28).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn official_deepseek_aliases_override_stale_catalog_values() {
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "deepseek-chat".to_string(),
+            entry("deepseek", 0.00000028, 0.00000042),
+        );
+
+        let resolved = resolve_from_cache(
+            &cache(entries),
+            ProviderKind::DeepSeek,
+            "deepseek-chat",
+            PRICE_CACHE_TTL,
+        )
+        .expect("official alias price");
+
+        assert_eq!(resolved.source, PriceSource::OfficialProviderDocs);
+        assert_eq!(resolved.matched_model, "deepseek-v4-flash");
+        assert_eq!(resolved.context_length, Some(1_000_000));
+        assert!((resolved.pricing.input_per_million.unwrap() - 0.14).abs() < f64::EPSILON);
+        assert!((resolved.pricing.output_per_million - 0.28).abs() < f64::EPSILON);
     }
 
     #[test]
