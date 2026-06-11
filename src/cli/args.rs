@@ -40,6 +40,10 @@ pub enum Command {
     CompareGoal(CompareGoalArgs),
     #[command(about = "Show how agent tokens, cost, and context overflow grow across dialogue")]
     TokenDemo(TokenDemoArgs),
+    Dist {
+        #[command(subcommand)]
+        command: DistCommand,
+    },
     Pricing {
         #[command(subcommand)]
         command: PricingCommand,
@@ -108,6 +112,28 @@ pub enum PricingCommand {
     Sync,
     #[command(about = "Show local model price catalog status")]
     Status,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DistCommand {
+    #[command(about = "Download and install the latest dev build")]
+    Install(DistInstallArgs),
+    #[command(about = "Update an installed dev build")]
+    Update(DistInstallArgs),
+    #[command(about = "Show download and install paths")]
+    Status(DistInstallArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct DistInstallArgs {
+    #[arg(long, help = "Override release URL for a specific binary asset")]
+    pub url: Option<String>,
+    #[arg(long, help = "Override release channel, such as dev or latest")]
+    pub channel: Option<String>,
+    #[arg(long, help = "Override install directory")]
+    pub install_dir: Option<PathBuf>,
+    #[arg(long, help = "Overwrite an existing installed binary")]
+    pub overwrite: bool,
 }
 
 #[derive(Debug, Args)]

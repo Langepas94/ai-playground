@@ -21,13 +21,14 @@ pub(crate) use profile_input::{
 };
 
 use args::{
-    Command, ConfigCommand, ModelsCommand, PricingCommand, ProfileCommand, ProfileUseArgs,
-    TokenCommand,
+    Command, ConfigCommand, DistCommand, ModelsCommand, PricingCommand, ProfileCommand,
+    ProfileUseArgs, TokenCommand,
 };
 use commands::{
-    run_ask, run_chat, run_compare, run_compare_goal, run_config_path, run_doctor, run_models_list,
-    run_pricing_status, run_pricing_sync, run_profile_add, run_profile_list, run_profile_remove,
-    run_profile_use, run_setup, run_token_delete, run_token_demo, run_token_set,
+    run_ask, run_chat, run_compare, run_compare_goal, run_config_path, run_dist_install,
+    run_dist_status, run_dist_update, run_doctor, run_models_list, run_pricing_status,
+    run_pricing_sync, run_profile_add, run_profile_list, run_profile_remove, run_profile_use,
+    run_setup, run_token_delete, run_token_demo, run_token_set,
 };
 
 #[derive(Debug, Parser)]
@@ -74,6 +75,7 @@ async fn run_with_store(cli: &Cli, secrets: &dyn SecretStore) -> Result<(), AppE
             run_token_demo(args);
             Ok(())
         }
+        Command::Dist { command } => dist_command(command).await,
         Command::Pricing { command } => pricing_command(command).await,
         Command::Config { command } => match command {
             ConfigCommand::Path => run_config_path(),
@@ -86,6 +88,14 @@ async fn pricing_command(command: &PricingCommand) -> Result<(), AppError> {
     match command {
         PricingCommand::Sync => run_pricing_sync().await,
         PricingCommand::Status => run_pricing_status(),
+    }
+}
+
+async fn dist_command(command: &DistCommand) -> Result<(), AppError> {
+    match command {
+        DistCommand::Install(args) => run_dist_install(args, false).await,
+        DistCommand::Update(args) => run_dist_update(args).await,
+        DistCommand::Status(args) => run_dist_status(args),
     }
 }
 
