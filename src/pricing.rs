@@ -296,7 +296,12 @@ fn provider_prefixes(provider: ProviderKind) -> &'static [&'static str] {
     match provider {
         ProviderKind::OpenAiCompatible => &["openai"],
         ProviderKind::OpenRouter => &[],
-        ProviderKind::DeepSeek => &["deepseek"],
+        ProviderKind::DeepSeek => &[
+            "deepseek",
+            "deepseek-ai",
+            "deepseek-chat",
+            "deepseek-reasoner",
+        ],
         ProviderKind::GigaChat => &["gigachat"],
         ProviderKind::Kimi => &["moonshot", "kimi"],
     }
@@ -306,6 +311,11 @@ fn provider_matches(provider: ProviderKind, entry: &LiteLlmModelEntry) -> bool {
     let Some(entry_provider) = entry.litellm_provider.as_deref() else {
         return true;
     };
+    if provider == ProviderKind::DeepSeek
+        && entry_provider.to_ascii_lowercase().starts_with("deepseek")
+    {
+        return true;
+    }
     provider_prefixes(provider)
         .iter()
         .any(|candidate| *candidate == entry_provider)
@@ -377,6 +387,39 @@ mod tests {
         assert_eq!(resolved.context_length, Some(128_000));
         assert!((resolved.pricing.input_per_million.unwrap() - 0.28).abs() < f64::EPSILON);
         assert!((resolved.pricing.output_per_million - 0.42).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn resolves_deepseek_prices_with_catalog_provider_aliases() {
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "deepseek-ai/deepseek-chat".to_string(),
+            entry("deepseek-ai", 0.00000028, 0.00000042),
+        );
+        entries.insert(
+            "deepseek-reasoner".to_string(),
+            entry("deepseek-reasoner", 0.00000055, 0.00000219),
+        );
+
+        let chat = resolve_from_cache(
+            &cache(entries.clone()),
+            ProviderKind::DeepSeek,
+            "deepseek-chat",
+            PRICE_CACHE_TTL,
+        )
+        .expect("deepseek chat price");
+        assert_eq!(chat.matched_model, "deepseek-ai/deepseek-chat");
+        assert!((chat.pricing.output_per_million - 0.42).abs() < f64::EPSILON);
+
+        let reasoner = resolve_from_cache(
+            &cache(entries),
+            ProviderKind::DeepSeek,
+            "deepseek-reasoner",
+            PRICE_CACHE_TTL,
+        )
+        .expect("deepseek reasoner price");
+        assert_eq!(reasoner.matched_model, "deepseek-reasoner");
+        assert!((reasoner.pricing.output_per_million - 2.19).abs() < 1e-12);
     }
 
     #[test]
