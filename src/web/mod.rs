@@ -1309,6 +1309,14 @@ mod tests {
     }
 
     #[test]
+    fn web_ui_labels_debug_response_as_raw_provider_body() {
+        assert!(
+            INDEX_HTML.contains("Ответ провайдера (raw)"),
+            "debug response must be labeled as raw provider data, not app-calculated metrics"
+        );
+    }
+
+    #[test]
     fn web_ui_composer_meta_only_shows_for_attachments() {
         let marker = "function updateComposerMeta()";
         let start = INDEX_HTML.find(marker).expect("updateComposerMeta");

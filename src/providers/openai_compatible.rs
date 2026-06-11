@@ -498,6 +498,7 @@ pub async fn stream_chat_completion_with_debug(
     let mut finish_reason: Option<String> = None;
     let mut usage: Option<OpenAiUsage> = None;
     let mut buf = String::new();
+    let mut stream_events = Vec::new();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| map_network_error(spec, EndpointCategory::Chat, e))?;
         buf.push_str(&String::from_utf8_lossy(&chunk));
@@ -509,17 +510,20 @@ pub async fn stream_chat_completion_with_debug(
                 if data == "[DONE]" {
                     break;
                 }
-                if let Ok(event) = serde_json::from_str::<OpenAiStreamEvent>(data) {
-                    if let Some(u) = event.usage {
-                        usage = Some(u);
-                    }
-                    if let Some(choice) = event.choices.into_iter().next() {
-                        if let Some(fr) = choice.finish_reason {
-                            finish_reason = Some(fr);
+                if let Ok(event_json) = serde_json::from_str::<serde_json::Value>(data) {
+                    stream_events.push(event_json.clone());
+                    if let Ok(event) = serde_json::from_value::<OpenAiStreamEvent>(event_json) {
+                        if let Some(u) = event.usage {
+                            usage = Some(u);
                         }
-                        if let Some(text) = choice.delta.content {
-                            on_token(&text);
-                            full_text.push_str(&text);
+                        if let Some(choice) = event.choices.into_iter().next() {
+                            if let Some(fr) = choice.finish_reason {
+                                finish_reason = Some(fr);
+                            }
+                            if let Some(text) = choice.delta.content {
+                                on_token(&text);
+                                full_text.push_str(&text);
+                            }
                         }
                     }
                 }
@@ -546,16 +550,7 @@ pub async fn stream_chat_completion_with_debug(
     let provider_response = HttpDebugResponse {
         status: status.as_u16(),
         headers,
-        body: serde_json::json!({
-            "streamed": true,
-            "message": {
-                "role": "assistant",
-                "content": response.text,
-            },
-            "finish_reason": response.finish_reason,
-            "usage": response.metrics.usage,
-            "cost": response.metrics.cost,
-        }),
+        body: serde_json::Value::Array(stream_events),
     };
     Ok((
         response,
