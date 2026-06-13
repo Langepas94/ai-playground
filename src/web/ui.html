@@ -815,9 +815,9 @@
                   <span id="memoryStrategyHelp" class="field-help">Только последние N сообщений; старое отбрасывается.</span>
                 </label>
                 <label>
-                  <span class="field-title">Окно сообщений N</span>
+                  <span id="memoryRecentTitle" class="field-title">Хранить последние N сообщений</span>
                   <input id="memoryRecentMessages" type="number" min="0" step="1" value="12">
-                  <span class="field-help">System prompt не считается. Для facts и branches это тоже размер живого окна.</span>
+                  <span id="memoryRecentHelp" class="field-help">System prompt не считается. Старые обычные сообщения отбрасываются.</span>
                 </label>
                 <div id="factsPreviewWrap" style="display:none">
                   <label>
@@ -1591,7 +1591,27 @@
         'branching': 'Сделайте checkpoint, получите ветки A/B и продолжайте каждую независимо.',
         'scoped-branches': 'Одна session и одно окно: provider видит только active branch.',
       }[$('memoryStrategy').value] || '';
+      const recentCopy = {
+        'sliding-window': {
+          title: 'Хранить последние N сообщений',
+          help: 'System prompt не считается. Старые обычные сообщения отбрасываются.',
+        },
+        'sticky-facts': {
+          title: 'Свежие сообщения вместе с facts',
+          help: 'Facts дают durable context, а N оставляет живой кусок последнего диалога.',
+        },
+        'branching': {
+          title: 'Сообщения текущей ветки',
+          help: 'Каждая UI-ветка живет в своей session; N ограничивает окно выбранной ветки.',
+        },
+        'scoped-branches': {
+          title: 'Сообщения active branch',
+          help: 'Одна session хранит все ветки; provider получает только N сообщений active branch.',
+        },
+      }[$('memoryStrategy').value] || {};
       $('memoryStrategyHelp').textContent = help;
+      $('memoryRecentTitle').textContent = recentCopy.title || 'Окно сообщений N';
+      $('memoryRecentHelp').textContent = recentCopy.help || 'System prompt не считается.';
       $('scopedBranchWrap').style.display = $('memoryStrategy').value === 'scoped-branches' ? '' : 'none';
       $('branchA').classList.toggle('active', branchState.activeId === 'branch-a');
       $('branchB').classList.toggle('active', branchState.activeId === 'branch-b');
