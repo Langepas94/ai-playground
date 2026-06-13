@@ -1386,7 +1386,12 @@ mod tests {
         assert!(INDEX_HTML.contains("Sticky Facts"));
         assert!(INDEX_HTML.contains("Branching"));
         assert!(INDEX_HTML.contains("Scoped Branches"));
-        assert!(INDEX_HTML.contains("Окно сообщений N"));
+        assert!(INDEX_HTML.contains("id=\"memoryRecentTitle\""));
+        assert!(INDEX_HTML.contains("id=\"memoryRecentHelp\""));
+        assert!(INDEX_HTML.contains("Хранить последние N сообщений"));
+        assert!(INDEX_HTML.contains("Свежие сообщения вместе с facts"));
+        assert!(INDEX_HTML.contains("Сообщения текущей ветки"));
+        assert!(INDEX_HTML.contains("Сообщения active branch"));
         assert!(INDEX_HTML.contains("Facts prompt"));
         assert!(INDEX_HTML.contains("id=\"memoryFactsPrompt\""));
         assert!(INDEX_HTML.contains("id=\"memoryActiveBranch\""));
