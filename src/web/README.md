@@ -47,7 +47,7 @@ ChatWebRequest
 - `Summary` показывает размер окна raw сообщений, пороги compaction и настраиваемый summary prompt.
 - `Sticky Facts` показывает размер окна N, настраиваемый facts prompt и текущие facts как read-only блок в UI/debug request.
 - `Branching` показывает кнопки checkpoint, создания двух веток и переключения между ними. Каждая ветка отправляется как отдельная local session, чтобы histories не смешивались.
-- `Scoped Branches` показывает поле active branch. Все остается в одной session, но provider request получает только выбранную внутреннюю ветку.
+- `Scoped Branches` в UI называется и ощущается как auto topics в одном окне: юзер не переключает темы руками, агент сам выбирает/создает тему, а debug-блок показывает выбранную тему и счетчики. Все остается в одной session, но provider request получает только выбранную тему.
 - UI показывает только настройки, нужные выбранной strategy: summary prompt не должен исчезать, но и не должен шуметь в других strategies.
 
 ## Где искать баг
@@ -59,7 +59,7 @@ ChatWebRequest
 - Метрики запроса/диалога неверные: `TokenUsage`, `add_request_metrics()`, `setMetrics()`, `setSessionMetrics()`.
 - Debug JSON странный: `ChatDebugView` и provider debug в `ChatAgent`.
 - Ошибка приходит без понятного текста: `error::WebError::into_response()`.
-- Strategy control странно работает: `WebMemoryConfig::into_memory_config()` и `memoryPayload()` в `ui.html`.
+- Strategy/topic control странно работает: `WebMemoryConfig::into_memory_config()`, `ContextDebugView` и topic helpers в `ui.html`.
 - Branch switch потерял сообщения: branch state в `ui.html`, `session_id/new_session/messages` payload.
 
 ## Инварианты UI
@@ -69,4 +69,4 @@ ChatWebRequest
 - Debug view должен редактировать секреты.
 - Web API не должен обходить `ProviderClient` или `ChatAgent`.
 - UI разделяет метрики последнего запроса и накопленные метрики диалога.
-- UI не должен показывать нерелевантные controls: summary controls только для `Summary`, facts prompt только для `Sticky Facts`, active branch только для `Scoped Branches`.
+- UI не должен показывать нерелевантные controls: summary controls только для `Summary`, facts prompt только для `Sticky Facts`, auto-topic debug только для `Scoped Branches`.

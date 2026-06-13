@@ -42,6 +42,7 @@ pub struct MemoryConfig {
     pub summary_prompt: String,
     pub facts_prompt: String,
     pub active_branch: String,
+    pub scoped_auto_route: bool,
 }
 
 impl Default for MemoryConfig {
@@ -55,6 +56,7 @@ impl Default for MemoryConfig {
             summary_prompt: DEFAULT_SUMMARY_PROMPT.to_string(),
             facts_prompt: DEFAULT_FACTS_PROMPT.to_string(),
             active_branch: "default".to_string(),
+            scoped_auto_route: true,
         }
     }
 }
@@ -229,6 +231,59 @@ impl AgentMemory {
         self.branch_assignments.insert(assistant_index, branch);
     }
 
+    pub fn select_scoped_topic(
+        &self,
+        prompt: &str,
+        history: &[ChatMessage],
+        current: &str,
+    ) -> String {
+        let prompt_keywords = topic_keywords(prompt);
+        let current = normalized_branch(current);
+        if prompt_keywords.len() < 2 {
+            return current;
+        }
+
+        let mut best_branch = String::new();
+        let mut best_score = 0_usize;
+        for (branch, keywords) in self.branch_keywords(history) {
+            let score = prompt_keywords
+                .iter()
+                .filter(|keyword| keywords.contains(*keyword))
+                .count();
+            if score > best_score {
+                best_score = score;
+                best_branch = branch;
+            }
+        }
+
+        if best_score >= 2 {
+            best_branch
+        } else {
+            topic_label_from_keywords(prompt, &prompt_keywords)
+        }
+    }
+
+    pub fn branch_message_counts(
+        &self,
+        history: &[ChatMessage],
+        fallback_branch: &str,
+    ) -> BTreeMap<String, usize> {
+        let fallback_branch = normalized_branch(fallback_branch);
+        let mut counts = BTreeMap::new();
+        for (index, message) in history.iter().enumerate() {
+            if message.role == Role::System {
+                continue;
+            }
+            let branch = self
+                .branch_assignments
+                .get(&index)
+                .map(|value| normalized_branch(value))
+                .unwrap_or_else(|| fallback_branch.clone());
+            *counts.entry(branch).or_insert(0) += 1;
+        }
+        counts
+    }
+
     pub fn update_facts_from_user_message(&mut self, message: &str) {
         for line in message.lines() {
             let line = line.trim();
@@ -358,6 +413,25 @@ impl AgentMemory {
             .map(|value| normalized_branch(value))
             .unwrap_or_else(|| normalized_branch(config.active_branch.as_str()))
     }
+
+    fn branch_keywords(&self, history: &[ChatMessage]) -> BTreeMap<String, Vec<String>> {
+        let mut keywords = BTreeMap::<String, Vec<String>>::new();
+        for (index, message) in history.iter().enumerate() {
+            if message.role == Role::System {
+                continue;
+            }
+            let Some(branch) = self.branch_assignments.get(&index) else {
+                continue;
+            };
+            let entry = keywords.entry(normalized_branch(branch)).or_default();
+            for keyword in topic_keywords(&message.content) {
+                if !entry.contains(&keyword) {
+                    entry.push(keyword);
+                }
+            }
+        }
+        keywords
+    }
 }
 
 pub fn format_messages_for_summary(messages: &[ChatMessage]) -> String {
@@ -468,6 +542,80 @@ fn normalized_branch(value: &str) -> String {
     } else {
         branch.to_string()
     }
+}
+
+fn topic_label_from_keywords(prompt: &str, keywords: &[String]) -> String {
+    let label = keywords
+        .iter()
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !label.is_empty() {
+        return label;
+    }
+    prompt
+        .split_whitespace()
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn topic_keywords(text: &str) -> Vec<String> {
+    let lower = text.to_lowercase();
+    let mut words = Vec::new();
+    let mut current = String::new();
+    for ch in lower.chars() {
+        if ch.is_alphanumeric() {
+            current.push(ch);
+        } else if !current.is_empty() {
+            push_topic_word(&mut words, &current);
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        push_topic_word(&mut words, &current);
+    }
+    words
+}
+
+fn push_topic_word(words: &mut Vec<String>, word: &str) {
+    if word.chars().count() < 3 || is_topic_stopword(word) {
+        return;
+    }
+    let word = word.to_string();
+    if !words.contains(&word) {
+        words.push(word);
+    }
+}
+
+fn is_topic_stopword(word: &str) -> bool {
+    matches!(
+        word,
+        "что"
+            | "как"
+            | "это"
+            | "для"
+            | "или"
+            | "еще"
+            | "ещё"
+            | "надо"
+            | "нужно"
+            | "можно"
+            | "тоже"
+            | "там"
+            | "тут"
+            | "the"
+            | "and"
+            | "for"
+            | "with"
+            | "that"
+            | "this"
+            | "you"
+            | "need"
+            | "should"
+            | "can"
+    )
 }
 
 #[cfg(test)]
@@ -815,6 +963,69 @@ mod tests {
                 .iter()
                 .all(|message| !message.content.contains("alpha"))
         );
+    }
+
+    #[test]
+    fn scoped_topic_router_returns_to_matching_existing_topic() {
+        let mut memory = AgentMemory::default();
+        let history = vec![
+            message(Role::User, "Rust async borrow checker problem"),
+            message(Role::Assistant, "Use ownership boundaries."),
+            message(Role::User, "Budget planning for vacation"),
+            message(Role::Assistant, "Track flights and hotels."),
+        ];
+        memory
+            .branch_assignments
+            .insert(0, "rust async".to_string());
+        memory
+            .branch_assignments
+            .insert(1, "rust async".to_string());
+        memory
+            .branch_assignments
+            .insert(2, "vacation budget".to_string());
+        memory
+            .branch_assignments
+            .insert(3, "vacation budget".to_string());
+
+        let selected = memory.select_scoped_topic(
+            "Back to Rust async ownership please",
+            &history,
+            "vacation budget",
+        );
+
+        assert_eq!(selected, "rust async");
+    }
+
+    #[test]
+    fn scoped_topic_router_creates_new_topic_for_unrelated_message() {
+        let mut memory = AgentMemory::default();
+        let history = vec![
+            message(Role::User, "Rust async borrow checker problem"),
+            message(Role::Assistant, "Use ownership boundaries."),
+        ];
+        memory
+            .branch_assignments
+            .insert(0, "rust async".to_string());
+        memory
+            .branch_assignments
+            .insert(1, "rust async".to_string());
+
+        let selected = memory.select_scoped_topic(
+            "Plan family vacation tickets and hotel budget",
+            &history,
+            "rust async",
+        );
+
+        assert_eq!(selected, "plan family vacation");
+    }
+
+    #[test]
+    fn scoped_topic_router_keeps_current_topic_for_short_followup() {
+        let memory = AgentMemory::default();
+
+        let selected = memory.select_scoped_topic("а дальше?", &[], "rust async");
+
+        assert_eq!(selected, "rust async");
     }
 
     #[test]

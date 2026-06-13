@@ -403,6 +403,45 @@
       background: var(--accent-dark);
       color: #fff;
     }
+    .topic-panel {
+      display: grid;
+      gap: 8px;
+      padding: 10px;
+      border: 1px solid #cfdfe2;
+      border-radius: 8px;
+      background: #f6fbf7;
+    }
+    .topic-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .topic-chip {
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+      padding: 5px 8px;
+      border: 1px solid #cfdfe2;
+      border-radius: 999px;
+      background: #fff;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .topic-chip.active {
+      border-color: var(--accent-dark);
+      color: var(--accent-dark);
+      font-weight: 700;
+    }
+    .topic-debug {
+      min-height: 48px;
+      padding: 9px 10px;
+      border: 1px solid #d4e2e4;
+      border-radius: 8px;
+      background: #fbfdfc;
+      color: #334155;
+      font-size: 12px;
+      line-height: 1.45;
+    }
     .facts-preview {
       min-height: 42px;
       max-height: 120px;
@@ -853,11 +892,16 @@
                   <span class="field-title">Facts</span>
                   <div id="factsPreview" class="facts-preview">Появятся после сообщений вида “цель: …”, “предпочтение: …” или явных ограничений.</div>
                 </div>
-                <label id="scopedBranchWrap" style="display:none">
-                  <span class="field-title">Active branch</span>
-                  <input id="memoryActiveBranch" spellcheck="false" value="default">
-                  <span class="field-help">Одна session, но context request получает только эту внутреннюю ветку.</span>
-                </label>
+                <div id="scopedBranchWrap" class="topic-panel" style="display:none">
+                  <span class="field-title">Auto topics в одном чате</span>
+                  <label class="inline"><input id="memoryScopedAutoRoute" type="checkbox" checked> агент сам выбирает тему для каждого сообщения</label>
+                  <label>
+                    <span class="field-title">Ручная тема, если auto выключен</span>
+                    <input id="memoryActiveBranch" spellcheck="false" value="default" placeholder="например: rust ui, финансы, поездка">
+                    <span class="field-help">Можно вручную закрепить ветку диалога, но по умолчанию user ничего не переключает.</span>
+                  </label>
+                  <div id="scopedTopicDebug" class="topic-debug">Темы появятся после первого ответа в стратегии Scoped Branches.</div>
+                </div>
                 <div id="branchToolbar" class="branch-toolbar" style="display:none">
                   <span class="field-title">Ветки диалога</span>
                   <div class="branch-buttons">
@@ -987,6 +1031,10 @@
                 <h3>Ответ провайдера (raw) <span id="serverRespStatus" class="debug-status"></span></h3>
                 <pre id="providerResponse">{}</pre>
               </div>
+            </div>
+            <div class="debug-item">
+              <h3>Context topics</h3>
+              <div id="contextDebugPanel" class="topic-debug">Выберите Scoped Branches, чтобы увидеть авто-разделение тем.</div>
             </div>
           </details>
         </div>
@@ -1332,7 +1380,8 @@
         summarize_at_context_percent: numberValue('memorySummarizeAtContextPercent'),
         summary_prompt: textValue('memorySummaryPrompt'),
         facts_prompt: textValue('memoryFactsPrompt'),
-        active_branch: textValue('memoryActiveBranch') || 'default'
+        active_branch: textValue('memoryActiveBranch') || 'default',
+        scoped_auto_route: $('memoryScopedAutoRoute').checked
       };
     }
 
@@ -1465,6 +1514,32 @@
         $('serverReqStatus').className = 'debug-status ok';
         $('serverRespStatus').textContent = statusCode;
         $('serverRespStatus').className = 'debug-status ok';
+      }
+    }
+
+    function setContextDebug(contextDebug) {
+      const panel = $('contextDebugPanel');
+      const scopedPanel = $('scopedTopicDebug');
+      if (!contextDebug) {
+        panel.textContent = 'Контекст еще не собран.';
+        scopedPanel.textContent = 'Темы появятся после первого ответа в стратегии Scoped Branches.';
+        return;
+      }
+      if (contextDebug.strategy !== 'scoped-branches') {
+        panel.textContent = `strategy: ${contextDebug.strategy}`;
+        scopedPanel.textContent = 'Auto topics активны только в стратегии Scoped Branches.';
+        return;
+      }
+      const topics = contextDebug.scoped_topics || [];
+      const mode = contextDebug.scoped_auto_route ? 'auto-route' : 'manual';
+      const chips = topics.length
+        ? `<div class="topic-list">${topics.map((topic) => `<span class="topic-chip ${topic.active ? 'active' : ''}">${escapeHtml(topic.name)} · ${topic.message_count}</span>`).join('')}</div>`
+        : '<span class="field-help">Пока нет размеченных сообщений.</span>';
+      const html = `<div><strong>Активная тема:</strong> ${escapeHtml(contextDebug.active_topic || 'default')} <span class="field-help">(${mode})</span></div>${chips}`;
+      panel.innerHTML = html;
+      scopedPanel.innerHTML = html;
+      if (contextDebug.active_topic && contextDebug.scoped_auto_route) {
+        $('memoryActiveBranch').value = contextDebug.active_topic;
       }
     }
 
@@ -1621,7 +1696,7 @@
         'sliding-window': 'Только последние N сообщений; старое отбрасывается.',
         'sticky-facts': 'Facts + последние N сообщений. Facts обновляются из явных целей, ограничений, предпочтений и решений.',
         'branching': 'Сделайте checkpoint, получите ветки A/B и продолжайте каждую независимо.',
-        'scoped-branches': 'Одна session и одно окно: provider видит только active branch.',
+        'scoped-branches': 'Один чат, много тем: агент сам выбирает тему или использует ручную, если auto выключен.',
       }[strategy] || '';
       const recentCopy = {
         'summary': {
@@ -1641,8 +1716,8 @@
           help: 'Каждая UI-ветка живет в своей session; N ограничивает окно выбранной ветки.',
         },
         'scoped-branches': {
-          title: 'Сообщения active branch',
-          help: 'Одна session хранит все ветки; provider получает только N сообщений active branch.',
+          title: 'Сообщения выбранной темы',
+          help: 'Одна session хранит все темы; provider получает только N сообщений темы текущего хода.',
         },
       }[strategy] || {};
       $('memoryStrategyHelp').textContent = help;
@@ -1736,7 +1811,7 @@
       if (strategy === 'sticky-facts') return 'facts обновлены локально';
       if (strategy === 'summary') return 'summary не запускался';
       if (strategy === 'branching') return currentBranch() ? `активна ${currentBranch().name}` : 'checkpoint не создан';
-      if (strategy === 'scoped-branches') return `branch: ${textValue('memoryActiveBranch') || 'default'}`;
+      if (strategy === 'scoped-branches') return $('memoryScopedAutoRoute').checked ? 'auto topics' : `manual topic: ${textValue('memoryActiveBranch') || 'default'}`;
       return `последние ${numberValue('memoryRecentMessages') ?? 0} сообщ.`;
     }
 
@@ -1972,6 +2047,7 @@
       $('stopBtn').style.display = '';
       setStatus('Жду ответ модели...', false, true);
       setDebug(null);
+      setContextDebug(null);
       setMetrics(null, null);
       const payload = chatPayload();
       setServerDebug(payload, null, null);
@@ -2057,6 +2133,7 @@
                 setMetrics(data.metrics, data.context_metrics);
                 setSessionMetrics(data.session_metrics);
                 setDebug(data.debug);
+                setContextDebug(data.context_debug);
                 setStatus('Готово');
               } else if (eventType === 'error') {
                 throw new Error(eventData);
@@ -2103,6 +2180,7 @@
       $('stopBtn').style.display = '';
       setStatus('Модель готовит полный ответ…', false, true);
       setDebug(null);
+      setContextDebug(null);
       setMetrics(null, null);
       const payload = chatPayload();
       setServerDebug(payload, null, null);
@@ -2151,6 +2229,7 @@
         setMetrics(data.metrics, data.context_metrics);
         setSessionMetrics(data.session_metrics);
         setDebug(data.debug);
+        setContextDebug(data.context_debug);
         setStatus('Готово');
         await refreshTokenStatus();
       } catch (error) {
@@ -2297,6 +2376,13 @@
       setMetrics(null, null);
     });
     $('memoryRecentMessages').addEventListener('input', () => setMetrics(null, null));
+    $('memoryScopedAutoRoute').addEventListener('change', () => {
+      renderBranchControls();
+      setMetrics(null, null);
+    });
+    $('memoryActiveBranch').addEventListener('input', () => {
+      if (!$('memoryScopedAutoRoute').checked) setMetrics(null, null);
+    });
     $('checkpointBranches').addEventListener('click', createBranchCheckpoint);
     $('resetBranches').addEventListener('click', resetBranches);
     $('branchA').addEventListener('click', () => switchBranch('branch-a'));

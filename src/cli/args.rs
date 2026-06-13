@@ -509,6 +509,12 @@ pub struct MemoryArgs {
         help = "Active internal branch for scoped-branches strategy"
     )]
     pub memory_active_branch: String,
+    #[arg(
+        long,
+        default_value_t = true,
+        help = "Let scoped-branches automatically route each user message to a topic"
+    )]
+    pub memory_scoped_auto_route: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
@@ -629,6 +635,7 @@ impl From<&MemoryArgs> for chat::MemoryConfig {
             summary_prompt: args.memory_summary_prompt.clone(),
             facts_prompt: args.memory_facts_prompt.clone(),
             active_branch: args.memory_active_branch.clone(),
+            scoped_auto_route: args.memory_scoped_auto_route,
         }
     }
 }
@@ -670,6 +677,7 @@ mod tests {
             memory_summary_prompt: "Custom summary prompt".to_string(),
             memory_facts_prompt: "Custom facts prompt".to_string(),
             memory_active_branch: "default".to_string(),
+            memory_scoped_auto_route: true,
         };
 
         let config = chat::MemoryConfig::from(&args);
@@ -690,6 +698,7 @@ mod tests {
             memory_summary_prompt: "Summarize only stable decisions.".to_string(),
             memory_facts_prompt: chat::memory::DEFAULT_FACTS_PROMPT.to_string(),
             memory_active_branch: "default".to_string(),
+            memory_scoped_auto_route: true,
         };
 
         let config = chat::MemoryConfig::from(&args);

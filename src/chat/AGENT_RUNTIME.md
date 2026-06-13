@@ -66,11 +66,11 @@ raw-history поведение.
 - `summarize_after_messages`, `summary_chunk_messages`, `summarize_at_context_percent` - пороги summary compaction;
 - `summary_prompt` - system prompt отдельного summary-запроса;
 - `facts_prompt` - system prompt, который вводит блок facts для provider request.
-- `active_branch` - имя внутренней branch для `scoped-branches`.
+- `active_branch` - id темы, которую агент выбрал для текущего хода в `scoped-branches`.
 
 UI должен показывать только релевантные настройки выбранной strategy. Summary
 controls видны только для `summary`, facts prompt - только для `sticky-facts`,
-active branch - только для `scoped-branches`.
+topic switcher/debug - только для `scoped-branches`.
 
 ### `LocalSessionStore`
 
@@ -145,9 +145,13 @@ system prompt
 + new user prompt
 ```
 
-Это optional strategy для одного агентского окна и одной local session. Runtime
-помечает сообщения активной branch label в `AgentMemory.branch_assignments`.
-Context builder отбрасывает сообщения других branch labels при сборке request.
+Это optional strategy для одного агентского окна и одной local session. Юзер
+ничего вручную не переключает: runtime перед provider request сам выбирает тему
+для нового user message по overlap ключевых слов с уже размеченными сообщениями
+или создает новую тему. Затем runtime помечает turn этой topic/branch label в
+`AgentMemory.branch_assignments`. Context builder отбрасывает сообщения других
+labels при сборке request. Debug view должен показывать выбранную тему и счетчик
+сообщений по темам, чтобы было видно, что context не смешивается.
 
 ## Что хранится локально
 
@@ -156,7 +160,7 @@ Context builder отбрасывает сообщения других branch la
 - история текущей session/branch;
 - summary текущей session/branch;
 - facts текущей session/branch;
-- internal branch labels для scoped branches;
+- internal topic/branch labels для scoped branches;
 - индекс последней сессии.
 
 Токены не пишутся в историю или memory-файлы.
@@ -216,7 +220,7 @@ runtime, а не routes провайдера. Провайдер вызывае�
 - Агент - наша локальная сущность.
 - Provider API не знает про `agent_id`.
 - Strategy всегда явная: summary, sliding window, sticky facts или branching.
-- Scoped branches не должны смешивать сообщения разных internal branch labels.
+- Scoped branches/topics не должны смешивать сообщения разных internal labels.
 - В provider API нельзя отправлять всю историю без выбранной strategy.
 - Facts не являются глобальной пользовательской памятью.
 - Branch histories не должны смешиваться.
