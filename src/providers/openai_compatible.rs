@@ -499,6 +499,7 @@ pub async fn stream_chat_completion_with_debug(
     let mut usage: Option<OpenAiUsage> = None;
     let mut buf = String::new();
     let mut stream_events = Vec::new();
+    let mut stream_done = false;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| map_network_error(spec, EndpointCategory::Chat, e))?;
         buf.push_str(&String::from_utf8_lossy(&chunk));
@@ -508,6 +509,7 @@ pub async fn stream_chat_completion_with_debug(
             buf = buf[pos + 1..].to_string();
             if let Some(data) = line.strip_prefix("data: ") {
                 if data == "[DONE]" {
+                    stream_done = true;
                     break;
                 }
                 if let Ok(event_json) = serde_json::from_str::<serde_json::Value>(data) {
@@ -528,6 +530,9 @@ pub async fn stream_chat_completion_with_debug(
                     }
                 }
             }
+        }
+        if stream_done {
+            break;
         }
     }
     let elapsed_ms = started.elapsed().as_millis();
@@ -1283,5 +1288,53 @@ mod tests {
 
         assert!(response.metrics.cost.is_none());
         assert!(response.metrics.usage.is_none());
+    }
+
+    /// Stream события должны парситься корректно
+    #[test]
+    fn stream_event_token_delta_extracts_content() {
+        let event = serde_json::from_str::<OpenAiStreamEvent>(
+            r#"{"choices": [{"delta": {"content": "hello"}}]}"#,
+        )
+        .expect("parse");
+
+        match event.choices.first() {
+            Some(choice) => {
+                assert_eq!(choice.delta.content.as_deref(), Some("hello"));
+            }
+            None => panic!("expected choice in stream event"),
+        }
+    }
+
+    /// Stream события без content должны игнорироваться
+    #[test]
+    fn stream_event_without_content_delta_is_ignored() {
+        let event = serde_json::from_str::<OpenAiStreamEvent>(
+            r#"{"choices": [{"delta": {"role": "assistant"}}]}"#,
+        )
+        .expect("parse");
+
+        match event.choices.first() {
+            Some(choice) => {
+                assert!(choice.delta.content.is_none(), "no content in delta");
+            }
+            None => panic!("expected choice"),
+        }
+    }
+
+    /// Stream finish_reason говорит когда ответ закончился
+    #[test]
+    fn stream_event_finish_reason_signals_end_of_response() {
+        let event = serde_json::from_str::<OpenAiStreamEvent>(
+            r#"{"choices": [{"delta": {}, "finish_reason": "stop"}]}"#,
+        )
+        .expect("parse");
+
+        match event.choices.first() {
+            Some(choice) => {
+                assert_eq!(choice.finish_reason.as_deref(), Some("stop"));
+            }
+            None => panic!("expected choice"),
+        }
     }
 }

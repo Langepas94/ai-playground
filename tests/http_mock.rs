@@ -12,6 +12,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
+use std::time::Instant;
 use wiremock::{
     Mock, MockServer, Request, ResponseTemplate,
     matchers::{bearer_token, body_string_contains, header, header_exists, method, path},
@@ -704,5 +705,231 @@ async fn rate_limit_maps_retry_after_from_provider() {
             );
         }
         other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+/// Business rule: stream MUST complete immediately after [DONE] signal.
+/// Provider keeps connection open after [DONE] (normal TCP behaviour with
+/// keep-alive or HTTP/2). Client must NOT wait for connection close —
+/// that caused indefinite hangs where history was never saved and subsequent
+/// responses erased prior messages.
+#[tokio::test]
+async fn stream_completes_immediately_after_done_without_waiting_for_connection_close() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    // Bind a raw TCP listener. We'll send the HTTP response manually:
+    // headers + SSE body with [DONE], then hold the connection open.
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+
+    tokio::spawn(async move {
+        if let Ok((mut stream, _)) = listener.accept().await {
+            // Drain the request headers
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+
+            let body = concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+                "data: [DONE]\n\n",
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{}\r\n",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+            // Deliberately keep connection open (no final 0-length chunk, no close).
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        }
+    });
+
+    let profile = ProfileConfig {
+        provider: ProviderKind::OpenAiCompatible,
+        model: "test-model".to_string(),
+        base_url: format!("http://{addr}"),
+        token_ref: String::new(),
+    };
+    let client = ReqwestProviderClient::new().expect("client");
+    let started = Instant::now();
+    let (response, _debug) = client
+        .stream_chat_completion_with_debug(
+            &profile,
+            "",
+            ChatRequest {
+                model: "test-model".to_string(),
+                messages: vec![ChatMessage {
+                    role: Role::User,
+                    content: "hi".to_string(),
+                }],
+                control: ResponseControl::uncontrolled(),
+                pricing: None,
+                billing: None,
+            },
+            |_| {},
+        )
+        .await
+        .expect("stream");
+
+    assert_eq!(response.text, "hello");
+    assert!(
+        started.elapsed().as_secs() < 5,
+        "stream hung waiting for connection close: {:?}",
+        started.elapsed()
+    );
+}
+
+/// A GigaChat token shaped like a JWT (>=2 dots) is treated as a ready access
+/// token, so `bearer_token` skips the OAuth exchange and the same mock works
+/// for every provider.
+fn test_token(provider: ProviderKind) -> &'static str {
+    match provider {
+        ProviderKind::GigaChat => "header.payload.signature",
+        _ => "secret",
+    }
+}
+
+fn test_pricing() -> ModelPricing {
+    ModelPricing {
+        currency: "USD".to_string(),
+        input_per_million: Some(3.0),
+        output_per_million: 6.0,
+        cache_hit_input_per_million: None,
+        cache_miss_input_per_million: None,
+    }
+}
+
+/// Business rule: EVERY provider must report token usage and cost on a
+/// streaming request, and expose the raw provider request/response for debug.
+#[tokio::test]
+async fn every_provider_reports_tokens_and_cost_on_stream() {
+    for &provider in ProviderKind::all() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],",
+                "\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":50,\"total_tokens\":150}}\n\n",
+                "data: [DONE]\n\n"
+            )))
+            .mount(&server)
+            .await;
+
+        let profile = ProfileConfig {
+            provider,
+            model: "test-model".to_string(),
+            base_url: server.uri(),
+            token_ref: String::new(),
+        };
+        let client = ReqwestProviderClient::new().expect("client");
+        let (response, debug) = client
+            .stream_chat_completion_with_debug(
+                &profile,
+                test_token(provider),
+                ChatRequest {
+                    model: "test-model".to_string(),
+                    messages: vec![ChatMessage {
+                        role: Role::User,
+                        content: "hello".to_string(),
+                    }],
+                    control: ResponseControl::uncontrolled(),
+                    pricing: Some(test_pricing()),
+                    billing: None,
+                },
+                |_| {},
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{provider} stream failed: {error:?}"));
+
+        let usage = response
+            .metrics
+            .usage
+            .unwrap_or_else(|| panic!("{provider} must report usage"));
+        assert_eq!(usage.input_tokens, 100, "{provider} input tokens");
+        assert_eq!(usage.output_tokens, 50, "{provider} output tokens");
+        assert_eq!(usage.total_tokens, 150, "{provider} total tokens");
+
+        let cost = response
+            .metrics
+            .cost
+            .unwrap_or_else(|| panic!("{provider} must report cost"));
+        // 100/1e6*3 + 50/1e6*6 = 0.0006
+        assert!(cost.amount > 0.0, "{provider} cost must be positive");
+        assert_eq!(cost.currency, "USD", "{provider} currency");
+
+        assert_eq!(
+            debug.request.body["stream"], true,
+            "{provider} debug request"
+        );
+        let body = debug
+            .response
+            .body
+            .as_array()
+            .unwrap_or_else(|| panic!("{provider} debug response must be SSE array"));
+        assert!(!body.is_empty(), "{provider} debug response not empty");
+    }
+}
+
+/// Same guarantee for the non-streaming (single response) path.
+#[tokio::test]
+async fn every_provider_reports_tokens_and_cost_on_full_response() {
+    for &provider in ProviderKind::all() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{ "message": { "content": "hello back" }, "finish_reason": "stop" }],
+                "usage": { "prompt_tokens": 200, "completion_tokens": 80, "total_tokens": 280 }
+            })))
+            .mount(&server)
+            .await;
+
+        let profile = ProfileConfig {
+            provider,
+            model: "test-model".to_string(),
+            base_url: server.uri(),
+            token_ref: String::new(),
+        };
+        let client = ReqwestProviderClient::new().expect("client");
+        let (response, debug) = client
+            .chat_completion_with_debug(
+                &profile,
+                test_token(provider),
+                ChatRequest {
+                    model: "test-model".to_string(),
+                    messages: vec![ChatMessage {
+                        role: Role::User,
+                        content: "hello".to_string(),
+                    }],
+                    control: ResponseControl::uncontrolled(),
+                    pricing: Some(test_pricing()),
+                    billing: None,
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{provider} full request failed: {error:?}"));
+
+        assert_eq!(response.text, "hello back", "{provider} text");
+        let usage = response
+            .metrics
+            .usage
+            .unwrap_or_else(|| panic!("{provider} must report usage"));
+        assert_eq!(usage.input_tokens, 200, "{provider} input tokens");
+        assert_eq!(usage.output_tokens, 80, "{provider} output tokens");
+
+        let cost = response
+            .metrics
+            .cost
+            .unwrap_or_else(|| panic!("{provider} must report cost"));
+        assert!(cost.amount > 0.0, "{provider} cost must be positive");
+
+        assert!(
+            debug.request.body["model"] == "test-model",
+            "{provider} debug request carries model"
+        );
+        assert!(
+            debug.response.body["usage"]["total_tokens"] == 280,
+            "{provider} debug response carries raw usage"
+        );
     }
 }
