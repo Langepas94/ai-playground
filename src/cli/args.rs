@@ -463,7 +463,7 @@ pub struct MemoryArgs {
     #[arg(
         long,
         value_enum,
-        default_value_t = CliMemoryStrategy::SlidingWindow,
+        default_value_t = CliMemoryStrategy::Summary,
         help = "How the local agent sends chat history to the provider"
     )]
     pub memory_strategy: CliMemoryStrategy,
@@ -473,6 +473,30 @@ pub struct MemoryArgs {
         help = "How many latest non-system messages are kept in the context window"
     )]
     pub memory_recent_messages: usize,
+    #[arg(
+        long,
+        default_value_t = chat::memory::DEFAULT_SUMMARIZE_AFTER_MESSAGES,
+        help = "Summary strategy starts compacting after this many stored messages"
+    )]
+    pub memory_summarize_after_messages: usize,
+    #[arg(
+        long,
+        default_value_t = chat::memory::DEFAULT_SUMMARY_CHUNK_MESSAGES,
+        help = "Minimum unsummarized message chunk size before summary compaction runs"
+    )]
+    pub memory_summary_chunk_messages: usize,
+    #[arg(
+        long,
+        default_value_t = chat::memory::DEFAULT_SUMMARIZE_AT_CONTEXT_PERCENT,
+        help = "Summary strategy precompacts when estimated input reaches this context percent"
+    )]
+    pub memory_summarize_at_context_percent: u8,
+    #[arg(
+        long,
+        default_value = chat::memory::DEFAULT_SUMMARY_PROMPT,
+        help = "System prompt used for Summary strategy compaction requests"
+    )]
+    pub memory_summary_prompt: String,
     #[arg(
         long,
         default_value = chat::memory::DEFAULT_FACTS_PROMPT,
@@ -518,6 +542,7 @@ pub enum CliConversationStopMode {
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
 pub enum CliMemoryStrategy {
     #[default]
+    Summary,
     SlidingWindow,
     StickyFacts,
     Branching,
@@ -591,12 +616,17 @@ impl From<&MemoryArgs> for chat::MemoryConfig {
     fn from(args: &MemoryArgs) -> Self {
         Self {
             strategy: match args.memory_strategy {
+                CliMemoryStrategy::Summary => chat::memory::MemoryStrategy::Summary,
                 CliMemoryStrategy::SlidingWindow => chat::memory::MemoryStrategy::SlidingWindow,
                 CliMemoryStrategy::StickyFacts => chat::memory::MemoryStrategy::StickyFacts,
                 CliMemoryStrategy::Branching => chat::memory::MemoryStrategy::Branching,
                 CliMemoryStrategy::ScopedBranches => chat::memory::MemoryStrategy::ScopedBranches,
             },
             recent_messages: args.memory_recent_messages,
+            summarize_after_messages: args.memory_summarize_after_messages,
+            summary_chunk_messages: args.memory_summary_chunk_messages,
+            summarize_at_context_percent: args.memory_summarize_at_context_percent,
+            summary_prompt: args.memory_summary_prompt.clone(),
             facts_prompt: args.memory_facts_prompt.clone(),
             active_branch: args.memory_active_branch.clone(),
         }
@@ -634,6 +664,10 @@ mod tests {
         let args = MemoryArgs {
             memory_strategy: CliMemoryStrategy::StickyFacts,
             memory_recent_messages: 5,
+            memory_summarize_after_messages: 18,
+            memory_summary_chunk_messages: 10,
+            memory_summarize_at_context_percent: 80,
+            memory_summary_prompt: "Custom summary prompt".to_string(),
             memory_facts_prompt: "Custom facts prompt".to_string(),
             memory_active_branch: "default".to_string(),
         };
@@ -643,5 +677,28 @@ mod tests {
         assert_eq!(config.strategy, chat::memory::MemoryStrategy::StickyFacts);
         assert_eq!(config.recent_messages, 5);
         assert_eq!(config.facts_prompt, "Custom facts prompt");
+    }
+
+    #[test]
+    fn memory_args_convert_custom_summary_prompt_and_thresholds() {
+        let args = MemoryArgs {
+            memory_strategy: CliMemoryStrategy::Summary,
+            memory_recent_messages: 7,
+            memory_summarize_after_messages: 9,
+            memory_summary_chunk_messages: 3,
+            memory_summarize_at_context_percent: 70,
+            memory_summary_prompt: "Summarize only stable decisions.".to_string(),
+            memory_facts_prompt: chat::memory::DEFAULT_FACTS_PROMPT.to_string(),
+            memory_active_branch: "default".to_string(),
+        };
+
+        let config = chat::MemoryConfig::from(&args);
+
+        assert_eq!(config.strategy, chat::memory::MemoryStrategy::Summary);
+        assert_eq!(config.recent_messages, 7);
+        assert_eq!(config.summarize_after_messages, 9);
+        assert_eq!(config.summary_chunk_messages, 3);
+        assert_eq!(config.summarize_at_context_percent, 70);
+        assert_eq!(config.summary_prompt, "Summarize only stable decisions.");
     }
 }
