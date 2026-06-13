@@ -463,34 +463,16 @@ pub struct MemoryArgs {
     #[arg(
         long,
         value_enum,
-        default_value_t = CliMemoryStrategy::Summary,
+        default_value_t = CliMemoryStrategy::SlidingWindow,
         help = "How the local agent sends chat history to the provider"
     )]
     pub memory_strategy: CliMemoryStrategy,
     #[arg(
         long,
         default_value_t = chat::memory::DEFAULT_RECENT_MESSAGES,
-        help = "How many latest messages are sent as-is in summary strategy"
+        help = "How many latest non-system messages are kept in the context window"
     )]
     pub memory_recent_messages: usize,
-    #[arg(
-        long,
-        default_value_t = chat::memory::DEFAULT_SUMMARIZE_AFTER_MESSAGES,
-        help = "History length in messages before old context can be summarized"
-    )]
-    pub memory_summarize_after_messages: usize,
-    #[arg(
-        long,
-        default_value_t = chat::memory::DEFAULT_SUMMARY_CHUNK_MESSAGES,
-        help = "Minimum new old messages to merge into summary at once"
-    )]
-    pub memory_summary_chunk_messages: usize,
-    #[arg(
-        long,
-        default_value_t = chat::memory::DEFAULT_SUMMARIZE_AT_CONTEXT_PERCENT,
-        help = "Preflight summary threshold as percent of the available context window"
-    )]
-    pub memory_summarize_at_context_percent: u8,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
@@ -523,9 +505,10 @@ pub enum CliConversationStopMode {
 
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
 pub enum CliMemoryStrategy {
-    Full,
     #[default]
-    Summary,
+    SlidingWindow,
+    StickyFacts,
+    Branching,
 }
 
 impl From<&ResponseControlArgs> for ResponseControl {
@@ -595,13 +578,11 @@ impl From<&MemoryArgs> for chat::MemoryConfig {
     fn from(args: &MemoryArgs) -> Self {
         Self {
             strategy: match args.memory_strategy {
-                CliMemoryStrategy::Full => chat::memory::MemoryStrategy::Full,
-                CliMemoryStrategy::Summary => chat::memory::MemoryStrategy::Summary,
+                CliMemoryStrategy::SlidingWindow => chat::memory::MemoryStrategy::SlidingWindow,
+                CliMemoryStrategy::StickyFacts => chat::memory::MemoryStrategy::StickyFacts,
+                CliMemoryStrategy::Branching => chat::memory::MemoryStrategy::Branching,
             },
             recent_messages: args.memory_recent_messages,
-            summarize_after_messages: args.memory_summarize_after_messages,
-            summary_chunk_messages: args.memory_summary_chunk_messages,
-            summarize_at_context_percent: args.memory_summarize_at_context_percent.clamp(1, 100),
         }
     }
 }

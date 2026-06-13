@@ -1,24 +1,24 @@
-# Agent runtime and memory
+# Agent runtime and context
 
-Этот модуль реализует локальный runtime агента. Его нельзя называть provider API или
-бекендом поставщика: это наш слой, который живет внутри приложения, выбирает локального
-агента, управляет историей, собирает контекст и только после этого вызывает API
-оператора/провайдера.
+Этот модуль реализует локальный runtime агента. Его нельзя называть provider API
+или бекендом поставщика: это наш слой внутри приложения, который выбирает
+локального агента, управляет историей, собирает контекст и только после этого
+вызывает API оператора/провайдера.
 
 ## Что здесь реализовано
 
-В `src/chat` сейчас есть базовый локальный чат-агент с накоплением истории и слоистой
-памятью:
+В `src/chat` есть локальный чат-агент с накоплением истории и явными стратегиями
+контекста:
 
 1. Пользовательский интерфейс CLI или Web принимает сообщение.
 2. Локальный agent runtime выбирает агента по `agent_id`.
 3. Runtime загружает локальную сессию из `LocalSessionStore`.
-4. Runtime загружает локальную память сессии `AgentMemory`.
+4. Runtime загружает context state сессии `AgentMemory`.
 5. `ChatAgent` собирает управляемый контекст для provider API.
-6. Provider API получает не всю сырую историю, а слои контекста.
-7. После ответа `ChatAgent` сохраняет новый turn в полную локальную историю.
-8. Если история стала длинной, агент обновляет summary старой части диалога.
-9. Runtime сохраняет полную историю и memory sidecar локально.
+6. Provider API получает выбранное окно контекста, а не скрытую summary-подмену.
+7. После ответа `ChatAgent` сохраняет новый turn.
+8. Агент применяет выбранную strategy: sliding window, sticky facts или branching.
+9. Runtime сохраняет историю ветки и context sidecar локально.
 
 ## Основные сущности
 
@@ -30,17 +30,17 @@
 
 - профиль провайдера и модель;
 - токен для вызова API;
-- полную локальную историю сессии;
+- локальную историю текущей сессии или ветки;
 - `AgentMemory`;
 - настройки ответа `ResponseControl`;
 - pricing/billing context;
 - сборку `ChatRequest`;
 - commit ответа в историю;
-- best-effort обновление memory summary.
+- применение context strategy.
 
 Новый чатовый код должен идти через `ChatAgent`, а не собирать `ChatRequest`
-напрямую. Иначе легко обойти memory layer и снова получить one-shot или raw-history
-поведение.
+напрямую. Иначе легко обойти context layer и снова получить one-shot или
+raw-history поведение.
 
 ### `AgentMemory`
 
@@ -48,80 +48,79 @@
 
 `AgentMemory` хранит:
 
-- `session_summary` - summary старой части текущей локальной сессии;
-- `summarized_message_count` - сколько сообщений уже вошло в summary.
+- `facts` - key-value факты текущей сессии;
+- legacy-поля для чтения старых sidecar-файлов.
 
-Это не vector memory и не долговременная память пользователя. Это первый слой
-сессионной memory compression.
+Это не vector memory и не долговременная память пользователя. Facts относятся к
+одной локальной сессии или ветке.
 
 ### `MemoryConfig`
 
 Файл: `memory.rs`.
 
-Текущие значения по умолчанию:
+Основные параметры:
 
-- `recent_messages = 12`;
-- `summarize_after_messages = 18`.
+- `strategy` - `sliding-window`, `sticky-facts` или `branching`;
+- `recent_messages` - размер окна N для обычных сообщений.
 
-Это означает:
-
-- последние 12 сообщений остаются в живом окне;
-- когда история достигает 18 сообщений, более старая часть может быть сжата в summary.
+UI должен показывать минимум настроек: strategy и N. Summary controls для этой
+модели не нужны.
 
 ### `LocalSessionStore`
 
 Файл: `store.rs`.
 
-`LocalSessionStore` хранит локальную историю и память сессии:
+`LocalSessionStore` хранит локальную историю и context state:
 
-- полная история сообщений: `<session_id>.toon`;
-- memory sidecar: `<session_id>.memory.toon`;
+- история сообщений: `<session_id>.toon`;
+- context sidecar: `<session_id>.memory.toon`;
 - индекс последней сессии по ключу профиля/агента/модели.
 
-Полная история остается источником правды. Summary - это оптимизированный слой для
-сборки контекста, а не замена истории.
+Для branching каждая ветка использует отдельную local session. Checkpoint - это
+снимок сообщений, из которого UI создает две независимые ветки.
 
-## Как собирается контекст
+## Стратегии
 
-Перед вызовом provider API `ChatAgent` вызывает:
-
-```rust
-AgentMemory::build_context(history, memory_config)
-```
-
-Контекст собирается слоями:
+### Sliding Window
 
 ```text
 system prompt
-+ memory summary
-+ recent messages window
++ last N non-system messages
 + new user prompt
 ```
 
-Provider API не получает автоматически всю локальную историю. Он получает только
-управляемый контекст текущего запроса.
+После ответа агент сохраняет только system messages и последние N обычных
+сообщений. Старое отбрасывается намеренно.
 
-## Как обновляется summary
+### Sticky Facts
 
-После успешного ответа пользователя `ChatAgent`:
+```text
+system prompt
++ facts system block
++ last N non-system messages
++ new user prompt
+```
 
-1. Добавляет `user` и `assistant` сообщения в полную историю.
-2. Проверяет `AgentMemory::next_summary_range(...)`.
-3. Если есть старая часть истории за пределами recent window, отправляет отдельный
-   compacting-запрос в provider API.
-4. Полученный текст сохраняет в `AgentMemory.session_summary`.
-5. Обновляет `summarized_message_count`.
+Facts обновляются после каждого user message. Хранятся устойчивые данные:
 
-Обновление summary сделано best-effort. Если compacting-запрос упал, основной ответ
-пользователя не ломается, а память остается прежней.
+- цель;
+- ограничения;
+- предпочтения;
+- решения;
+- договоренности.
+
+### Branching
+
+UI сохраняет checkpoint текущей истории, создает две ветки от одного места и
+дальше отправляет каждую ветку как отдельную local session. Runtime получает уже
+выбранную ветку как обычную историю, поэтому сообщения веток не смешиваются.
 
 ## Что хранится локально
 
 Локально сохраняется:
 
-- полная история `ChatMessage`;
-- summary текущей сессии;
-- счетчик уже сжатых сообщений;
+- история текущей session/branch;
+- facts текущей session/branch;
 - индекс последней сессии.
 
 Токены не пишутся в историю или memory-файлы.
@@ -131,38 +130,34 @@ Provider API не получает автоматически всю локал�
 Для обычного ответа провайдер получает:
 
 - system prompt, если он есть;
-- memory summary как system message, если она уже создана;
-- последние сообщения из recent window;
+- facts как system message, если выбрана sticky facts и facts не пустые;
+- выбранное окно raw messages;
 - текущий user prompt;
 - control/pricing/billing параметры.
 
-Для memory compression провайдер получает отдельный запрос:
-
-- инструкцию compacting module;
-- предыдущее summary;
-- новый фрагмент старой истории;
-- просьбу вернуть обновленное summary.
+Для новых context strategies нет отдельного summary-запроса.
 
 ## CLI и Web
 
-CLI и Web используют одну и ту же memory-логику.
+CLI и Web используют одну и ту же context-логику.
 
 CLI:
 
 - `session.rs` загружает `LocalSessionStore`;
 - загружает `AgentMemory`;
 - создает `ChatAgent`;
-- после ответа сохраняет history и memory.
+- после ответа сохраняет history и context state.
 
 Web:
 
 - `web/mod.rs` выбирает локального агента по `agent_id`;
-- загружает session и memory;
+- загружает session и context state;
 - создает `ChatAgent`;
-- после ответа сохраняет history и memory.
+- после ответа сохраняет history и context state.
 
-Web routes `/api/agent/chat` и `/api/agent/session` - это routes локального runtime,
-а не routes провайдера. Провайдер вызывается только внутри `ProviderClient`.
+Web routes `/api/agent/chat` и `/api/agent/session` - это routes локального
+runtime, а не routes провайдера. Провайдер вызывается только внутри
+`ProviderClient`.
 
 ## Что еще не реализовано
 
@@ -170,21 +165,19 @@ Web routes `/api/agent/chat` и `/api/agent/session` - это routes локал�
 
 - vector embeddings;
 - semantic retrieval;
-- topic branches;
 - долговременной памяти пользователя между разными сессиями;
-- rule-based memory;
-- self-reflective memory;
-- UI для просмотра/edit memory summary.
+- self-reflective memory.
 
-Текущая стратегия - слоистая сессионная память: full local history + compressed
-session summary + recent window.
+Текущая стратегия - явный request-time context builder:
+
+> branch/session history + local context sidecar + selected strategy.
 
 ## Инварианты
 
 - Агент - наша локальная сущность.
 - Provider API не знает про `agent_id`.
-- Полная история хранится локально и не должна теряться при compression.
-- В provider API нельзя отправлять всю историю без необходимости.
-- Summary не является источником правды.
-- Memory compression не должна ломать основной ответ пользователя.
+- Strategy всегда явная: sliding window, sticky facts или branching.
+- В provider API нельзя отправлять всю историю без выбранной strategy.
+- Facts не являются глобальной пользовательской памятью.
+- Branch histories не должны смешиваться.
 - CLI и Web должны использовать один и тот же `ChatAgent` и `LocalSessionStore`.

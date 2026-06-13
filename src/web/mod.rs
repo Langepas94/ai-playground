@@ -273,9 +273,7 @@ async fn chat(
     );
     agent.set_memory_config(memory_config);
     agent.set_context_limit(context_limit);
-    let (response, provider_debug, summary_metrics) = agent
-        .respond_with_debug_and_summary_metrics(&state.client, prompt)
-        .await?;
+    let (response, provider_debug) = agent.respond_with_debug(&state.client, prompt).await?;
     let session_metrics = add_request_metrics(&session.metrics, &response.metrics);
     state
         .sessions
@@ -288,7 +286,7 @@ async fn chat(
         text: response.text,
         finish_reason: response.finish_reason,
         metrics: response.metrics,
-        summary_metrics,
+        context_metrics: None,
         session_metrics,
         messages: agent.history().to_vec(),
         debug: ChatDebugView {
@@ -348,7 +346,7 @@ async fn chat_stream(
     );
     agent.set_memory_config(memory_config);
     agent.set_context_limit(context_limit);
-    let (chat_request, preflight_summary_metrics) =
+    let (chat_request, context_metrics) =
         agent.prepare_stream_request(&state.client, &prompt).await;
     let session_id = session.id.clone();
     let session_metrics_before = session.metrics.clone();
@@ -367,18 +365,11 @@ async fn chat_stream(
         match result {
             Ok((response, provider_debug)) => {
                 let assistant_text = response.text.clone();
-                let mut response_metrics = response.metrics.clone();
-                let summary_metrics = preflight_summary_metrics.clone();
-                if let Some(summary_metrics) = preflight_summary_metrics.clone() {
-                    response_metrics = add_request_metrics(&response_metrics, &summary_metrics);
-                }
+                let response_metrics = response.metrics.clone();
+                let context_metrics = context_metrics.clone();
                 let session_metrics =
                     add_request_metrics(&session_metrics_before, &response_metrics);
                 agent.record_stream_response(prompt, assistant_text);
-                // Persist + emit `done` BEFORE memory compaction. Compaction runs
-                // a separate LLM call that can take seconds; it must never block the
-                // user-facing `done` event (otherwise the stream appears to hang and
-                // the debug panel stays empty).
                 let _ = sessions.save_session(&session_key, &session_id, agent.history());
                 let _ = sessions.save_metrics(&session_id, &session_metrics);
                 let _ = sessions.save_memory(&session_id, agent.memory());
@@ -386,7 +377,7 @@ async fn chat_stream(
                     "done": true,
                     "session_id": session_id,
                     "metrics": response_metrics,
-                    "summary_metrics": summary_metrics,
+                    "context_metrics": context_metrics,
                     "session_metrics": session_metrics,
                     "messages": agent.history(),
                     "debug": ChatDebugView {
@@ -396,15 +387,6 @@ async fn chat_stream(
                 });
                 let _ = tx.send(format!("\x00DONE\x00{done_event}"));
                 drop(tx);
-
-                // Background compaction: update memory summary for the NEXT turn.
-                // Its cost folds into session metrics on the next request load.
-                if let Some(post_summary_metrics) = agent.compact_memory(&client).await {
-                    let compacted_session_metrics =
-                        add_request_metrics(&session_metrics, &post_summary_metrics);
-                    let _ = sessions.save_metrics(&session_id, &compacted_session_metrics);
-                    let _ = sessions.save_memory(&session_id, agent.memory());
-                }
             }
             Err(err) => {
                 let _ = tx.send(format!("\x00ERR\x00{err}"));
@@ -682,9 +664,6 @@ struct WebResponseControl {
 struct WebMemoryConfig {
     strategy: Option<String>,
     recent_messages: Option<usize>,
-    summarize_after_messages: Option<usize>,
-    summary_chunk_messages: Option<usize>,
-    summarize_at_context_percent: Option<u8>,
 }
 
 impl Default for WebMemoryConfig {
@@ -693,9 +672,6 @@ impl Default for WebMemoryConfig {
         Self {
             strategy: Some(defaults.strategy.to_string()),
             recent_messages: Some(defaults.recent_messages),
-            summarize_after_messages: Some(defaults.summarize_after_messages),
-            summary_chunk_messages: Some(defaults.summary_chunk_messages),
-            summarize_at_context_percent: Some(defaults.summarize_at_context_percent),
         }
     }
 }
@@ -705,21 +681,11 @@ impl WebMemoryConfig {
         let defaults = MemoryConfig::default();
         MemoryConfig {
             strategy: match self.strategy.as_deref() {
-                Some("full") => MemoryStrategy::Full,
-                _ => MemoryStrategy::Summary,
+                Some("sticky-facts") => MemoryStrategy::StickyFacts,
+                Some("branching") => MemoryStrategy::Branching,
+                _ => MemoryStrategy::SlidingWindow,
             },
             recent_messages: self.recent_messages.unwrap_or(defaults.recent_messages),
-            summarize_after_messages: self
-                .summarize_after_messages
-                .unwrap_or(defaults.summarize_after_messages),
-            summary_chunk_messages: self
-                .summary_chunk_messages
-                .unwrap_or(defaults.summary_chunk_messages)
-                .max(1),
-            summarize_at_context_percent: self
-                .summarize_at_context_percent
-                .unwrap_or(defaults.summarize_at_context_percent)
-                .clamp(1, 100),
         }
     }
 }
@@ -818,7 +784,7 @@ struct ChatWebResponse {
     text: String,
     finish_reason: Option<String>,
     metrics: crate::providers::RequestMetrics,
-    summary_metrics: Option<crate::providers::RequestMetrics>,
+    context_metrics: Option<crate::providers::RequestMetrics>,
     session_metrics: crate::providers::RequestMetrics,
     messages: Vec<ChatMessage>,
     debug: ChatDebugView,
@@ -1066,19 +1032,13 @@ mod tests {
     #[test]
     fn web_memory_config_maps_strategy_and_limits() {
         let config = WebMemoryConfig {
-            strategy: Some("full".to_string()),
+            strategy: Some("sticky-facts".to_string()),
             recent_messages: Some(4),
-            summarize_after_messages: Some(8),
-            summary_chunk_messages: Some(0),
-            summarize_at_context_percent: Some(95),
         }
         .into_memory_config();
 
-        assert_eq!(config.strategy, MemoryStrategy::Full);
+        assert_eq!(config.strategy, MemoryStrategy::StickyFacts);
         assert_eq!(config.recent_messages, 4);
-        assert_eq!(config.summarize_after_messages, 8);
-        assert_eq!(config.summary_chunk_messages, 1);
-        assert_eq!(config.summarize_at_context_percent, 95);
     }
 
     #[test]
@@ -1300,12 +1260,12 @@ mod tests {
     #[test]
     fn web_ui_stream_done_updates_request_metrics_and_debug() {
         assert!(
-            INDEX_HTML.contains("setMetrics(data.metrics, data.summary_metrics);"),
+            INDEX_HTML.contains("setMetrics(data.metrics, data.context_metrics);"),
             "streaming done handler must render per-request metrics so request cost is not blank"
         );
         assert!(
-            INDEX_HTML.contains("summary_metrics"),
-            "streaming done handler must receive separate summary metrics"
+            INDEX_HTML.contains("context_metrics"),
+            "streaming done handler must receive separate context metrics"
         );
         assert!(
             INDEX_HTML.contains("setDebug(data.debug);"),
@@ -1358,27 +1318,37 @@ mod tests {
     }
 
     #[test]
-    fn web_ui_displays_summary_metrics_separately() {
-        assert!(INDEX_HTML.contains("Сжатие истории"));
+    fn web_ui_displays_context_status_separately() {
+        assert!(INDEX_HTML.contains(">Контекст</span>"));
         assert!(INDEX_HTML.contains("id=\"metricSummary\""));
-        assert!(INDEX_HTML.contains("function summaryLines(metrics)"));
+        assert!(INDEX_HTML.contains("function contextLines(metrics)"));
         assert!(
-            INDEX_HTML.contains("не запускалось"),
-            "UI should explicitly say when no history summary request happened"
+            INDEX_HTML.contains("function strategyContextLabel()"),
+            "UI should describe selected context strategy when no extra context metrics exist"
         );
     }
 
     #[test]
     fn web_ui_context_settings_use_human_labels() {
-        assert!(INDEX_HTML.contains("Как хранить историю"));
-        assert!(INDEX_HTML.contains("Свежие сообщения без сжатия"));
-        assert!(INDEX_HTML.contains("Начинать сжатие после"));
-        assert!(INDEX_HTML.contains("Сжимать при заполнении контекста"));
-        assert!(INDEX_HTML.contains("Размер порции summary"));
+        assert!(INDEX_HTML.contains("Sliding Window"));
+        assert!(INDEX_HTML.contains("Sticky Facts"));
+        assert!(INDEX_HTML.contains("Branching"));
+        assert!(INDEX_HTML.contains("Окно сообщений N"));
+        assert!(!INDEX_HTML.contains("memorySummarizeAfterMessages"));
+        assert!(!INDEX_HTML.contains("memorySummaryChunkMessages"));
         assert!(
             !INDEX_HTML.contains(">memory_strategy<"),
             "context settings should not expose raw API field names as labels"
         );
+    }
+
+    #[test]
+    fn web_ui_branching_controls_are_visible_and_simple() {
+        assert!(INDEX_HTML.contains("id=\"checkpointBranches\""));
+        assert!(INDEX_HTML.contains("id=\"branchA\""));
+        assert!(INDEX_HTML.contains("id=\"branchB\""));
+        assert!(INDEX_HTML.contains("function createBranchCheckpoint()"));
+        assert!(INDEX_HTML.contains("function switchBranch(id)"));
     }
 
     #[test]
