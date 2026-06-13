@@ -273,7 +273,9 @@ async fn chat(
     );
     agent.set_memory_config(memory_config);
     agent.set_context_limit(context_limit);
-    let (response, provider_debug) = agent.respond_with_debug(&state.client, prompt).await?;
+    let (response, provider_debug, context_metrics) = agent
+        .respond_with_debug_and_context_metrics(&state.client, prompt)
+        .await?;
     let session_metrics = add_request_metrics(&session.metrics, &response.metrics);
     state
         .sessions
@@ -286,7 +288,7 @@ async fn chat(
         text: response.text,
         finish_reason: response.finish_reason,
         metrics: response.metrics,
-        context_metrics: None,
+        context_metrics,
         session_metrics,
         messages: agent.history().to_vec(),
         debug: ChatDebugView {
@@ -365,8 +367,11 @@ async fn chat_stream(
         match result {
             Ok((response, provider_debug)) => {
                 let assistant_text = response.text.clone();
-                let response_metrics = response.metrics.clone();
+                let mut response_metrics = response.metrics.clone();
                 let context_metrics = context_metrics.clone();
+                if let Some(context_metrics) = &context_metrics {
+                    response_metrics = add_request_metrics(&response_metrics, context_metrics);
+                }
                 let session_metrics =
                     add_request_metrics(&session_metrics_before, &response_metrics);
                 agent.record_stream_response(prompt, assistant_text);
@@ -664,6 +669,10 @@ struct WebResponseControl {
 struct WebMemoryConfig {
     strategy: Option<String>,
     recent_messages: Option<usize>,
+    summarize_after_messages: Option<usize>,
+    summary_chunk_messages: Option<usize>,
+    summarize_at_context_percent: Option<u8>,
+    summary_prompt: Option<String>,
     facts_prompt: Option<String>,
     active_branch: Option<String>,
 }
@@ -674,6 +683,10 @@ impl Default for WebMemoryConfig {
         Self {
             strategy: Some(defaults.strategy.to_string()),
             recent_messages: Some(defaults.recent_messages),
+            summarize_after_messages: Some(defaults.summarize_after_messages),
+            summary_chunk_messages: Some(defaults.summary_chunk_messages),
+            summarize_at_context_percent: Some(defaults.summarize_at_context_percent),
+            summary_prompt: Some(defaults.summary_prompt),
             facts_prompt: Some(defaults.facts_prompt),
             active_branch: Some(defaults.active_branch),
         }
@@ -685,12 +698,23 @@ impl WebMemoryConfig {
         let defaults = MemoryConfig::default();
         MemoryConfig {
             strategy: match self.strategy.as_deref() {
+                Some("summary") => MemoryStrategy::Summary,
                 Some("sticky-facts") => MemoryStrategy::StickyFacts,
                 Some("branching") => MemoryStrategy::Branching,
                 Some("scoped-branches") => MemoryStrategy::ScopedBranches,
                 _ => MemoryStrategy::SlidingWindow,
             },
             recent_messages: self.recent_messages.unwrap_or(defaults.recent_messages),
+            summarize_after_messages: self
+                .summarize_after_messages
+                .unwrap_or(defaults.summarize_after_messages),
+            summary_chunk_messages: self
+                .summary_chunk_messages
+                .unwrap_or(defaults.summary_chunk_messages),
+            summarize_at_context_percent: self
+                .summarize_at_context_percent
+                .unwrap_or(defaults.summarize_at_context_percent),
+            summary_prompt: blank_to_none(self.summary_prompt).unwrap_or(defaults.summary_prompt),
             facts_prompt: blank_to_none(self.facts_prompt).unwrap_or(defaults.facts_prompt),
             active_branch: blank_to_none(self.active_branch).unwrap_or(defaults.active_branch),
         }
@@ -1041,6 +1065,10 @@ mod tests {
         let config = WebMemoryConfig {
             strategy: Some("sticky-facts".to_string()),
             recent_messages: Some(4),
+            summarize_after_messages: None,
+            summary_chunk_messages: None,
+            summarize_at_context_percent: None,
+            summary_prompt: None,
             facts_prompt: Some("Custom provider facts prompt".to_string()),
             active_branch: Some("alpha".to_string()),
         }
@@ -1055,6 +1083,7 @@ mod tests {
     #[test]
     fn web_memory_config_supports_all_context_strategies() {
         let cases = [
+            ("summary", MemoryStrategy::Summary),
             ("sliding-window", MemoryStrategy::SlidingWindow),
             ("sticky-facts", MemoryStrategy::StickyFacts),
             ("branching", MemoryStrategy::Branching),
@@ -1066,6 +1095,10 @@ mod tests {
             let config = WebMemoryConfig {
                 strategy: Some(strategy.to_string()),
                 recent_messages: Some(7),
+                summarize_after_messages: None,
+                summary_chunk_messages: None,
+                summarize_at_context_percent: None,
+                summary_prompt: None,
                 facts_prompt: None,
                 active_branch: None,
             }
@@ -1081,16 +1114,46 @@ mod tests {
         let config = WebMemoryConfig {
             strategy: Some("sticky-facts".to_string()),
             recent_messages: Some(4),
+            summarize_after_messages: None,
+            summary_chunk_messages: None,
+            summarize_at_context_percent: None,
+            summary_prompt: Some("   ".to_string()),
             facts_prompt: Some("   ".to_string()),
             active_branch: Some("   ".to_string()),
         }
         .into_memory_config();
 
         assert_eq!(
+            config.summary_prompt,
+            crate::chat::memory::DEFAULT_SUMMARY_PROMPT
+        );
+        assert_eq!(
             config.facts_prompt,
             crate::chat::memory::DEFAULT_FACTS_PROMPT
         );
         assert_eq!(config.active_branch, "default");
+    }
+
+    #[test]
+    fn web_memory_config_maps_summary_settings_and_prompt() {
+        let config = WebMemoryConfig {
+            strategy: Some("summary".to_string()),
+            recent_messages: Some(6),
+            summarize_after_messages: Some(11),
+            summary_chunk_messages: Some(5),
+            summarize_at_context_percent: Some(72),
+            summary_prompt: Some("Keep only durable project memory.".to_string()),
+            facts_prompt: None,
+            active_branch: None,
+        }
+        .into_memory_config();
+
+        assert_eq!(config.strategy, MemoryStrategy::Summary);
+        assert_eq!(config.recent_messages, 6);
+        assert_eq!(config.summarize_after_messages, 11);
+        assert_eq!(config.summary_chunk_messages, 5);
+        assert_eq!(config.summarize_at_context_percent, 72);
+        assert_eq!(config.summary_prompt, "Keep only durable project memory.");
     }
 
     #[test]
@@ -1382,21 +1445,26 @@ mod tests {
 
     #[test]
     fn web_ui_context_settings_use_human_labels() {
+        assert!(INDEX_HTML.contains(">Summary</option>"));
         assert!(INDEX_HTML.contains("Sliding Window"));
         assert!(INDEX_HTML.contains("Sticky Facts"));
         assert!(INDEX_HTML.contains("Branching"));
         assert!(INDEX_HTML.contains("Scoped Branches"));
         assert!(INDEX_HTML.contains("id=\"memoryRecentTitle\""));
         assert!(INDEX_HTML.contains("id=\"memoryRecentHelp\""));
+        assert!(INDEX_HTML.contains("Raw сообщений рядом с summary"));
         assert!(INDEX_HTML.contains("Хранить последние N сообщений"));
         assert!(INDEX_HTML.contains("Свежие сообщения вместе с facts"));
         assert!(INDEX_HTML.contains("Сообщения текущей ветки"));
         assert!(INDEX_HTML.contains("Сообщения active branch"));
+        assert!(INDEX_HTML.contains("Summary prompt"));
+        assert!(INDEX_HTML.contains("id=\"memorySummaryPrompt\""));
+        assert!(INDEX_HTML.contains("id=\"memorySummarizeAfterMessages\""));
+        assert!(INDEX_HTML.contains("id=\"memorySummaryChunkMessages\""));
+        assert!(INDEX_HTML.contains("id=\"memorySummarizeAtContextPercent\""));
         assert!(INDEX_HTML.contains("Facts prompt"));
         assert!(INDEX_HTML.contains("id=\"memoryFactsPrompt\""));
         assert!(INDEX_HTML.contains("id=\"memoryActiveBranch\""));
-        assert!(!INDEX_HTML.contains("memorySummarizeAfterMessages"));
-        assert!(!INDEX_HTML.contains("memorySummaryChunkMessages"));
         assert!(
             !INDEX_HTML.contains(">memory_strategy<"),
             "context settings should not expose raw API field names as labels"
@@ -1438,8 +1506,26 @@ mod tests {
     fn web_ui_memory_payload_includes_custom_facts_prompt() {
         let marker = "function memoryPayload()";
         let start = INDEX_HTML.find(marker).expect("memoryPayload");
-        let body = &INDEX_HTML[start..INDEX_HTML.len().min(start + 400)];
+        let body = &INDEX_HTML[start..INDEX_HTML.len().min(start + 900)];
 
+        assert!(
+            body.contains("summary_prompt: textValue('memorySummaryPrompt')"),
+            "custom summary prompt must be sent to the web API"
+        );
+        assert!(
+            body.contains("summarize_after_messages: numberValue('memorySummarizeAfterMessages')"),
+            "summary after threshold must be sent to the web API"
+        );
+        assert!(
+            body.contains("summary_chunk_messages: numberValue('memorySummaryChunkMessages')"),
+            "summary chunk size must be sent to the web API"
+        );
+        assert!(
+            body.contains(
+                "summarize_at_context_percent: numberValue('memorySummarizeAtContextPercent')"
+            ),
+            "summary context-pressure percent must be sent to the web API"
+        );
         assert!(
             body.contains("facts_prompt: textValue('memoryFactsPrompt')"),
             "custom facts prompt must be sent to the web API"

@@ -15,9 +15,9 @@
 3. Runtime загружает локальную сессию из `LocalSessionStore`.
 4. Runtime загружает context state сессии `AgentMemory`.
 5. `ChatAgent` собирает управляемый контекст для provider API.
-6. Provider API получает выбранное окно контекста, а не скрытую summary-подмену.
+6. Provider API получает выбранный context: summary+окно, sliding window, facts+окно или branch window.
 7. После ответа `ChatAgent` сохраняет новый turn.
-8. Агент применяет выбранную strategy: sliding window, sticky facts или branching.
+8. Агент применяет выбранную strategy: summary, sliding window, sticky facts или branching.
 9. Runtime сохраняет историю ветки и context sidecar локально.
 
 ## Основные сущности
@@ -49,7 +49,8 @@ raw-history поведение.
 `AgentMemory` хранит:
 
 - `facts` - key-value факты текущей сессии;
-- legacy-поля для чтения старых sidecar-файлов.
+- `session_summary` и `summarized_message_count` для summary strategy;
+- branch labels для scoped branches.
 
 Это не vector memory и не долговременная память пользователя. Facts относятся к
 одной локальной сессии или ветке.
@@ -60,13 +61,16 @@ raw-history поведение.
 
 Основные параметры:
 
-- `strategy` - `sliding-window`, `sticky-facts`, `branching` или `scoped-branches`;
+- `strategy` - `summary`, `sliding-window`, `sticky-facts`, `branching` или `scoped-branches`;
 - `recent_messages` - размер окна N для обычных сообщений;
+- `summarize_after_messages`, `summary_chunk_messages`, `summarize_at_context_percent` - пороги summary compaction;
+- `summary_prompt` - system prompt отдельного summary-запроса;
 - `facts_prompt` - system prompt, который вводит блок facts для provider request.
 - `active_branch` - имя внутренней branch для `scoped-branches`.
 
-UI должен показывать минимум настроек: strategy и N. Summary controls для этой
-модели не нужны.
+UI должен показывать только релевантные настройки выбранной strategy. Summary
+controls видны только для `summary`, facts prompt - только для `sticky-facts`,
+active branch - только для `scoped-branches`.
 
 ### `LocalSessionStore`
 
@@ -82,6 +86,21 @@ UI должен показывать минимум настроек: strategy �
 снимок сообщений, из которого UI создает две независимые ветки.
 
 ## Стратегии
+
+### Summary
+
+```text
+system prompt
++ memory summary system message
++ last N raw non-system messages
++ new user prompt
+```
+
+Перед обычным ответом агент может сделать отдельный summary-запрос к тому же
+provider client. Запрос использует `summary_prompt` как system prompt и получает
+предыдущий summary плюс очередной фрагмент старой истории. Raw history не
+обрезается этой strategy: summary - это компактный context layer, а не потеря
+локального source of truth.
 
 ### Sliding Window
 
@@ -135,6 +154,7 @@ Context builder отбрасывает сообщения других branch la
 Локально сохраняется:
 
 - история текущей session/branch;
+- summary текущей session/branch;
 - facts текущей session/branch;
 - internal branch labels для scoped branches;
 - индекс последней сессии.
@@ -146,13 +166,15 @@ Context builder отбрасывает сообщения других branch la
 Для обычного ответа провайдер получает:
 
 - system prompt, если он есть;
+- summary как system message, если выбрана `summary` и summary уже есть;
 - facts как system message, если выбрана sticky facts и facts не пустые;
 - выбранное окно raw messages или active internal branch window;
 - текущий user prompt;
 - control/pricing/billing параметры.
 
-Для новых context strategies нет отдельного summary-запроса. Настраиваемый
-`facts_prompt` влияет только на system block перед facts в основном запросе.
+Отдельный summary-запрос выполняется только для strategy `summary`. Настраиваемый
+`facts_prompt` влияет только на system block перед facts в основном запросе, а
+`summary_prompt` влияет только на compaction-запрос.
 
 ## CLI и Web
 
@@ -193,7 +215,7 @@ runtime, а не routes провайдера. Провайдер вызывае�
 
 - Агент - наша локальная сущность.
 - Provider API не знает про `agent_id`.
-- Strategy всегда явная: sliding window, sticky facts или branching.
+- Strategy всегда явная: summary, sliding window, sticky facts или branching.
 - Scoped branches не должны смешивать сообщения разных internal branch labels.
 - В provider API нельзя отправлять всю историю без выбранной strategy.
 - Facts не являются глобальной пользовательской памятью.

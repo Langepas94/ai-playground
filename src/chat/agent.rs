@@ -7,10 +7,14 @@ use crate::{
     },
 };
 
-use super::memory::{AgentMemory, MemoryConfig, MemoryStrategy};
-use super::token_accounting::{TokenEstimate, estimate_exchange};
+use super::memory::{AgentMemory, MemoryConfig, MemoryStrategy, format_messages_for_summary};
+use super::token_accounting::{TokenEstimate, estimate_exchange, estimate_messages_tokens};
+use tokio::time::{Duration, timeout};
 
 pub const LOCAL_SESSION_AGENT_ID: &str = "local-session-agent";
+const MEMORY_COMPACT_TIMEOUT: Duration = Duration::from_secs(30);
+const PREFLIGHT_COMPACT_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_PREFLIGHT_SUMMARY_PASSES: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgentDescriptor {
@@ -121,8 +125,7 @@ impl ChatAgent {
         &mut self,
         client: &dyn ProviderClient,
     ) -> Option<crate::providers::RequestMetrics> {
-        let _ = client;
-        None
+        self.refresh_memory_with_timeout(client).await
     }
 
     pub async fn respond(
@@ -131,6 +134,7 @@ impl ChatAgent {
         prompt: String,
     ) -> Result<ChatResponse, AppError> {
         self.ingest_user_prompt(&prompt);
+        let context_metrics = self.precompact_before_request(client, &prompt).await;
         let response = client
             .chat_completion(
                 &self.profile,
@@ -140,6 +144,13 @@ impl ChatAgent {
             .await?;
         self.commit_turn(prompt, response.text.clone());
         self.apply_context_storage_policy();
+        let mut response = response;
+        if let Some(metrics) = context_metrics {
+            response.metrics = crate::chat::add_request_metrics(&response.metrics, &metrics);
+        }
+        if let Some(metrics) = self.refresh_memory_with_timeout(client).await {
+            response.metrics = crate::chat::add_request_metrics(&response.metrics, &metrics);
+        }
         Ok(response)
     }
 
@@ -148,7 +159,26 @@ impl ChatAgent {
         client: &dyn ProviderClient,
         prompt: String,
     ) -> Result<(ChatResponse, ProviderExchangeDebug), AppError> {
+        let (response, debug, _) = self
+            .respond_with_debug_and_context_metrics(client, prompt)
+            .await?;
+        Ok((response, debug))
+    }
+
+    pub async fn respond_with_debug_and_context_metrics(
+        &mut self,
+        client: &dyn ProviderClient,
+        prompt: String,
+    ) -> Result<
+        (
+            ChatResponse,
+            ProviderExchangeDebug,
+            Option<crate::providers::RequestMetrics>,
+        ),
+        AppError,
+    > {
         self.ingest_user_prompt(&prompt);
+        let mut context_metrics = self.precompact_before_request(client, &prompt).await;
         let (response, debug) = client
             .chat_completion_with_debug(
                 &self.profile,
@@ -158,7 +188,18 @@ impl ChatAgent {
             .await?;
         self.commit_turn(prompt, response.text.clone());
         self.apply_context_storage_policy();
-        Ok((response, debug))
+        let mut response = response;
+        if let Some(metrics) = &context_metrics {
+            response.metrics = crate::chat::add_request_metrics(&response.metrics, metrics);
+        }
+        if let Some(metrics) = self.refresh_memory_with_timeout(client).await {
+            context_metrics = Some(match context_metrics {
+                Some(current) => crate::chat::add_request_metrics(&current, &metrics),
+                None => metrics.clone(),
+            });
+            response.metrics = crate::chat::add_request_metrics(&response.metrics, &metrics);
+        }
+        Ok((response, debug, context_metrics))
     }
 
     pub async fn prepare_stream_request(
@@ -169,9 +210,12 @@ impl ChatAgent {
         crate::providers::ChatRequest,
         Option<crate::providers::RequestMetrics>,
     ) {
-        let _ = client;
         self.ingest_user_prompt(prompt);
-        (self.request_with_user_prompt(prompt.to_string()), None)
+        let context_metrics = self.precompact_before_request(client, prompt).await;
+        (
+            self.request_with_user_prompt(prompt.to_string()),
+            context_metrics,
+        )
     }
 
     pub fn control(&self) -> &ResponseControl {
@@ -236,6 +280,155 @@ impl ChatAgent {
         self.memory
             .apply_scoped_branch_storage_policy(&mut self.history, &self.memory_config);
     }
+
+    async fn refresh_memory_with_timeout(
+        &mut self,
+        client: &dyn ProviderClient,
+    ) -> Option<crate::providers::RequestMetrics> {
+        timeout(MEMORY_COMPACT_TIMEOUT, self.refresh_memory(client))
+            .await
+            .ok()
+            .flatten()
+    }
+
+    async fn refresh_memory(
+        &mut self,
+        client: &dyn ProviderClient,
+    ) -> Option<crate::providers::RequestMetrics> {
+        let range = self
+            .memory
+            .next_summary_range(&self.history, &self.memory_config)?;
+        self.compact_history_range(client, range).await
+    }
+
+    async fn precompact_before_request(
+        &mut self,
+        client: &dyn ProviderClient,
+        prompt: &str,
+    ) -> Option<crate::providers::RequestMetrics> {
+        if self.memory_config.strategy != MemoryStrategy::Summary {
+            return None;
+        }
+        timeout(
+            PREFLIGHT_COMPACT_TIMEOUT,
+            self.precompact_for_context_pressure(client, prompt),
+        )
+        .await
+        .ok()
+        .flatten()
+    }
+
+    async fn precompact_for_context_pressure(
+        &mut self,
+        client: &dyn ProviderClient,
+        prompt: &str,
+    ) -> Option<crate::providers::RequestMetrics> {
+        let threshold = self.preflight_summary_threshold()?;
+        let mut accumulated = None;
+        let mut previous_tokens = None;
+
+        for _ in 0..MAX_PREFLIGHT_SUMMARY_PASSES {
+            let request = self.request_with_user_prompt(prompt.to_string());
+            let request_tokens = estimate_messages_tokens(&request.messages);
+            if request_tokens < threshold {
+                break;
+            }
+            if previous_tokens.is_some_and(|tokens| request_tokens >= tokens) {
+                break;
+            }
+            let range = self.memory.next_summary_range_for_pressure(
+                &self.history,
+                &self.memory_config,
+                self.memory_config.recent_messages,
+            )?;
+            let metrics = self.compact_history_range(client, range).await?;
+            accumulated = Some(match accumulated {
+                Some(current) => crate::chat::add_request_metrics(&current, &metrics),
+                None => metrics,
+            });
+            previous_tokens = Some(request_tokens);
+        }
+
+        accumulated
+    }
+
+    fn preflight_summary_threshold(&self) -> Option<u32> {
+        let context_limit = self.context_limit?;
+        let reserved_output = self
+            .control
+            .max_completion_tokens
+            .or(self.control.max_tokens)
+            .unwrap_or(0);
+        let available_input = context_limit.saturating_sub(reserved_output);
+        if available_input == 0 {
+            return None;
+        }
+        Some(
+            available_input
+                .saturating_mul(u32::from(self.memory_config.summarize_at_context_percent))
+                / 100,
+        )
+    }
+
+    async fn compact_history_range(
+        &mut self,
+        client: &dyn ProviderClient,
+        range: std::ops::Range<usize>,
+    ) -> Option<crate::providers::RequestMetrics> {
+        let messages_to_summarize = format_messages_for_summary(&self.history[range.clone()]);
+        if messages_to_summarize.trim().is_empty() {
+            self.memory.summarized_message_count = range.end;
+            return None;
+        }
+        let previous_summary = self
+            .memory
+            .session_summary
+            .as_deref()
+            .unwrap_or("No previous summary.");
+        let summary_prompt = self.memory_config.summary_prompt.trim();
+        let summary_prompt = if summary_prompt.is_empty() {
+            super::memory::DEFAULT_SUMMARY_PROMPT
+        } else {
+            summary_prompt
+        };
+        let summary_request = ChatRequest {
+            model: self.profile.model.clone(),
+            messages: vec![
+                ChatMessage {
+                    role: Role::System,
+                    content: summary_prompt.to_string(),
+                },
+                ChatMessage {
+                    role: Role::User,
+                    content: format!(
+                        "Previous memory summary:\n{previous_summary}\n\nNew chat fragment to merge:\n{messages_to_summarize}\n\nReturn the updated memory summary."
+                    ),
+                },
+            ],
+            control: memory_summary_control(),
+            pricing: self.pricing.clone(),
+            billing: self.billing.clone(),
+        };
+        if let Ok(response) = client
+            .chat_completion(&self.profile, &self.token, summary_request)
+            .await
+        {
+            let summary = response.text.trim();
+            if !summary.is_empty() {
+                self.memory.session_summary = Some(summary.to_string());
+                self.memory.summarized_message_count = range.end;
+                return Some(response.metrics);
+            }
+        }
+        None
+    }
+}
+
+fn memory_summary_control() -> ResponseControl {
+    let mut control = ResponseControl::uncontrolled();
+    control.temperature = Some(0.2);
+    control.max_tokens = Some(700);
+    control
 }
 
 #[cfg(test)]
@@ -526,6 +719,117 @@ mod tests {
                 .content
                 .contains("goal: expose custom facts prompt")
         );
+    }
+
+    #[tokio::test]
+    async fn summary_strategy_compacts_old_history_after_response() {
+        let client = FakeClient {
+            replies: std::sync::Mutex::new(vec![
+                "summary of older turns".to_string(),
+                "fresh answer".to_string(),
+            ]),
+            metrics: std::sync::Mutex::new(Vec::new()),
+            seen_messages: std::sync::Mutex::new(Vec::new()),
+        };
+        let history = (0..20)
+            .map(|index| ChatMessage {
+                role: if index % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                content: format!("history {index}"),
+            })
+            .collect::<Vec<_>>();
+        let mut agent = ChatAgent::new(
+            test_profile(),
+            "secret".to_string(),
+            history,
+            AgentMemory::default(),
+            ResponseControl::uncontrolled(),
+            None,
+            None,
+        );
+        agent.set_memory_config(MemoryConfig {
+            strategy: MemoryStrategy::Summary,
+            recent_messages: 4,
+            summarize_after_messages: 18,
+            summary_chunk_messages: 4,
+            ..MemoryConfig::default()
+        });
+
+        agent
+            .respond(&client, "current question".to_string())
+            .await
+            .expect("response");
+
+        let seen = client.seen_messages.lock().expect("seen messages");
+        assert_eq!(seen.len(), 2);
+        assert_eq!(
+            seen[0].len(),
+            21,
+            "first request must not drop unsummarized history"
+        );
+        assert_eq!(seen[0][0].content, "history 0");
+        assert_eq!(seen[0][20].content, "current question");
+        assert_eq!(seen[1][0].role, Role::System);
+        assert!(seen[1][0].content.contains("memory compaction module"));
+        assert!(seen[1][1].content.contains("history 0"));
+        assert_eq!(
+            agent.memory().session_summary.as_deref(),
+            Some("summary of older turns")
+        );
+        assert_eq!(agent.history().len(), 22);
+    }
+
+    #[tokio::test]
+    async fn summary_strategy_sends_custom_summary_prompt_to_provider() {
+        let client = FakeClient {
+            replies: std::sync::Mutex::new(vec![
+                "custom summary".to_string(),
+                "fresh answer".to_string(),
+            ]),
+            metrics: std::sync::Mutex::new(Vec::new()),
+            seen_messages: std::sync::Mutex::new(Vec::new()),
+        };
+        let history = (0..8)
+            .map(|index| ChatMessage {
+                role: if index % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                content: format!("history {index}"),
+            })
+            .collect::<Vec<_>>();
+        let mut agent = ChatAgent::new(
+            test_profile(),
+            "secret".to_string(),
+            history,
+            AgentMemory::default(),
+            ResponseControl::uncontrolled(),
+            None,
+            None,
+        );
+        agent.set_memory_config(MemoryConfig {
+            strategy: MemoryStrategy::Summary,
+            recent_messages: 2,
+            summarize_after_messages: 4,
+            summary_chunk_messages: 2,
+            summary_prompt: "CUSTOM SUMMARY PROMPT".to_string(),
+            ..MemoryConfig::default()
+        });
+
+        agent
+            .respond(&client, "current question".to_string())
+            .await
+            .expect("response");
+
+        let seen = client.seen_messages.lock().expect("seen messages");
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[1][0].content, "CUSTOM SUMMARY PROMPT");
+        assert!(seen[1][1].content.contains("Previous memory summary"));
+        assert!(seen[1][1].content.contains("history 0"));
     }
 
     #[test]
