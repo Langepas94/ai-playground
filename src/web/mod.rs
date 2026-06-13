@@ -664,6 +664,7 @@ struct WebResponseControl {
 struct WebMemoryConfig {
     strategy: Option<String>,
     recent_messages: Option<usize>,
+    facts_prompt: Option<String>,
 }
 
 impl Default for WebMemoryConfig {
@@ -672,6 +673,7 @@ impl Default for WebMemoryConfig {
         Self {
             strategy: Some(defaults.strategy.to_string()),
             recent_messages: Some(defaults.recent_messages),
+            facts_prompt: Some(defaults.facts_prompt),
         }
     }
 }
@@ -686,6 +688,7 @@ impl WebMemoryConfig {
                 _ => MemoryStrategy::SlidingWindow,
             },
             recent_messages: self.recent_messages.unwrap_or(defaults.recent_messages),
+            facts_prompt: blank_to_none(self.facts_prompt).unwrap_or(defaults.facts_prompt),
         }
     }
 }
@@ -1034,11 +1037,13 @@ mod tests {
         let config = WebMemoryConfig {
             strategy: Some("sticky-facts".to_string()),
             recent_messages: Some(4),
+            facts_prompt: Some("Custom provider facts prompt".to_string()),
         }
         .into_memory_config();
 
         assert_eq!(config.strategy, MemoryStrategy::StickyFacts);
         assert_eq!(config.recent_messages, 4);
+        assert_eq!(config.facts_prompt, "Custom provider facts prompt");
     }
 
     #[test]
@@ -1054,12 +1059,28 @@ mod tests {
             let config = WebMemoryConfig {
                 strategy: Some(strategy.to_string()),
                 recent_messages: Some(7),
+                facts_prompt: None,
             }
             .into_memory_config();
 
             assert_eq!(config.strategy, expected, "strategy={strategy}");
             assert_eq!(config.recent_messages, 7);
         }
+    }
+
+    #[test]
+    fn web_memory_config_blank_facts_prompt_uses_default() {
+        let config = WebMemoryConfig {
+            strategy: Some("sticky-facts".to_string()),
+            recent_messages: Some(4),
+            facts_prompt: Some("   ".to_string()),
+        }
+        .into_memory_config();
+
+        assert_eq!(
+            config.facts_prompt,
+            crate::chat::memory::DEFAULT_FACTS_PROMPT
+        );
     }
 
     #[test]
@@ -1355,6 +1376,8 @@ mod tests {
         assert!(INDEX_HTML.contains("Sticky Facts"));
         assert!(INDEX_HTML.contains("Branching"));
         assert!(INDEX_HTML.contains("Окно сообщений N"));
+        assert!(INDEX_HTML.contains("Facts prompt"));
+        assert!(INDEX_HTML.contains("id=\"memoryFactsPrompt\""));
         assert!(!INDEX_HTML.contains("memorySummarizeAfterMessages"));
         assert!(!INDEX_HTML.contains("memorySummaryChunkMessages"));
         assert!(
@@ -1391,6 +1414,30 @@ mod tests {
         assert!(
             body.contains("messages: currentBranch()?.messages || chatHistory"),
             "branching requests must send active branch history, not global chat history"
+        );
+    }
+
+    #[test]
+    fn web_ui_memory_payload_includes_custom_facts_prompt() {
+        let marker = "function memoryPayload()";
+        let start = INDEX_HTML.find(marker).expect("memoryPayload");
+        let body = &INDEX_HTML[start..INDEX_HTML.len().min(start + 400)];
+
+        assert!(
+            body.contains("facts_prompt: textValue('memoryFactsPrompt')"),
+            "custom facts prompt must be sent to the web API"
+        );
+    }
+
+    #[test]
+    fn web_ui_facts_preview_detects_custom_prompt_facts_block() {
+        let marker = "function updateFactsPreview(debug)";
+        let start = INDEX_HTML.find(marker).expect("updateFactsPreview");
+        let body = &INDEX_HTML[start..INDEX_HTML.len().min(start + 700)];
+
+        assert!(
+            body.contains("/^- [^:\\n]+: /m.test"),
+            "facts preview should detect facts by key-value lines, not only by default prompt"
         );
     }
 

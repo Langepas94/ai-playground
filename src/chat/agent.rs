@@ -87,7 +87,7 @@ impl ChatAgent {
     }
 
     pub fn memory_config(&self) -> MemoryConfig {
-        self.memory_config
+        self.memory_config.clone()
     }
 
     pub fn set_memory_config(&mut self, memory_config: MemoryConfig) {
@@ -195,7 +195,9 @@ impl ChatAgent {
     }
 
     fn request_with_user_prompt(&self, prompt: String) -> ChatRequest {
-        let mut messages = self.memory.build_context(&self.history, self.memory_config);
+        let mut messages = self
+            .memory
+            .build_context(&self.history, &self.memory_config);
         messages.push(ChatMessage {
             role: Role::User,
             content: prompt,
@@ -228,7 +230,7 @@ impl ChatAgent {
 
     fn apply_context_storage_policy(&mut self) {
         self.memory
-            .apply_storage_policy(&mut self.history, self.memory_config);
+            .apply_storage_policy(&mut self.history, &self.memory_config);
     }
 }
 
@@ -348,6 +350,7 @@ mod tests {
         agent.set_memory_config(MemoryConfig {
             strategy: MemoryStrategy::SlidingWindow,
             recent_messages: 2,
+            ..MemoryConfig::default()
         });
 
         agent
@@ -388,6 +391,7 @@ mod tests {
         agent.set_memory_config(MemoryConfig {
             strategy: MemoryStrategy::StickyFacts,
             recent_messages: 4,
+            ..MemoryConfig::default()
         });
 
         agent
@@ -441,6 +445,7 @@ mod tests {
         agent.set_memory_config(MemoryConfig {
             strategy: MemoryStrategy::StickyFacts,
             recent_messages: 2,
+            ..MemoryConfig::default()
         });
 
         agent
@@ -475,6 +480,47 @@ mod tests {
             "goal: keep durable facts\napi key: sk-should-not-leak"
         );
         assert_eq!(agent.history()[1].content, "answer");
+    }
+
+    #[tokio::test]
+    async fn sticky_facts_sends_custom_facts_prompt_to_provider() {
+        let client = FakeClient {
+            replies: std::sync::Mutex::new(vec!["answer".to_string()]),
+            metrics: std::sync::Mutex::new(Vec::new()),
+            seen_messages: std::sync::Mutex::new(Vec::new()),
+        };
+        let mut agent = ChatAgent::new(
+            test_profile(),
+            "secret".to_string(),
+            Vec::new(),
+            AgentMemory::default(),
+            ResponseControl::uncontrolled(),
+            None,
+            None,
+        );
+        agent.set_memory_config(MemoryConfig {
+            strategy: MemoryStrategy::StickyFacts,
+            recent_messages: 2,
+            facts_prompt: "Use these project facts when answering.".to_string(),
+        });
+
+        agent
+            .respond(&client, "goal: expose custom facts prompt".to_string())
+            .await
+            .expect("response");
+
+        let seen = client.seen_messages.lock().expect("seen messages");
+        assert_eq!(seen.len(), 1);
+        assert!(
+            seen[0][0]
+                .content
+                .starts_with("Use these project facts when answering.")
+        );
+        assert!(
+            seen[0][0]
+                .content
+                .contains("goal: expose custom facts prompt")
+        );
     }
 
     #[test]
@@ -552,6 +598,7 @@ mod tests {
         agent.set_memory_config(MemoryConfig {
             strategy: MemoryStrategy::Branching,
             recent_messages: 8,
+            ..MemoryConfig::default()
         });
 
         agent
@@ -612,6 +659,7 @@ mod tests {
         let config = MemoryConfig {
             strategy: MemoryStrategy::Branching,
             recent_messages: 8,
+            ..MemoryConfig::default()
         };
         let mut branch_a = ChatAgent::new(
             test_profile(),
@@ -622,7 +670,7 @@ mod tests {
             None,
             None,
         );
-        branch_a.set_memory_config(config);
+        branch_a.set_memory_config(config.clone());
         let mut branch_b = ChatAgent::new(
             test_profile(),
             "secret".to_string(),
@@ -749,6 +797,7 @@ mod tests {
         agent.set_memory_config(MemoryConfig {
             strategy: MemoryStrategy::SlidingWindow,
             recent_messages: 12,
+            ..MemoryConfig::default()
         });
 
         let response = agent

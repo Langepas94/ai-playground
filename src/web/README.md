@@ -44,7 +44,7 @@ ChatWebRequest
 
 - Переключатель стратегий находится в `Параметры -> Контекст`.
 - `Sliding Window` показывает только размер окна N.
-- `Sticky Facts` показывает размер окна N и текущие facts как read-only блок в UI/debug request.
+- `Sticky Facts` показывает размер окна N, настраиваемый facts prompt и текущие facts как read-only блок в UI/debug request.
 - `Branching` показывает кнопки checkpoint, создания двух веток и переключения между ними. Каждая ветка отправляется как отдельная local session, чтобы histories не смешивались.
 - Summary-настройки в UI не нужны: управление должно оставаться коротким и понятным.
 

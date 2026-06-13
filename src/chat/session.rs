@@ -37,7 +37,7 @@ pub async fn interactive_chat(
         options.pricing,
         options.billing,
     );
-    agent.set_memory_config(memory_config);
+    agent.set_memory_config(memory_config.clone());
     agent.set_context_limit(options.context_limit);
     let mut goal_state = GoalState::new(goal.required_fields.clone());
     let mut pending_attachments: Vec<PathBuf> = Vec::new();
@@ -99,7 +99,7 @@ pub async fn interactive_chat(
                 continue;
             }
             "/memory" => {
-                println!("{}", describe_memory(memory_config, agent.memory()));
+                println!("{}", describe_memory(&memory_config, agent.memory()));
                 continue;
             }
             "/control clear" => {
@@ -298,7 +298,7 @@ pub async fn interactive_chat(
             match parse_memory_strategy(value) {
                 Some(strategy) => {
                     memory_config.strategy = strategy;
-                    agent.set_memory_config(memory_config);
+                    agent.set_memory_config(memory_config.clone());
                     println!("Memory strategy: {strategy}");
                 }
                 None => println!("Use /memory strategy sliding-window|sticky-facts|branching."),
@@ -309,10 +309,21 @@ pub async fn interactive_chat(
             match value.parse::<usize>() {
                 Ok(v) => {
                     memory_config.recent_messages = v;
-                    agent.set_memory_config(memory_config);
+                    agent.set_memory_config(memory_config.clone());
                     println!("Memory recent messages: {v}");
                 }
                 Err(_) => println!("Use /memory recent <number>."),
+            }
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("/memory facts-prompt ") {
+            let value = value.trim();
+            if value.is_empty() {
+                println!("Use /memory facts-prompt <prompt>.");
+            } else {
+                memory_config.facts_prompt = value.to_string();
+                agent.set_memory_config(memory_config.clone());
+                println!("Memory facts prompt updated.");
             }
             continue;
         }
@@ -418,7 +429,7 @@ pub fn describe_goal(goal: &ConversationGoal, state: &GoalState) -> String {
     )
 }
 
-pub fn describe_memory(config: MemoryConfig, memory: &super::AgentMemory) -> String {
+pub fn describe_memory(config: &MemoryConfig, memory: &super::AgentMemory) -> String {
     let facts = memory
         .facts
         .iter()
@@ -426,9 +437,10 @@ pub fn describe_memory(config: MemoryConfig, memory: &super::AgentMemory) -> Str
         .collect::<Vec<_>>()
         .join("; ");
     format!(
-        "Memory: strategy={}, recent_messages={}, facts={}",
+        "Memory: strategy={}, recent_messages={}, facts_prompt={}, facts={}",
         config.strategy,
         config.recent_messages,
+        config.facts_prompt,
         if facts.is_empty() { "none" } else { &facts }
     )
 }
@@ -554,15 +566,17 @@ mod tests {
         };
 
         let description = describe_memory(
-            MemoryConfig {
+            &MemoryConfig {
                 strategy: MemoryStrategy::StickyFacts,
                 recent_messages: 3,
+                facts_prompt: "Custom facts prompt".to_string(),
             },
             &memory,
         );
 
         assert!(description.contains("strategy=sticky-facts"));
         assert!(description.contains("recent_messages=3"));
+        assert!(description.contains("facts_prompt=Custom facts prompt"));
         assert!(description.contains("goal=test context strategies"));
         assert!(!description.contains("legacy summary"));
         assert!(!description.contains("summarized_message_count"));
