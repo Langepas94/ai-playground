@@ -412,6 +412,71 @@ mod tests {
         assert!(agent.memory().facts.contains_key("цель"));
     }
 
+    #[tokio::test]
+    async fn sticky_facts_uses_facts_plus_window_without_extra_provider_call() {
+        let client = FakeClient {
+            replies: std::sync::Mutex::new(vec!["answer".to_string()]),
+            metrics: std::sync::Mutex::new(Vec::new()),
+            seen_messages: std::sync::Mutex::new(Vec::new()),
+        };
+        let history = (0..6)
+            .map(|index| ChatMessage {
+                role: if index % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                content: format!("history {index}"),
+            })
+            .collect::<Vec<_>>();
+        let mut agent = ChatAgent::new(
+            test_profile(),
+            "secret".to_string(),
+            history,
+            AgentMemory::default(),
+            ResponseControl::uncontrolled(),
+            None,
+            None,
+        );
+        agent.set_memory_config(MemoryConfig {
+            strategy: MemoryStrategy::StickyFacts,
+            recent_messages: 2,
+        });
+
+        agent
+            .respond(
+                &client,
+                "goal: keep durable facts\napi key: sk-should-not-leak".to_string(),
+            )
+            .await
+            .expect("response");
+
+        let seen = client.seen_messages.lock().expect("seen messages");
+        assert_eq!(
+            seen.len(),
+            1,
+            "facts extraction must be local, not a second provider request"
+        );
+        let request = &seen[0];
+        assert_eq!(request.len(), 4);
+        assert_eq!(request[0].role, Role::System);
+        assert!(request[0].content.contains("goal: keep durable facts"));
+        assert!(!request[0].content.contains("sk-should-not-leak"));
+        assert_eq!(request[1].content, "history 4");
+        assert_eq!(request[2].content, "history 5");
+        assert!(
+            request
+                .iter()
+                .all(|message| !message.content.contains("history 0"))
+        );
+        assert_eq!(agent.history().len(), 2);
+        assert_eq!(
+            agent.history()[0].content,
+            "goal: keep durable facts\napi key: sk-should-not-leak"
+        );
+        assert_eq!(agent.history()[1].content, "answer");
+    }
+
     #[test]
     fn agent_estimates_next_exchange_from_current_history() {
         let agent = ChatAgent::new(
@@ -505,6 +570,100 @@ mod tests {
             seen[0]
                 .iter()
                 .all(|message| !message.content.contains("branch B"))
+        );
+    }
+
+    #[tokio::test]
+    async fn branching_keeps_two_branches_independent_from_same_checkpoint() {
+        let checkpoint = vec![
+            ChatMessage {
+                role: Role::User,
+                content: "checkpoint question".to_string(),
+            },
+            ChatMessage {
+                role: Role::Assistant,
+                content: "checkpoint answer".to_string(),
+            },
+        ];
+        let branch_a_history = checkpoint
+            .iter()
+            .cloned()
+            .chain(std::iter::once(ChatMessage {
+                role: Role::User,
+                content: "branch A only".to_string(),
+            }))
+            .collect::<Vec<_>>();
+        let branch_b_history = checkpoint
+            .iter()
+            .cloned()
+            .chain(std::iter::once(ChatMessage {
+                role: Role::User,
+                content: "branch B only".to_string(),
+            }))
+            .collect::<Vec<_>>();
+        let client = FakeClient {
+            replies: std::sync::Mutex::new(vec![
+                "branch B answer".to_string(),
+                "branch A answer".to_string(),
+            ]),
+            metrics: std::sync::Mutex::new(Vec::new()),
+            seen_messages: std::sync::Mutex::new(Vec::new()),
+        };
+        let config = MemoryConfig {
+            strategy: MemoryStrategy::Branching,
+            recent_messages: 8,
+        };
+        let mut branch_a = ChatAgent::new(
+            test_profile(),
+            "secret".to_string(),
+            branch_a_history,
+            AgentMemory::default(),
+            ResponseControl::uncontrolled(),
+            None,
+            None,
+        );
+        branch_a.set_memory_config(config);
+        let mut branch_b = ChatAgent::new(
+            test_profile(),
+            "secret".to_string(),
+            branch_b_history,
+            AgentMemory::default(),
+            ResponseControl::uncontrolled(),
+            None,
+            None,
+        );
+        branch_b.set_memory_config(config);
+
+        branch_a
+            .respond(&client, "continue A".to_string())
+            .await
+            .expect("branch A response");
+        branch_b
+            .respond(&client, "continue B".to_string())
+            .await
+            .expect("branch B response");
+
+        let seen = client.seen_messages.lock().expect("seen messages");
+        assert_eq!(seen.len(), 2);
+        assert!(
+            seen[0]
+                .iter()
+                .any(|message| message.content == "branch A only")
+        );
+        assert!(
+            seen[0]
+                .iter()
+                .all(|message| message.content != "branch B only")
+        );
+        assert!(
+            seen[1]
+                .iter()
+                .any(|message| message.content == "branch B only")
+        );
+        assert!(
+            seen[1]
+                .iter()
+                .all(|message| message.content != "branch A only")
         );
     }
 

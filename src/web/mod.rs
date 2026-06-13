@@ -1042,6 +1042,27 @@ mod tests {
     }
 
     #[test]
+    fn web_memory_config_supports_all_context_strategies() {
+        let cases = [
+            ("sliding-window", MemoryStrategy::SlidingWindow),
+            ("sticky-facts", MemoryStrategy::StickyFacts),
+            ("branching", MemoryStrategy::Branching),
+            ("unknown", MemoryStrategy::SlidingWindow),
+        ];
+
+        for (strategy, expected) in cases {
+            let config = WebMemoryConfig {
+                strategy: Some(strategy.to_string()),
+                recent_messages: Some(7),
+            }
+            .into_memory_config();
+
+            assert_eq!(config.strategy, expected, "strategy={strategy}");
+            assert_eq!(config.recent_messages, 7);
+        }
+    }
+
+    #[test]
     fn web_request_pricing_uses_official_deepseek_pricing_before_stale_catalog() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("prices.json");
@@ -1349,6 +1370,44 @@ mod tests {
         assert!(INDEX_HTML.contains("id=\"branchB\""));
         assert!(INDEX_HTML.contains("function createBranchCheckpoint()"));
         assert!(INDEX_HTML.contains("function switchBranch(id)"));
+    }
+
+    #[test]
+    fn web_ui_branch_payload_uses_active_branch_session_and_messages() {
+        let marker = "function chatPayload()";
+        let start = INDEX_HTML.find(marker).expect("chatPayload");
+        let body = &INDEX_HTML[start..INDEX_HTML.len().min(start + 1_900)];
+
+        assert!(
+            body.contains("session_id: currentBranch()?.sessionId || chatSessionId"),
+            "branching requests must use active branch session id"
+        );
+        assert!(
+            body.contains(
+                "new_session: currentBranch() ? !currentBranch().sessionId : forceNewSession"
+            ),
+            "new branch without session id must create an independent backend session"
+        );
+        assert!(
+            body.contains("messages: currentBranch()?.messages || chatHistory"),
+            "branching requests must send active branch history, not global chat history"
+        );
+    }
+
+    #[test]
+    fn web_ui_checkpoint_clones_same_history_into_two_independent_branches() {
+        let marker = "function createBranchCheckpoint()";
+        let start = INDEX_HTML.find(marker).expect("createBranchCheckpoint");
+        let body = &INDEX_HTML[start..INDEX_HTML.len().min(start + 1_200)];
+
+        assert!(body.contains("const checkpoint = chatHistory.slice();"));
+        assert!(body.contains("id: 'branch-a'"));
+        assert!(body.contains("id: 'branch-b'"));
+        assert_eq!(
+            body.matches("messages: checkpoint.slice()").count(),
+            2,
+            "both branches must get separate message arrays from the same checkpoint"
+        );
     }
 
     #[test]
