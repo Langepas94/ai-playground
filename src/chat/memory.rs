@@ -295,6 +295,26 @@ mod tests {
     }
 
     #[test]
+    fn sliding_window_with_zero_recent_keeps_only_system_context() {
+        let memory = AgentMemory::default();
+        let history = vec![
+            message(Role::System, "System stays"),
+            message(Role::User, "old user"),
+            message(Role::Assistant, "old assistant"),
+        ];
+
+        let context = memory.build_context(
+            &history,
+            MemoryConfig {
+                strategy: MemoryStrategy::SlidingWindow,
+                recent_messages: 0,
+            },
+        );
+
+        assert_eq!(context, vec![message(Role::System, "System stays")]);
+    }
+
+    #[test]
     fn sticky_facts_layers_facts_before_recent_messages() {
         let mut memory = AgentMemory::default();
         memory
@@ -343,6 +363,25 @@ mod tests {
                 .facts
                 .get("preferences")
                 .is_some_and(|value| value.contains("Отвечай кратко"))
+        );
+    }
+
+    #[test]
+    fn explicit_facts_overwrite_same_key_without_duplicates() {
+        let mut memory = AgentMemory::default();
+
+        memory.update_facts_from_user_message("goal: old target");
+        memory.update_facts_from_user_message("goal: new target");
+        memory.update_facts_from_user_message("Must keep CLI and web aligned");
+        memory.update_facts_from_user_message("Must keep CLI and web aligned");
+
+        assert_eq!(
+            memory.facts.get("goal").map(String::as_str),
+            Some("new target")
+        );
+        assert_eq!(
+            memory.facts.get("constraints").map(String::as_str),
+            Some("Must keep CLI and web aligned")
         );
     }
 
