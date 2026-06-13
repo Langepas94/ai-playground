@@ -502,6 +502,9 @@ fn build_message_with_attachments(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
     #[test]
     fn terminal_line_decode_tolerates_invalid_utf8() {
         // Can't call read_terminal_line directly (needs stdin), but verify the lossy decode logic
@@ -509,5 +512,59 @@ mod tests {
         let decoded = String::from_utf8_lossy(bytes).into_owned();
         assert!(decoded.contains('З'));
         assert!(decoded.contains('А'));
+    }
+
+    #[test]
+    fn memory_strategy_parser_accepts_public_strategy_names_and_aliases() {
+        assert_eq!(
+            parse_memory_strategy("sliding-window"),
+            Some(MemoryStrategy::SlidingWindow)
+        );
+        assert_eq!(
+            parse_memory_strategy("sliding"),
+            Some(MemoryStrategy::SlidingWindow)
+        );
+        assert_eq!(
+            parse_memory_strategy("sticky-facts"),
+            Some(MemoryStrategy::StickyFacts)
+        );
+        assert_eq!(
+            parse_memory_strategy("facts"),
+            Some(MemoryStrategy::StickyFacts)
+        );
+        assert_eq!(
+            parse_memory_strategy("branching"),
+            Some(MemoryStrategy::Branching)
+        );
+        assert_eq!(
+            parse_memory_strategy("branches"),
+            Some(MemoryStrategy::Branching)
+        );
+        assert_eq!(parse_memory_strategy("summary"), None);
+    }
+
+    #[test]
+    fn describe_memory_reports_facts_not_legacy_summary() {
+        let mut facts = BTreeMap::new();
+        facts.insert("goal".to_string(), "test context strategies".to_string());
+        let memory = super::super::AgentMemory {
+            facts,
+            session_summary: Some("legacy summary should stay hidden".to_string()),
+            summarized_message_count: 42,
+        };
+
+        let description = describe_memory(
+            MemoryConfig {
+                strategy: MemoryStrategy::StickyFacts,
+                recent_messages: 3,
+            },
+            &memory,
+        );
+
+        assert!(description.contains("strategy=sticky-facts"));
+        assert!(description.contains("recent_messages=3"));
+        assert!(description.contains("goal=test context strategies"));
+        assert!(!description.contains("legacy summary"));
+        assert!(!description.contains("summarized_message_count"));
     }
 }
