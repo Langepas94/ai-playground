@@ -36,7 +36,7 @@ CLI / web UI
 - CLI и web идут через один `ProviderClient`.
 - `AppError` остается единым пользовательским типом ошибок.
 - Provider-specific поведение живет в `providers/`, а не размазывается по CLI/web.
-- Context strategy должна быть явной: sliding window, sticky facts или branching. Нельзя незаметно подменять ее summary.
+- Context strategy должна быть явной: sliding window, sticky facts, branching или scoped branches. Нельзя незаметно подменять ее summary.
 - Sticky facts хранят только устойчивые ключ-значение факты: цель, ограничения, предпочтения, решения и договоренности.
 
 ## Документы рядом

@@ -666,6 +666,7 @@ mod tests {
         let session = store.create_session().expect("create session");
         let memory = AgentMemory {
             facts: Default::default(),
+            branch_assignments: Default::default(),
             session_summary: Some("User prefers short technical answers.".to_string()),
             summarized_message_count: 8,
         };

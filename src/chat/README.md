@@ -49,6 +49,11 @@ Branching
   -> работает с независимой веткой истории
   -> UI создает checkpoint и две ветки от одного места
   -> переключение ветки меняет session/history без смешивания сообщений
+
+Scoped Branches
+  -> одна session и одно окно агента
+  -> каждое сообщение получает внутренний branch label
+  -> в provider request попадает только активная branch + system/facts
 ```
 
 ## Что важно не ломать
@@ -57,6 +62,7 @@ Branching
 - Для sliding window source of truth - уже обрезанная история; старые сообщения намеренно удалены.
 - Для sticky facts source of truth - facts + последние N сообщений.
 - Для branching каждая ветка имеет свою историю/session; сообщения разных веток не смешиваются.
+- Для scoped branches история хранится в одной session, но context builder фильтрует ее по активной внутренней ветке.
 - Slash-команды должны менять локальное состояние предсказуемо и не отправлять служебный текст провайдеру.
 - History, facts и memory не должны содержать токены.
 - Новый чатовый сценарий должен идти через `ChatAgent`, если только это не узкий unit test.
@@ -68,6 +74,7 @@ Branching
 - Сессия не восстанавливается: `store.rs`.
 - Facts не обновились или неверно ушли в запрос: `AgentMemory::update_facts_from_user_message()`, `facts_prompt` и `AgentMemory::build_context()`.
 - Branching в UI смешал ветки: `ui.html` branch state и `ChatWebRequest::initial_history()`.
+- Scoped branches смешали context: `AgentMemory.branch_assignments`, `active_branch` и `AgentMemory::build_context()`.
 - Goal завершается рано/поздно: `goal.rs`.
 - Метрики не печатаются или выглядят неверно: `format_request_metrics` в `mod.rs`.
 - Локальная оценка токенов/overflow неверная: `token_accounting.rs` и `ChatAgent::estimate_next_exchange()`.

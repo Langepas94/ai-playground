@@ -479,6 +479,12 @@ pub struct MemoryArgs {
         help = "System prompt that introduces Sticky Facts in provider requests"
     )]
     pub memory_facts_prompt: String,
+    #[arg(
+        long,
+        default_value = "default",
+        help = "Active internal branch for scoped-branches strategy"
+    )]
+    pub memory_active_branch: String,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
@@ -515,6 +521,7 @@ pub enum CliMemoryStrategy {
     SlidingWindow,
     StickyFacts,
     Branching,
+    ScopedBranches,
 }
 
 impl From<&ResponseControlArgs> for ResponseControl {
@@ -587,9 +594,11 @@ impl From<&MemoryArgs> for chat::MemoryConfig {
                 CliMemoryStrategy::SlidingWindow => chat::memory::MemoryStrategy::SlidingWindow,
                 CliMemoryStrategy::StickyFacts => chat::memory::MemoryStrategy::StickyFacts,
                 CliMemoryStrategy::Branching => chat::memory::MemoryStrategy::Branching,
+                CliMemoryStrategy::ScopedBranches => chat::memory::MemoryStrategy::ScopedBranches,
             },
             recent_messages: args.memory_recent_messages,
             facts_prompt: args.memory_facts_prompt.clone(),
+            active_branch: args.memory_active_branch.clone(),
         }
     }
 }
@@ -626,6 +635,7 @@ mod tests {
             memory_strategy: CliMemoryStrategy::StickyFacts,
             memory_recent_messages: 5,
             memory_facts_prompt: "Custom facts prompt".to_string(),
+            memory_active_branch: "default".to_string(),
         };
 
         let config = chat::MemoryConfig::from(&args);

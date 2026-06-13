@@ -327,6 +327,17 @@ pub async fn interactive_chat(
             }
             continue;
         }
+        if let Some(value) = line.strip_prefix("/memory branch ") {
+            let value = value.trim();
+            if value.is_empty() {
+                println!("Use /memory branch <branch-name>.");
+            } else {
+                memory_config.active_branch = value.to_string();
+                agent.set_memory_config(memory_config.clone());
+                println!("Memory active branch: {value}");
+            }
+            continue;
+        }
         if let Some(value) = line.strip_prefix("/completion-instruction ") {
             control.completion_instruction = Some(value.to_string());
             println!("Completion instruction updated.");
@@ -437,9 +448,10 @@ pub fn describe_memory(config: &MemoryConfig, memory: &super::AgentMemory) -> St
         .collect::<Vec<_>>()
         .join("; ");
     format!(
-        "Memory: strategy={}, recent_messages={}, facts_prompt={}, facts={}",
+        "Memory: strategy={}, recent_messages={}, active_branch={}, facts_prompt={}, facts={}",
         config.strategy,
         config.recent_messages,
+        config.active_branch,
         config.facts_prompt,
         if facts.is_empty() { "none" } else { &facts }
     )
@@ -450,6 +462,7 @@ pub fn parse_memory_strategy(value: &str) -> Option<MemoryStrategy> {
         "sliding-window" | "sliding" => Some(MemoryStrategy::SlidingWindow),
         "sticky-facts" | "facts" => Some(MemoryStrategy::StickyFacts),
         "branching" | "branches" => Some(MemoryStrategy::Branching),
+        "scoped-branches" | "scoped" => Some(MemoryStrategy::ScopedBranches),
         _ => None,
     }
 }
@@ -552,6 +565,14 @@ mod tests {
             parse_memory_strategy("branches"),
             Some(MemoryStrategy::Branching)
         );
+        assert_eq!(
+            parse_memory_strategy("scoped-branches"),
+            Some(MemoryStrategy::ScopedBranches)
+        );
+        assert_eq!(
+            parse_memory_strategy("scoped"),
+            Some(MemoryStrategy::ScopedBranches)
+        );
         assert_eq!(parse_memory_strategy("summary"), None);
     }
 
@@ -561,6 +582,7 @@ mod tests {
         facts.insert("goal".to_string(), "test context strategies".to_string());
         let memory = super::super::AgentMemory {
             facts,
+            branch_assignments: Default::default(),
             session_summary: Some("legacy summary should stay hidden".to_string()),
             summarized_message_count: 42,
         };
@@ -570,12 +592,14 @@ mod tests {
                 strategy: MemoryStrategy::StickyFacts,
                 recent_messages: 3,
                 facts_prompt: "Custom facts prompt".to_string(),
+                active_branch: "alpha".to_string(),
             },
             &memory,
         );
 
         assert!(description.contains("strategy=sticky-facts"));
         assert!(description.contains("recent_messages=3"));
+        assert!(description.contains("active_branch=alpha"));
         assert!(description.contains("facts_prompt=Custom facts prompt"));
         assert!(description.contains("goal=test context strategies"));
         assert!(!description.contains("legacy summary"));

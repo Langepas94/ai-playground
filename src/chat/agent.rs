@@ -212,14 +212,18 @@ impl ChatAgent {
     }
 
     fn commit_turn(&mut self, prompt: String, answer: String) {
+        let user_index = self.history.len();
         self.history.push(ChatMessage {
             role: Role::User,
             content: prompt,
         });
+        let assistant_index = self.history.len();
         self.history.push(ChatMessage {
             role: Role::Assistant,
             content: answer,
         });
+        self.memory
+            .record_turn_branch(user_index, assistant_index, &self.memory_config);
     }
 
     fn ingest_user_prompt(&mut self, prompt: &str) {
@@ -230,7 +234,7 @@ impl ChatAgent {
 
     fn apply_context_storage_policy(&mut self) {
         self.memory
-            .apply_storage_policy(&mut self.history, &self.memory_config);
+            .apply_scoped_branch_storage_policy(&mut self.history, &self.memory_config);
     }
 }
 
@@ -502,6 +506,7 @@ mod tests {
             strategy: MemoryStrategy::StickyFacts,
             recent_messages: 2,
             facts_prompt: "Use these project facts when answering.".to_string(),
+            ..MemoryConfig::default()
         });
 
         agent
@@ -712,6 +717,91 @@ mod tests {
             seen[1]
                 .iter()
                 .all(|message| message.content != "branch A only")
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_branches_keep_one_session_but_filter_provider_context() {
+        let client = FakeClient {
+            replies: std::sync::Mutex::new(vec![
+                "beta answer".to_string(),
+                "alpha answer".to_string(),
+            ]),
+            metrics: std::sync::Mutex::new(Vec::new()),
+            seen_messages: std::sync::Mutex::new(Vec::new()),
+        };
+        let mut agent = ChatAgent::new(
+            test_profile(),
+            "secret".to_string(),
+            Vec::new(),
+            AgentMemory::default(),
+            ResponseControl::uncontrolled(),
+            None,
+            None,
+        );
+        agent.set_memory_config(MemoryConfig {
+            strategy: MemoryStrategy::ScopedBranches,
+            recent_messages: 8,
+            active_branch: "alpha".to_string(),
+            ..MemoryConfig::default()
+        });
+        agent
+            .respond(&client, "alpha question".to_string())
+            .await
+            .expect("alpha response");
+
+        let mut beta_config = agent.memory_config();
+        beta_config.active_branch = "beta".to_string();
+        agent.set_memory_config(beta_config);
+        agent
+            .respond(&client, "beta question".to_string())
+            .await
+            .expect("beta response");
+
+        let seen = client.seen_messages.lock().expect("seen messages");
+        assert_eq!(seen.len(), 2);
+        assert!(
+            seen[0]
+                .iter()
+                .any(|message| message.content == "alpha question")
+        );
+        assert!(
+            seen[1]
+                .iter()
+                .any(|message| message.content == "beta question")
+        );
+        assert!(
+            seen[1]
+                .iter()
+                .all(|message| !message.content.contains("alpha"))
+        );
+        assert!(
+            agent
+                .history()
+                .iter()
+                .any(|message| message.content == "alpha question")
+        );
+        assert!(
+            agent
+                .history()
+                .iter()
+                .any(|message| message.content == "beta question")
+        );
+        assert_eq!(
+            agent
+                .memory()
+                .branch_assignments
+                .get(&0)
+                .map(String::as_str),
+            Some("alpha")
+        );
+        assert_eq!(
+            agent
+                .memory()
+                .branch_assignments
+                .get(&2)
+                .map(String::as_str),
+            Some("beta")
         );
     }
 

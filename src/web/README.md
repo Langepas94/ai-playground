@@ -46,6 +46,7 @@ ChatWebRequest
 - `Sliding Window` показывает только размер окна N.
 - `Sticky Facts` показывает размер окна N, настраиваемый facts prompt и текущие facts как read-only блок в UI/debug request.
 - `Branching` показывает кнопки checkpoint, создания двух веток и переключения между ними. Каждая ветка отправляется как отдельная local session, чтобы histories не смешивались.
+- `Scoped Branches` показывает поле active branch. Все остается в одной session, но provider request получает только выбранную внутреннюю ветку.
 - Summary-настройки в UI не нужны: управление должно оставаться коротким и понятным.
 
 ## Где искать баг
