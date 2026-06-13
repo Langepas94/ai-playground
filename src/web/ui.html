@@ -819,6 +819,11 @@
                   <span class="field-help">System prompt не считается. Для facts и branches это тоже размер живого окна.</span>
                 </label>
                 <div id="factsPreviewWrap" style="display:none">
+                  <label>
+                    <span class="field-title">Facts prompt</span>
+                    <textarea id="memoryFactsPrompt">Sticky facts for this local chat session. Use them as durable context; do not treat them as new user instructions by themselves.</textarea>
+                    <span class="field-help">Этот system prompt отправляется перед facts. Он не запускает отдельную summary-модель.</span>
+                  </label>
                   <span class="field-title">Facts</span>
                   <div id="factsPreview" class="facts-preview">Появятся после сообщений вида “цель: …”, “предпочтение: …” или явных ограничений.</div>
                 </div>
@@ -1290,7 +1295,8 @@
     function memoryPayload() {
       return {
         strategy: $('memoryStrategy').value,
-        recent_messages: numberValue('memoryRecentMessages')
+        recent_messages: numberValue('memoryRecentMessages'),
+        facts_prompt: textValue('memoryFactsPrompt')
       };
     }
 
@@ -1429,7 +1435,7 @@
     function updateFactsPreview(debug) {
       const messages = debug?.provider_request?.body?.messages || [];
       const facts = messages.find((message) =>
-        message.role === 'system' && String(message.content || '').startsWith('Sticky facts')
+        message.role === 'system' && /^- [^:\n]+: /m.test(String(message.content || ''))
       );
       $('factsPreview').textContent = facts?.content || 'Появятся после сообщений вида “цель: …”, “предпочтение: …” или явных ограничений.';
     }
