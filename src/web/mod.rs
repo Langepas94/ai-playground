@@ -665,6 +665,7 @@ struct WebMemoryConfig {
     strategy: Option<String>,
     recent_messages: Option<usize>,
     facts_prompt: Option<String>,
+    active_branch: Option<String>,
 }
 
 impl Default for WebMemoryConfig {
@@ -674,6 +675,7 @@ impl Default for WebMemoryConfig {
             strategy: Some(defaults.strategy.to_string()),
             recent_messages: Some(defaults.recent_messages),
             facts_prompt: Some(defaults.facts_prompt),
+            active_branch: Some(defaults.active_branch),
         }
     }
 }
@@ -685,10 +687,12 @@ impl WebMemoryConfig {
             strategy: match self.strategy.as_deref() {
                 Some("sticky-facts") => MemoryStrategy::StickyFacts,
                 Some("branching") => MemoryStrategy::Branching,
+                Some("scoped-branches") => MemoryStrategy::ScopedBranches,
                 _ => MemoryStrategy::SlidingWindow,
             },
             recent_messages: self.recent_messages.unwrap_or(defaults.recent_messages),
             facts_prompt: blank_to_none(self.facts_prompt).unwrap_or(defaults.facts_prompt),
+            active_branch: blank_to_none(self.active_branch).unwrap_or(defaults.active_branch),
         }
     }
 }
@@ -1038,12 +1042,14 @@ mod tests {
             strategy: Some("sticky-facts".to_string()),
             recent_messages: Some(4),
             facts_prompt: Some("Custom provider facts prompt".to_string()),
+            active_branch: Some("alpha".to_string()),
         }
         .into_memory_config();
 
         assert_eq!(config.strategy, MemoryStrategy::StickyFacts);
         assert_eq!(config.recent_messages, 4);
         assert_eq!(config.facts_prompt, "Custom provider facts prompt");
+        assert_eq!(config.active_branch, "alpha");
     }
 
     #[test]
@@ -1052,6 +1058,7 @@ mod tests {
             ("sliding-window", MemoryStrategy::SlidingWindow),
             ("sticky-facts", MemoryStrategy::StickyFacts),
             ("branching", MemoryStrategy::Branching),
+            ("scoped-branches", MemoryStrategy::ScopedBranches),
             ("unknown", MemoryStrategy::SlidingWindow),
         ];
 
@@ -1060,6 +1067,7 @@ mod tests {
                 strategy: Some(strategy.to_string()),
                 recent_messages: Some(7),
                 facts_prompt: None,
+                active_branch: None,
             }
             .into_memory_config();
 
@@ -1074,6 +1082,7 @@ mod tests {
             strategy: Some("sticky-facts".to_string()),
             recent_messages: Some(4),
             facts_prompt: Some("   ".to_string()),
+            active_branch: Some("   ".to_string()),
         }
         .into_memory_config();
 
@@ -1081,6 +1090,7 @@ mod tests {
             config.facts_prompt,
             crate::chat::memory::DEFAULT_FACTS_PROMPT
         );
+        assert_eq!(config.active_branch, "default");
     }
 
     #[test]
@@ -1375,9 +1385,11 @@ mod tests {
         assert!(INDEX_HTML.contains("Sliding Window"));
         assert!(INDEX_HTML.contains("Sticky Facts"));
         assert!(INDEX_HTML.contains("Branching"));
+        assert!(INDEX_HTML.contains("Scoped Branches"));
         assert!(INDEX_HTML.contains("Окно сообщений N"));
         assert!(INDEX_HTML.contains("Facts prompt"));
         assert!(INDEX_HTML.contains("id=\"memoryFactsPrompt\""));
+        assert!(INDEX_HTML.contains("id=\"memoryActiveBranch\""));
         assert!(!INDEX_HTML.contains("memorySummarizeAfterMessages"));
         assert!(!INDEX_HTML.contains("memorySummaryChunkMessages"));
         assert!(
@@ -1426,6 +1438,10 @@ mod tests {
         assert!(
             body.contains("facts_prompt: textValue('memoryFactsPrompt')"),
             "custom facts prompt must be sent to the web API"
+        );
+        assert!(
+            body.contains("active_branch: textValue('memoryActiveBranch') || 'default'"),
+            "active internal branch must be sent to the web API"
         );
     }
 
