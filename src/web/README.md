@@ -34,10 +34,19 @@ ChatWebRequest
   -> request.profile()
   -> resolve_web_token()
   -> load/create LocalSessionStore session
+  -> apply selected context strategy
   -> ChatAgent::respond_with_debug()
-  -> save session + memory + metrics
+  -> save session + context state + metrics
   -> ChatWebResponse
 ```
+
+## UI контекста
+
+- Переключатель стратегий находится в `Параметры -> Контекст`.
+- `Sliding Window` показывает только размер окна N.
+- `Sticky Facts` показывает размер окна N и текущие facts как read-only блок в UI/debug request.
+- `Branching` показывает кнопки checkpoint, создания двух веток и переключения между ними. Каждая ветка отправляется как отдельная local session, чтобы histories не смешивались.
+- Summary-настройки в UI не нужны: управление должно оставаться коротким и понятным.
 
 ## Где искать баг
 
@@ -48,6 +57,8 @@ ChatWebRequest
 - Метрики запроса/диалога неверные: `TokenUsage`, `add_request_metrics()`, `setMetrics()`, `setSessionMetrics()`.
 - Debug JSON странный: `ChatDebugView` и provider debug в `ChatAgent`.
 - Ошибка приходит без понятного текста: `error::WebError::into_response()`.
+- Strategy control странно работает: `WebMemoryConfig::into_memory_config()` и `memoryPayload()` в `ui.html`.
+- Branch switch потерял сообщения: branch state в `ui.html`, `session_id/new_session/messages` payload.
 
 ## Инварианты UI
 
@@ -56,3 +67,4 @@ ChatWebRequest
 - Debug view должен редактировать секреты.
 - Web API не должен обходить `ProviderClient` или `ChatAgent`.
 - UI разделяет метрики последнего запроса и накопленные метрики диалога.
+- UI не должен показывать сложные summary controls для новой context strategy панели.

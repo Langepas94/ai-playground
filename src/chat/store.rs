@@ -665,6 +665,7 @@ mod tests {
         let store = LocalSessionStore::from_root(dir.path().join("sessions"));
         let session = store.create_session().expect("create session");
         let memory = AgentMemory {
+            facts: Default::default(),
             session_summary: Some("User prefers short technical answers.".to_string()),
             summarized_message_count: 8,
         };

@@ -1,16 +1,16 @@
 # Chat runtime
 
-`chat/` держит локальную диалоговую логику поверх provider API: одноразовые запросы, REPL, сравнения, goal mode, history и memory.
+`chat/` держит локальную диалоговую логику поверх provider API: одноразовые запросы, REPL, сравнения, goal mode, history и стратегии контекста.
 
 ## Файлы
 
 - `mod.rs` - публичный API: `ask_once`, `compare_*`, `format_request_metrics`, re-export ключевых типов.
-- `agent.rs` - `ChatAgent`: история, memory, сборка `ChatRequest`, вызов provider client.
+- `agent.rs` - `ChatAgent`: история, context strategy, сборка `ChatRequest`, вызов provider client.
 - `session.rs` - интерактивный `ai chat`, slash-команды и terminal I/O.
 - `goal.rs` - `ConversationGoal`, `GoalState`, stop modes и сравнение goal режимов.
-- `memory.rs` - `AgentMemory`, summary и recent-window context layering.
+- `memory.rs` - `AgentMemory`, `MemoryConfig`, sticky facts и выбор сообщений для sliding/facts/branching.
 - `token_accounting.rs` - локальная оценка токенов запроса, истории, ответа, стоимости и overflow по context limit.
-- `store.rs` - `LocalSessionStore`: TOON-сессии, memory sidecar, индекс последней сессии.
+- `store.rs` - `LocalSessionStore`: TOON-сессии, context sidecar, индекс последней сессии.
 - `history.rs` - сохранение истории в файл.
 - `AGENT_RUNTIME.md` - подробная модель локального agent runtime.
 
@@ -29,24 +29,45 @@ ask_once()
 ```text
 interactive_chat()
   -> load_or_create_latest()
-  -> ChatAgent(history + memory)
+  -> ChatAgent(history + context state)
   -> respond()
   -> save_session() + save_memory()
+```
+
+## Стратегии контекста
+
+```text
+Sliding Window
+  -> хранит system prompt + последние N обычных сообщений
+  -> старые обычные сообщения отбрасывает после каждого хода
+
+Sticky Facts
+  -> обновляет key-value facts после каждого user message
+  -> отправляет facts system block + последние N сообщений
+
+Branching
+  -> работает с независимой веткой истории
+  -> UI создает checkpoint и две ветки от одного места
+  -> переключение ветки меняет session/history без смешивания сообщений
 ```
 
 ## Что важно не ломать
 
 - Provider API не знает про `agent_id`; это локальная сущность.
-- Полная история - источник правды; memory summary можно пересобрать.
+- Для sliding window source of truth - уже обрезанная история; старые сообщения намеренно удалены.
+- Для sticky facts source of truth - facts + последние N сообщений.
+- Для branching каждая ветка имеет свою историю/session; сообщения разных веток не смешиваются.
 - Slash-команды должны менять локальное состояние предсказуемо и не отправлять служебный текст провайдеру.
-- History и memory не должны содержать токены.
+- History, facts и memory не должны содержать токены.
 - Новый чатовый сценарий должен идти через `ChatAgent`, если только это не узкий unit test.
 
 ## Где искать баг
 
-- Ответ не учитывает старый контекст: `agent.rs` и `memory.rs`.
+- Ответ не учитывает нужный контекст: `agent.rs` и `memory.rs`.
 - `/profile`, `/model`, `/goal` ведут себя странно: `session.rs`.
 - Сессия не восстанавливается: `store.rs`.
+- Facts не обновились или неверно ушли в запрос: `AgentMemory::update_facts_from_user_message()` и `AgentMemory::build_context()`.
+- Branching в UI смешал ветки: `ui.html` branch state и `ChatWebRequest::initial_history()`.
 - Goal завершается рано/поздно: `goal.rs`.
 - Метрики не печатаются или выглядят неверно: `format_request_metrics` в `mod.rs`.
 - Локальная оценка токенов/overflow неверная: `token_accounting.rs` и `ChatAgent::estimate_next_exchange()`.

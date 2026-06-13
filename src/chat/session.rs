@@ -301,7 +301,7 @@ pub async fn interactive_chat(
                     agent.set_memory_config(memory_config);
                     println!("Memory strategy: {strategy}");
                 }
-                None => println!("Use /memory strategy full|summary."),
+                None => println!("Use /memory strategy sliding-window|sticky-facts|branching."),
             }
             continue;
         }
@@ -313,39 +313,6 @@ pub async fn interactive_chat(
                     println!("Memory recent messages: {v}");
                 }
                 Err(_) => println!("Use /memory recent <number>."),
-            }
-            continue;
-        }
-        if let Some(value) = line.strip_prefix("/memory after ") {
-            match value.parse::<usize>() {
-                Ok(v) => {
-                    memory_config.summarize_after_messages = v;
-                    agent.set_memory_config(memory_config);
-                    println!("Memory summarize-after messages: {v}");
-                }
-                Err(_) => println!("Use /memory after <number>."),
-            }
-            continue;
-        }
-        if let Some(value) = line.strip_prefix("/memory chunk ") {
-            match value.parse::<usize>() {
-                Ok(v) if v > 0 => {
-                    memory_config.summary_chunk_messages = v;
-                    agent.set_memory_config(memory_config);
-                    println!("Memory summary chunk messages: {v}");
-                }
-                _ => println!("Use /memory chunk <positive-number>."),
-            }
-            continue;
-        }
-        if let Some(value) = line.strip_prefix("/memory percent ") {
-            match value.parse::<u8>() {
-                Ok(v) if (1..=100).contains(&v) => {
-                    memory_config.summarize_at_context_percent = v;
-                    agent.set_memory_config(memory_config);
-                    println!("Memory summarize-at-context percent: {v}");
-                }
-                _ => println!("Use /memory percent <1-100>."),
             }
             continue;
         }
@@ -452,27 +419,25 @@ pub fn describe_goal(goal: &ConversationGoal, state: &GoalState) -> String {
 }
 
 pub fn describe_memory(config: MemoryConfig, memory: &super::AgentMemory) -> String {
+    let facts = memory
+        .facts
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("; ");
     format!(
-        "Memory: strategy={}, recent_messages={}, summarize_after_messages={}, summary_chunk_messages={}, summarize_at_context_percent={}, summarized_message_count={}, summary={}",
+        "Memory: strategy={}, recent_messages={}, facts={}",
         config.strategy,
         config.recent_messages,
-        config.summarize_after_messages,
-        config.summary_chunk_messages,
-        config.summarize_at_context_percent,
-        memory.summarized_message_count,
-        memory
-            .session_summary
-            .as_deref()
-            .map(str::trim)
-            .filter(|summary| !summary.is_empty())
-            .unwrap_or("none")
+        if facts.is_empty() { "none" } else { &facts }
     )
 }
 
 pub fn parse_memory_strategy(value: &str) -> Option<MemoryStrategy> {
     match value {
-        "full" => Some(MemoryStrategy::Full),
-        "summary" => Some(MemoryStrategy::Summary),
+        "sliding-window" | "sliding" => Some(MemoryStrategy::SlidingWindow),
+        "sticky-facts" | "facts" => Some(MemoryStrategy::StickyFacts),
+        "branching" | "branches" => Some(MemoryStrategy::Branching),
         _ => None,
     }
 }

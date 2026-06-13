@@ -386,6 +386,36 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .branch-toolbar {
+      display: grid;
+      gap: 8px;
+      padding: 10px;
+      border: 1px solid #cfdfe2;
+      border-radius: 8px;
+      background: #f5fbfb;
+    }
+    .branch-buttons {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .branch-buttons button.active {
+      background: var(--accent-dark);
+      color: #fff;
+    }
+    .facts-preview {
+      min-height: 42px;
+      max-height: 120px;
+      overflow: auto;
+      padding: 9px 10px;
+      border: 1px solid #d5e0fb;
+      border-radius: 6px;
+      background: #f8faff;
+      color: #334155;
+      font-size: 12px;
+      line-height: 1.4;
+      white-space: pre-wrap;
+    }
     button {
       border: 1px solid transparent;
       border-radius: 6px;
@@ -775,32 +805,35 @@
               <summary>Контекст</summary>
               <div class="panel-body">
                 <label>
-                  <span class="field-title">Как хранить историю</span>
-                  <select id="memoryStrategy"><option value="summary">Сжимать старые сообщения</option><option value="full">Отправлять всю историю</option></select>
-                  <span class="field-help">Summary оставляет свежий диалог как есть, а старую часть заменяет краткой памятью.</span>
+                  <span class="field-title">Стратегия</span>
+                  <select id="memoryStrategy">
+                    <option value="sliding-window">Sliding Window</option>
+                    <option value="sticky-facts">Sticky Facts</option>
+                    <option value="branching">Branching</option>
+                  </select>
+                  <span id="memoryStrategyHelp" class="field-help">Только последние N сообщений; старое отбрасывается.</span>
                 </label>
-                <div class="row">
-                  <label>
-                    <span class="field-title">Свежие сообщения без сжатия</span>
-                    <input id="memoryRecentMessages" type="number" min="0" step="1" value="12">
-                    <span class="field-help">Сколько последних сообщений всегда отправлять модели полностью.</span>
-                  </label>
-                  <label>
-                    <span class="field-title">Начинать сжатие после</span>
-                    <input id="memorySummarizeAfterMessages" type="number" min="0" step="1" value="18">
-                    <span class="field-help">Минимальная длина истории в сообщениях перед плановым summary.</span>
-                  </label>
+                <label>
+                  <span class="field-title">Окно сообщений N</span>
+                  <input id="memoryRecentMessages" type="number" min="0" step="1" value="12">
+                  <span class="field-help">System prompt не считается. Для facts и branches это тоже размер живого окна.</span>
+                </label>
+                <div id="factsPreviewWrap" style="display:none">
+                  <span class="field-title">Facts</span>
+                  <div id="factsPreview" class="facts-preview">Появятся после сообщений вида “цель: …”, “предпочтение: …” или явных ограничений.</div>
                 </div>
-                <label>
-                  <span class="field-title">Сжимать при заполнении контекста</span>
-                  <input id="memorySummarizeAtContextPercent" type="number" min="1" max="100" step="1" value="80">
-                  <span class="field-help">Если запрос занимает этот процент окна модели, агент сжимает старую историю до отправки.</span>
-                </label>
-                <label>
-                  <span class="field-title">Размер порции summary</span>
-                  <input id="memorySummaryChunkMessages" type="number" min="1" step="1" value="10">
-                  <span class="field-help">Сколько старых сообщений минимум объединять в одно обновление памяти.</span>
-                </label>
+                <div id="branchToolbar" class="branch-toolbar" style="display:none">
+                  <span class="field-title">Ветки диалога</span>
+                  <div class="branch-buttons">
+                    <button id="checkpointBranches" class="secondary" type="button">Checkpoint + 2 ветки</button>
+                    <button id="resetBranches" class="secondary" type="button">Сбросить ветки</button>
+                  </div>
+                  <div class="branch-buttons">
+                    <button id="branchA" class="secondary" type="button">Ветка A</button>
+                    <button id="branchB" class="secondary" type="button">Ветка B</button>
+                  </div>
+                  <span id="branchStatus" class="field-help">Сделайте checkpoint, затем переключайтесь между A/B.</span>
+                </div>
               </div>
             </details>
             <div class="row">
@@ -897,7 +930,7 @@
             <div class="metric"><span>Время запроса</span><strong id="metricTime">—</strong></div>
             <div class="metric"><span>Токены запроса</span><strong id="metricTokens">—</strong></div>
             <div class="metric"><span>Стоимость запроса</span><strong id="metricCost">—</strong></div>
-            <div class="metric"><span>Сжатие истории</span><strong id="metricSummary">—</strong></div>
+            <div class="metric"><span>Контекст</span><strong id="metricSummary">—</strong></div>
             <div class="metric"><span>Токены диалога</span><strong id="metricSession">—</strong></div>
           </div>
         </div>
@@ -940,7 +973,7 @@
     let chatSessionId = null;
     let forceNewSession = false;
     let pendingAttachments = []; // [{name, content}]
-    let summaryMarkers = []; // индексы видимых сообщений, после которых сработал summary
+    let branchState = { checkpoint: null, branches: [], activeId: null };
 
     function pricingCacheKey(provider, modelId) {
       return `ai_pricing:${provider}:${modelId}`;
@@ -1186,8 +1219,21 @@
       return `ai_chat_session:${$('agentMode').value}:${currentProvider()}:${selectedModel()}`;
     }
 
+    function branchCacheKey() {
+      return `ai_chat_branches:${$('agentMode').value}:${currentProvider()}:${selectedModel()}`;
+    }
+
     function selectedAgent() {
       return agents.find((agent) => agent.id === $('agentMode').value) || agents[0] || null;
+    }
+
+    function isBranchingMode() {
+      return $('memoryStrategy').value === 'branching';
+    }
+
+    function currentBranch() {
+      if (!isBranchingMode()) return null;
+      return branchState.branches.find((branch) => branch.id === branchState.activeId) || null;
     }
 
     function chatPayload() {
@@ -1199,9 +1245,9 @@
         system_prompt: textValue('systemPrompt'),
         prompt: $('prompt').value,
         attachments: pendingAttachments.length ? pendingAttachments.map(a => ({name: a.name, content: a.content})) : null,
-        session_id: chatSessionId,
-        new_session: forceNewSession,
-        messages: chatHistory,
+        session_id: currentBranch()?.sessionId || chatSessionId,
+        new_session: currentBranch() ? !currentBranch().sessionId : forceNewSession,
+        messages: currentBranch()?.messages || chatHistory,
         memory: memoryPayload(),
         pricing: pricingPayload(),
         billing: billingPayload(),
@@ -1244,10 +1290,7 @@
     function memoryPayload() {
       return {
         strategy: $('memoryStrategy').value,
-        recent_messages: numberValue('memoryRecentMessages'),
-        summarize_after_messages: numberValue('memorySummarizeAfterMessages'),
-        summary_chunk_messages: numberValue('memorySummaryChunkMessages'),
-        summarize_at_context_percent: numberValue('memorySummarizeAtContextPercent')
+        recent_messages: numberValue('memoryRecentMessages')
       };
     }
 
@@ -1373,6 +1416,7 @@
     function setDebug(debug) {
       $('providerRequest').textContent = prettyJson(debug?.provider_request);
       $('providerResponse').textContent = prettyJson(debug?.provider_response);
+      updateFactsPreview(debug);
       const statusCode = debug?.provider_response?.status;
       if (statusCode) {
         $('serverReqStatus').textContent = statusCode;
@@ -1380,6 +1424,14 @@
         $('serverRespStatus').textContent = statusCode;
         $('serverRespStatus').className = 'debug-status ok';
       }
+    }
+
+    function updateFactsPreview(debug) {
+      const messages = debug?.provider_request?.body?.messages || [];
+      const facts = messages.find((message) =>
+        message.role === 'system' && String(message.content || '').startsWith('Sticky facts')
+      );
+      $('factsPreview').textContent = facts?.content || 'Появятся после сообщений вида “цель: …”, “предпочтение: …” или явных ограничений.';
     }
 
     function setServerDebug(payload, responseText, httpStatus) {
@@ -1418,32 +1470,16 @@
         conversation.innerHTML = '<p class="conversation-empty">Ответ появится здесь.</p>';
         return;
       }
-      const markerSet = new Set(summaryMarkers);
       conversation.innerHTML = visibleMessages.map((message, index) => {
         const isUser = message.role === 'user';
         const role = isUser ? 'Вы' : selectedAgent()?.name || 'Агент';
         const side = isUser ? 'user' : 'assistant';
-        const divider = markerSet.has(index)
-          ? '<div class="summary-divider">🗜 Старая история сжата в краткую память (summary)</div>'
-          : '';
-        return `${divider}<article class="message ${side}">
+        return `<article class="message ${side}">
           <span class="message-role">${escapeHtml(role)}</span>
           <span class="message-content">${escapeHtml(message.content || '')}</span>
         </article>`;
       }).join('');
       conversation.scrollTop = conversation.scrollHeight;
-    }
-
-    // Помечает, что на этом ходу сработал summary, и перерисовывает диалог с
-    // разделителем перед текущим обменом (старое сжато в краткую память).
-    function noteSummary(summaryMetrics) {
-      if (!summaryMetrics) return;
-      const visibleCount = chatHistory.filter((message) => message.role !== 'system').length;
-      const idx = Math.max(0, visibleCount - 2);
-      if (!summaryMarkers.includes(idx)) {
-        summaryMarkers.push(idx);
-        renderChatHistory();
-      }
     }
 
     function renderConversationError(message) {
@@ -1459,6 +1495,99 @@
       $('systemPrompt').value = systemMessage?.content || '';
     }
 
+    function saveBranchState() {
+      localStorage.setItem(branchCacheKey(), JSON.stringify(branchState));
+    }
+
+    function restoreBranchState() {
+      try {
+        branchState = JSON.parse(localStorage.getItem(branchCacheKey())) || { checkpoint: null, branches: [], activeId: null };
+      } catch {
+        branchState = { checkpoint: null, branches: [], activeId: null };
+      }
+      renderBranchControls();
+    }
+
+    function syncActiveBranchFromChat() {
+      const branch = currentBranch();
+      if (!branch) return;
+      branch.messages = chatHistory;
+      branch.sessionId = chatSessionId;
+      saveBranchState();
+    }
+
+    function updateActiveBranchFromResponse(sessionId, messages) {
+      const branch = currentBranch();
+      if (!branch) return;
+      branch.sessionId = sessionId || branch.sessionId;
+      branch.messages = messages || branch.messages;
+      chatSessionId = branch.sessionId;
+      chatHistory = branch.messages;
+      saveBranchState();
+      renderBranchControls();
+    }
+
+    function createBranchCheckpoint() {
+      const checkpoint = chatHistory.slice();
+      branchState = {
+        checkpoint,
+        activeId: 'branch-a',
+        branches: [
+          { id: 'branch-a', name: 'Ветка A', sessionId: null, messages: checkpoint.slice() },
+          { id: 'branch-b', name: 'Ветка B', sessionId: null, messages: checkpoint.slice() },
+        ],
+      };
+      chatSessionId = null;
+      forceNewSession = true;
+      chatHistory = checkpoint.slice();
+      saveBranchState();
+      renderBranchControls();
+      renderChatHistory();
+      setStatus('Checkpoint создан: доступны ветки A и B');
+    }
+
+    function switchBranch(id) {
+      syncActiveBranchFromChat();
+      const branch = branchState.branches.find((item) => item.id === id);
+      if (!branch) return;
+      branchState.activeId = id;
+      chatSessionId = branch.sessionId;
+      forceNewSession = !branch.sessionId;
+      chatHistory = branch.messages.slice();
+      restoreSystemPromptFromHistory(chatHistory);
+      saveBranchState();
+      renderBranchControls();
+      renderChatHistory();
+      setStatus(`Активна ${branch.name}`);
+    }
+
+    function resetBranches() {
+      branchState = { checkpoint: null, branches: [], activeId: null };
+      saveBranchState();
+      renderBranchControls();
+      setStatus('Ветки сброшены');
+    }
+
+    function renderBranchControls() {
+      const showBranches = isBranchingMode();
+      $('branchToolbar').style.display = showBranches ? '' : 'none';
+      $('factsPreviewWrap').style.display = $('memoryStrategy').value === 'sticky-facts' ? '' : 'none';
+      const help = {
+        'sliding-window': 'Только последние N сообщений; старое отбрасывается.',
+        'sticky-facts': 'Facts + последние N сообщений. Facts обновляются из явных целей, ограничений, предпочтений и решений.',
+        'branching': 'Сделайте checkpoint, получите ветки A/B и продолжайте каждую независимо.',
+      }[$('memoryStrategy').value] || '';
+      $('memoryStrategyHelp').textContent = help;
+      $('branchA').classList.toggle('active', branchState.activeId === 'branch-a');
+      $('branchB').classList.toggle('active', branchState.activeId === 'branch-b');
+      $('branchA').disabled = !showBranches || !branchState.branches.length;
+      $('branchB').disabled = !showBranches || !branchState.branches.length;
+      const active = branchState.branches.find((branch) => branch.id === branchState.activeId);
+      $('branchStatus').textContent = active
+        ? `${active.name}: ${active.sessionId ? active.sessionId.slice(0, 8) : 'новая'}`
+        : 'Сделайте checkpoint, затем переключайтесь между A/B.';
+    }
+
     function updateAgentStatus() {
       $('sessionLabel').textContent = chatSessionId ? chatSessionId.slice(0, 8) : 'новая';
       const visibleMessages = chatHistory.filter((message) => message.role !== 'system').length;
@@ -1468,11 +1597,15 @@
 
     async function loadChatSession() {
       if (!selectedModel()) return;
+      restoreBranchState();
+      if (currentBranch()) {
+        switchBranch(currentBranch().id);
+        return;
+      }
       try {
         const data = await requestJson('/api/agent/session', sessionPayload());
         chatSessionId = data.session_id || null;
         forceNewSession = false;
-        summaryMarkers = [];
         chatHistory = data.messages || [];
         restoreSystemPromptFromHistory(chatHistory);
         setSessionMetrics(data.metrics);
@@ -1490,10 +1623,10 @@
 
     async function startNewChatSession() {
       if (!selectedModel()) return;
+      resetBranches();
       const data = await requestJson('/api/agent/session', sessionPayload(true));
       chatSessionId = data.session_id || null;
       forceNewSession = false;
-      summaryMarkers = [];
       chatHistory = data.messages || [];
       restoreSystemPromptFromHistory(chatHistory);
       setMetrics(null, null);
@@ -1502,7 +1635,7 @@
       renderChatHistory();
     }
 
-    function setMetrics(metrics, summaryMetrics = null) {
+    function setMetrics(metrics, contextMetrics = null) {
       if (!metrics) {
         $('metricTime').textContent = '—';
         $('metricTokens').textContent = '—';
@@ -1524,10 +1657,17 @@
       } else {
         $('metricCost').textContent = 'unavailable';
       }
-      $('metricSummary').innerHTML = summaryMetrics ? summaryLines(summaryMetrics) : 'не запускалось';
+      $('metricSummary').innerHTML = contextMetrics ? contextLines(contextMetrics) : strategyContextLabel();
     }
 
-    function summaryLines(metrics) {
+    function strategyContextLabel() {
+      const strategy = $('memoryStrategy').value;
+      if (strategy === 'sticky-facts') return 'facts обновлены локально';
+      if (strategy === 'branching') return currentBranch() ? `активна ${currentBranch().name}` : 'checkpoint не создан';
+      return `последние ${numberValue('memoryRecentMessages') ?? 0} сообщ.`;
+    }
+
+    function contextLines(metrics) {
       const parts = [];
       parts.push(`<span class="metric-lines"><span class="metric-line"><em>time</em><b>${metrics.elapsed_ms} ms</b></span></span>`);
       if (metrics.usage) {
@@ -1719,6 +1859,7 @@
       resetTokenOverrideForProvider();
       applyProviderDefaults();
       updateProviderDocLink();
+      renderBranchControls();
       await refreshTokenStatus();
       await loadChatSession();
       await loadModels().catch(() => {}); // автозагрузка; ошибка не критична
@@ -1837,13 +1978,13 @@
                 forceNewSession = false;
                 if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
                 chatHistory = data.messages || chatHistory;
+                updateActiveBranchFromResponse(chatSessionId, chatHistory);
                 restoreSystemPromptFromHistory(chatHistory);
                 renderChatHistory(); // финальный рендер с метаданными
-                setMetrics(data.metrics, data.summary_metrics);
+                setMetrics(data.metrics, data.context_metrics);
                 setSessionMetrics(data.session_metrics);
                 setDebug(data.debug);
-                noteSummary(data.summary_metrics);
-                setStatus(data.summary_metrics ? '🗜 Контекст сжат в summary · Готово' : 'Готово');
+                setStatus('Готово');
               } else if (eventType === 'error') {
                 throw new Error(eventData);
               }
@@ -1931,13 +2072,13 @@
         forceNewSession = false;
         if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
         chatHistory = data.messages || chatHistory;
+        updateActiveBranchFromResponse(chatSessionId, chatHistory);
         restoreSystemPromptFromHistory(chatHistory);
         renderChatHistory();
-        setMetrics(data.metrics, data.summary_metrics);
+        setMetrics(data.metrics, data.context_metrics);
         setSessionMetrics(data.session_metrics);
         setDebug(data.debug);
-        noteSummary(data.summary_metrics);
-        setStatus(data.summary_metrics ? '🗜 Контекст сжат в summary · Готово' : 'Готово');
+        setStatus('Готово');
         await refreshTokenStatus();
       } catch (error) {
         const aborted = error.name === 'AbortError' || error === 'stream timeout';
@@ -2073,9 +2214,20 @@
     });
     $('token').addEventListener('input', markTokenOverrideProvider);
     $('saveToken').addEventListener('click', saveTokenOverride);
-    $('agentMode').addEventListener('change', () => { chatSessionId = null; chatHistory = []; summaryMarkers = []; renderChatHistory(); loadChatSession(); });
+    $('agentMode').addEventListener('change', () => { chatSessionId = null; chatHistory = []; branchState = { checkpoint: null, branches: [], activeId: null }; renderChatHistory(); loadChatSession(); });
     $('model').addEventListener('change', () => { resolveSelectedModelPricing(); updateContextBadge(); persistSelectedModel(); loadChatSession(); });
     $('customModel').addEventListener('input', () => { resolveSelectedModelPricing(); updateContextBadge(); persistSelectedModel(); loadChatSession(); });
+    $('memoryStrategy').addEventListener('change', () => {
+      renderBranchControls();
+      if ($('memoryStrategy').value === 'branching') restoreBranchState();
+      else syncActiveBranchFromChat();
+      setMetrics(null, null);
+    });
+    $('memoryRecentMessages').addEventListener('input', () => setMetrics(null, null));
+    $('checkpointBranches').addEventListener('click', createBranchCheckpoint);
+    $('resetBranches').addEventListener('click', resetBranches);
+    $('branchA').addEventListener('click', () => switchBranch('branch-a'));
+    $('branchB').addEventListener('click', () => switchBranch('branch-b'));
     $('baseUrl').addEventListener('input', refreshTokenStatus);
     ['priceInput', 'priceOutput', 'priceCacheHitInput', 'priceCacheMissInput', 'priceCurrency'].forEach((id) => {
       $(id).addEventListener('input', saveCurrentPricingOverride);
