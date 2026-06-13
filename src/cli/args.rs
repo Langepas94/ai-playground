@@ -473,6 +473,12 @@ pub struct MemoryArgs {
         help = "How many latest non-system messages are kept in the context window"
     )]
     pub memory_recent_messages: usize,
+    #[arg(
+        long,
+        default_value = chat::memory::DEFAULT_FACTS_PROMPT,
+        help = "System prompt that introduces Sticky Facts in provider requests"
+    )]
+    pub memory_facts_prompt: String,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
@@ -583,6 +589,7 @@ impl From<&MemoryArgs> for chat::MemoryConfig {
                 CliMemoryStrategy::Branching => chat::memory::MemoryStrategy::Branching,
             },
             recent_messages: args.memory_recent_messages,
+            facts_prompt: args.memory_facts_prompt.clone(),
         }
     }
 }
@@ -606,5 +613,25 @@ pub fn parse_stop_mode(value: &str) -> Option<chat::ConversationStopMode> {
         "instruction" => Some(chat::ConversationStopMode::Instruction),
         "combined" => Some(chat::ConversationStopMode::Combined),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_args_convert_custom_facts_prompt() {
+        let args = MemoryArgs {
+            memory_strategy: CliMemoryStrategy::StickyFacts,
+            memory_recent_messages: 5,
+            memory_facts_prompt: "Custom facts prompt".to_string(),
+        };
+
+        let config = chat::MemoryConfig::from(&args);
+
+        assert_eq!(config.strategy, chat::memory::MemoryStrategy::StickyFacts);
+        assert_eq!(config.recent_messages, 5);
+        assert_eq!(config.facts_prompt, "Custom facts prompt");
     }
 }

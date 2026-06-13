@@ -61,7 +61,8 @@ raw-history поведение.
 Основные параметры:
 
 - `strategy` - `sliding-window`, `sticky-facts` или `branching`;
-- `recent_messages` - размер окна N для обычных сообщений.
+- `recent_messages` - размер окна N для обычных сообщений;
+- `facts_prompt` - system prompt, который вводит блок facts для provider request.
 
 UI должен показывать минимум настроек: strategy и N. Summary controls для этой
 модели не нужны.
@@ -96,7 +97,7 @@ system prompt
 
 ```text
 system prompt
-+ facts system block
++ facts system block with configurable prompt
 + last N non-system messages
 + new user prompt
 ```
@@ -135,7 +136,8 @@ UI сохраняет checkpoint текущей истории, создает �
 - текущий user prompt;
 - control/pricing/billing параметры.
 
-Для новых context strategies нет отдельного summary-запроса.
+Для новых context strategies нет отдельного summary-запроса. Настраиваемый
+`facts_prompt` влияет только на system block перед facts в основном запросе.
 
 ## CLI и Web
 

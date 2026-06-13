@@ -43,7 +43,7 @@ Sliding Window
 
 Sticky Facts
   -> обновляет key-value facts после каждого user message
-  -> отправляет facts system block + последние N сообщений
+  -> отправляет настраиваемый facts system block + последние N сообщений
 
 Branching
   -> работает с независимой веткой истории
@@ -66,7 +66,7 @@ Branching
 - Ответ не учитывает нужный контекст: `agent.rs` и `memory.rs`.
 - `/profile`, `/model`, `/goal` ведут себя странно: `session.rs`.
 - Сессия не восстанавливается: `store.rs`.
-- Facts не обновились или неверно ушли в запрос: `AgentMemory::update_facts_from_user_message()` и `AgentMemory::build_context()`.
+- Facts не обновились или неверно ушли в запрос: `AgentMemory::update_facts_from_user_message()`, `facts_prompt` и `AgentMemory::build_context()`.
 - Branching в UI смешал ветки: `ui.html` branch state и `ChatWebRequest::initial_history()`.
 - Goal завершается рано/поздно: `goal.rs`.
 - Метрики не печатаются или выглядят неверно: `format_request_metrics` в `mod.rs`.
