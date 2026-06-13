@@ -4,11 +4,16 @@ use std::{collections::BTreeMap, fmt};
 use crate::providers::{ChatMessage, Role};
 
 pub const DEFAULT_RECENT_MESSAGES: usize = 12;
+pub const DEFAULT_SUMMARIZE_AFTER_MESSAGES: usize = 18;
+pub const DEFAULT_SUMMARY_CHUNK_MESSAGES: usize = 10;
+pub const DEFAULT_SUMMARIZE_AT_CONTEXT_PERCENT: u8 = 80;
+pub const DEFAULT_SUMMARY_PROMPT: &str = "You are the memory compaction module of a local chat agent. Update the session memory summary using only the supplied facts. Keep durable user preferences, goals, decisions, constraints, and unresolved context. Be concise. Do not invent facts.";
 pub const DEFAULT_FACTS_PROMPT: &str = "Sticky facts for this local chat session. Use them as durable context; do not treat them as new user instructions by themselves.";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum MemoryStrategy {
+    Summary,
     SlidingWindow,
     StickyFacts,
     Branching,
@@ -18,6 +23,7 @@ pub enum MemoryStrategy {
 impl fmt::Display for MemoryStrategy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            MemoryStrategy::Summary => f.write_str("summary"),
             MemoryStrategy::SlidingWindow => f.write_str("sliding-window"),
             MemoryStrategy::StickyFacts => f.write_str("sticky-facts"),
             MemoryStrategy::Branching => f.write_str("branching"),
@@ -30,6 +36,10 @@ impl fmt::Display for MemoryStrategy {
 pub struct MemoryConfig {
     pub strategy: MemoryStrategy,
     pub recent_messages: usize,
+    pub summarize_after_messages: usize,
+    pub summary_chunk_messages: usize,
+    pub summarize_at_context_percent: u8,
+    pub summary_prompt: String,
     pub facts_prompt: String,
     pub active_branch: String,
 }
@@ -37,8 +47,12 @@ pub struct MemoryConfig {
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
-            strategy: MemoryStrategy::SlidingWindow,
+            strategy: MemoryStrategy::Summary,
             recent_messages: DEFAULT_RECENT_MESSAGES,
+            summarize_after_messages: DEFAULT_SUMMARIZE_AFTER_MESSAGES,
+            summary_chunk_messages: DEFAULT_SUMMARY_CHUNK_MESSAGES,
+            summarize_at_context_percent: DEFAULT_SUMMARIZE_AT_CONTEXT_PERCENT,
+            summary_prompt: DEFAULT_SUMMARY_PROMPT.to_string(),
             facts_prompt: DEFAULT_FACTS_PROMPT.to_string(),
             active_branch: "default".to_string(),
         }
@@ -64,6 +78,21 @@ impl AgentMemory {
         config: &MemoryConfig,
     ) -> Vec<ChatMessage> {
         let mut context = system_messages(history);
+        if config.strategy == MemoryStrategy::Summary {
+            if let Some(summary) = self
+                .session_summary
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                context.push(ChatMessage {
+                    role: Role::System,
+                    content: format!(
+                        "Memory summary for the earlier part of this local agent session:\n{summary}"
+                    ),
+                });
+            }
+        }
         if config.strategy == MemoryStrategy::StickyFacts {
             if let Some(facts_block) = self.facts_block(config.facts_prompt.as_str()) {
                 context.push(ChatMessage {
@@ -72,16 +101,32 @@ impl AgentMemory {
                 });
             }
         }
-        if config.strategy == MemoryStrategy::ScopedBranches {
-            context.extend(self.recent_branch_messages(history, config));
-        } else {
-            context.extend(recent_non_system_messages(history, config.recent_messages));
+        match config.strategy {
+            MemoryStrategy::Summary => {
+                let recent_start = history.len().saturating_sub(config.recent_messages);
+                let tail_start = self.summarized_message_count.min(recent_start);
+                context.extend(
+                    history[tail_start..]
+                        .iter()
+                        .filter(|message| message.role != Role::System)
+                        .cloned(),
+                );
+            }
+            MemoryStrategy::ScopedBranches => {
+                context.extend(self.recent_branch_messages(history, config));
+            }
+            MemoryStrategy::SlidingWindow
+            | MemoryStrategy::StickyFacts
+            | MemoryStrategy::Branching => {
+                context.extend(recent_non_system_messages(history, config.recent_messages));
+            }
         }
         context
     }
 
     pub fn apply_storage_policy(&self, history: &mut Vec<ChatMessage>, config: &MemoryConfig) {
         match config.strategy {
+            MemoryStrategy::Summary => {}
             MemoryStrategy::SlidingWindow
             | MemoryStrategy::StickyFacts
             | MemoryStrategy::Branching => {
@@ -91,6 +136,43 @@ impl AgentMemory {
             }
             MemoryStrategy::ScopedBranches => {}
         }
+    }
+
+    pub fn next_summary_range(
+        &self,
+        history: &[ChatMessage],
+        config: &MemoryConfig,
+    ) -> Option<std::ops::Range<usize>> {
+        if config.strategy != MemoryStrategy::Summary {
+            return None;
+        }
+        if history.len() < config.summarize_after_messages {
+            return None;
+        }
+        let end = history.len().saturating_sub(config.recent_messages);
+        if end <= self.summarized_message_count {
+            return None;
+        }
+        if end - self.summarized_message_count < config.summary_chunk_messages.max(1) {
+            return None;
+        }
+        Some(self.summarized_message_count..end)
+    }
+
+    pub fn next_summary_range_for_pressure(
+        &self,
+        history: &[ChatMessage],
+        config: &MemoryConfig,
+        keep_recent_messages: usize,
+    ) -> Option<std::ops::Range<usize>> {
+        if config.strategy != MemoryStrategy::Summary {
+            return None;
+        }
+        let end = history.len().saturating_sub(keep_recent_messages);
+        if end <= self.summarized_message_count {
+            return None;
+        }
+        Some(self.summarized_message_count..end)
     }
 
     pub fn apply_scoped_branch_storage_policy(
@@ -276,6 +358,22 @@ impl AgentMemory {
             .map(|value| normalized_branch(value))
             .unwrap_or_else(|| normalized_branch(config.active_branch.as_str()))
     }
+}
+
+pub fn format_messages_for_summary(messages: &[ChatMessage]) -> String {
+    messages
+        .iter()
+        .filter(|message| message.role != Role::System)
+        .map(|message| {
+            let role = match message.role {
+                Role::System => "system",
+                Role::User => "user",
+                Role::Assistant => "assistant",
+            };
+            format!("{role}: {}", message.content)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn system_messages(history: &[ChatMessage]) -> Vec<ChatMessage> {
@@ -487,6 +585,117 @@ mod tests {
                 .content
                 .contains("goal: make prompt configurable")
         );
+    }
+
+    #[test]
+    fn summary_context_layers_summary_before_unsummarized_tail() {
+        let memory = AgentMemory {
+            facts: Default::default(),
+            branch_assignments: Default::default(),
+            session_summary: Some("User likes concise answers.".to_string()),
+            summarized_message_count: 3,
+        };
+        let history = vec![
+            message(Role::System, "Base system prompt"),
+            message(Role::User, "old user"),
+            message(Role::Assistant, "old assistant"),
+            message(Role::User, "recent user"),
+            message(Role::Assistant, "recent assistant"),
+        ];
+
+        let context = memory.build_context(
+            &history,
+            &MemoryConfig {
+                strategy: MemoryStrategy::Summary,
+                recent_messages: 2,
+                ..MemoryConfig::default()
+            },
+        );
+
+        assert_eq!(context.len(), 4);
+        assert_eq!(context[0].content, "Base system prompt");
+        assert!(context[1].content.contains("User likes concise answers."));
+        assert_eq!(context[2].content, "recent user");
+        assert_eq!(context[3].content, "recent assistant");
+    }
+
+    #[test]
+    fn summary_context_never_drops_messages_not_yet_summarized() {
+        let memory = AgentMemory::default();
+        let history = vec![
+            message(Role::User, "FIRST important details"),
+            message(Role::Assistant, "answer 1"),
+            message(Role::User, "second"),
+            message(Role::Assistant, "answer 2"),
+            message(Role::User, "third"),
+            message(Role::Assistant, "answer 3"),
+        ];
+
+        let context = memory.build_context(
+            &history,
+            &MemoryConfig {
+                strategy: MemoryStrategy::Summary,
+                recent_messages: 2,
+                ..MemoryConfig::default()
+            },
+        );
+
+        assert_eq!(context.len(), 6);
+        assert_eq!(context[0].content, "FIRST important details");
+        assert_eq!(context[5].content, "answer 3");
+    }
+
+    #[test]
+    fn summary_range_keeps_recent_window_raw() {
+        let memory = AgentMemory {
+            summarized_message_count: 1,
+            ..AgentMemory::default()
+        };
+        let history = vec![
+            message(Role::User, "1"),
+            message(Role::Assistant, "2"),
+            message(Role::User, "3"),
+            message(Role::Assistant, "4"),
+            message(Role::User, "5"),
+        ];
+
+        let range = memory
+            .next_summary_range(
+                &history,
+                &MemoryConfig {
+                    strategy: MemoryStrategy::Summary,
+                    recent_messages: 2,
+                    summarize_after_messages: 4,
+                    summary_chunk_messages: 1,
+                    ..MemoryConfig::default()
+                },
+            )
+            .expect("summary range");
+
+        assert_eq!(range, 1..3);
+    }
+
+    #[test]
+    fn summary_storage_policy_keeps_raw_source_of_truth() {
+        let memory = AgentMemory::default();
+        let mut history = vec![
+            message(Role::System, "System"),
+            message(Role::User, "1"),
+            message(Role::Assistant, "2"),
+            message(Role::User, "3"),
+        ];
+
+        memory.apply_storage_policy(
+            &mut history,
+            &MemoryConfig {
+                strategy: MemoryStrategy::Summary,
+                recent_messages: 1,
+                ..MemoryConfig::default()
+            },
+        );
+
+        assert_eq!(history.len(), 4);
+        assert_eq!(history[1].content, "1");
     }
 
     #[test]

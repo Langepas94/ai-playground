@@ -6,7 +6,7 @@
 chat/
   AGENT_RUNTIME.md — подробная документация локального agent runtime и context strategies
   agent.rs    — ChatAgent: локальный агент, история, context strategy, сборка ChatRequest
-  memory.rs   — AgentMemory, MemoryConfig, sliding window + sticky facts context
+  memory.rs   — AgentMemory, MemoryConfig, summary/sliding/facts/branching context
   mod.rs       — публичный API: ask_once, compare_*, compare_goal_stop, format_request_metrics
   goal.rs      — ConversationGoal, GoalState, ConversationStopMode, GoalRun/GoalComparison
   session.rs   — interactive_chat (REPL), describe_control/goal, terminal I/O
@@ -68,13 +68,13 @@ Goal — механизм сбора структурированных данн
 - хранит полную историю локально;
 - хранит `AgentMemory` отдельно от истории;
 - отправляет провайдеру layered context, а не всю историю подряд;
-- после ответа применяет выбранную context strategy и обновляет sticky facts.
+- после ответа применяет выбранную context strategy, обновляет sticky facts или summary.
 
 Контекст provider API собирается так:
 
 ```text
 system prompt
-+ facts block / selected history window
++ summary / facts block / selected history window
 + new user prompt
 ```
 
@@ -93,6 +93,6 @@ system prompt
 - Новый чатовый код должен идти через `ChatAgent`, а не собирать `ChatRequest` напрямую
 - История диалога должна сохраняться локально через `LocalSessionStore`
 - Context state должен сохраняться как sidecar через `LocalSessionStore`
-- Context strategy явная: sliding window, sticky facts или branching; summary не основной путь
+- Context strategy явная: summary, sliding window, sticky facts или branching
 - Провайдеру отправляется только контекст текущего запроса, собранный agent runtime
 - Provider API не знает про `agent_id`; агент — локальная сущность проекта

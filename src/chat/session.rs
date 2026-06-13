@@ -301,7 +301,11 @@ pub async fn interactive_chat(
                     agent.set_memory_config(memory_config.clone());
                     println!("Memory strategy: {strategy}");
                 }
-                None => println!("Use /memory strategy sliding-window|sticky-facts|branching."),
+                None => {
+                    println!(
+                        "Use /memory strategy summary|sliding-window|sticky-facts|branching|scoped-branches."
+                    );
+                }
             }
             continue;
         }
@@ -313,6 +317,50 @@ pub async fn interactive_chat(
                     println!("Memory recent messages: {v}");
                 }
                 Err(_) => println!("Use /memory recent <number>."),
+            }
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("/memory after ") {
+            match value.parse::<usize>() {
+                Ok(v) => {
+                    memory_config.summarize_after_messages = v;
+                    agent.set_memory_config(memory_config.clone());
+                    println!("Memory summarize after messages: {v}");
+                }
+                Err(_) => println!("Use /memory after <number>."),
+            }
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("/memory chunk ") {
+            match value.parse::<usize>() {
+                Ok(v) => {
+                    memory_config.summary_chunk_messages = v;
+                    agent.set_memory_config(memory_config.clone());
+                    println!("Memory summary chunk messages: {v}");
+                }
+                Err(_) => println!("Use /memory chunk <number>."),
+            }
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("/memory percent ") {
+            match value.parse::<u8>() {
+                Ok(v) => {
+                    memory_config.summarize_at_context_percent = v;
+                    agent.set_memory_config(memory_config.clone());
+                    println!("Memory summarize at context percent: {v}");
+                }
+                Err(_) => println!("Use /memory percent <0-100>."),
+            }
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("/memory summary-prompt ") {
+            let value = value.trim();
+            if value.is_empty() {
+                println!("Use /memory summary-prompt <prompt>.");
+            } else {
+                memory_config.summary_prompt = value.to_string();
+                agent.set_memory_config(memory_config.clone());
+                println!("Memory summary prompt updated.");
             }
             continue;
         }
@@ -441,6 +489,13 @@ pub fn describe_goal(goal: &ConversationGoal, state: &GoalState) -> String {
 }
 
 pub fn describe_memory(config: &MemoryConfig, memory: &super::AgentMemory) -> String {
+    let summary = memory
+        .session_summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|_| format!("summary=present@{}", memory.summarized_message_count))
+        .unwrap_or_else(|| "summary=none".to_string());
     let facts = memory
         .facts
         .iter()
@@ -448,9 +503,14 @@ pub fn describe_memory(config: &MemoryConfig, memory: &super::AgentMemory) -> St
         .collect::<Vec<_>>()
         .join("; ");
     format!(
-        "Memory: strategy={}, recent_messages={}, active_branch={}, facts_prompt={}, facts={}",
+        "Memory: strategy={}, recent_messages={}, summarize_after_messages={}, summary_chunk_messages={}, summarize_at_context_percent={}, summary_prompt={}, {}, active_branch={}, facts_prompt={}, facts={}",
         config.strategy,
         config.recent_messages,
+        config.summarize_after_messages,
+        config.summary_chunk_messages,
+        config.summarize_at_context_percent,
+        config.summary_prompt,
+        summary,
         config.active_branch,
         config.facts_prompt,
         if facts.is_empty() { "none" } else { &facts }
@@ -459,6 +519,7 @@ pub fn describe_memory(config: &MemoryConfig, memory: &super::AgentMemory) -> St
 
 pub fn parse_memory_strategy(value: &str) -> Option<MemoryStrategy> {
     match value {
+        "summary" => Some(MemoryStrategy::Summary),
         "sliding-window" | "sliding" => Some(MemoryStrategy::SlidingWindow),
         "sticky-facts" | "facts" => Some(MemoryStrategy::StickyFacts),
         "branching" | "branches" => Some(MemoryStrategy::Branching),
@@ -573,11 +634,14 @@ mod tests {
             parse_memory_strategy("scoped"),
             Some(MemoryStrategy::ScopedBranches)
         );
-        assert_eq!(parse_memory_strategy("summary"), None);
+        assert_eq!(
+            parse_memory_strategy("summary"),
+            Some(MemoryStrategy::Summary)
+        );
     }
 
     #[test]
-    fn describe_memory_reports_facts_not_legacy_summary() {
+    fn describe_memory_reports_summary_prompt_and_facts() {
         let mut facts = BTreeMap::new();
         facts.insert("goal".to_string(), "test context strategies".to_string());
         let memory = super::super::AgentMemory {
@@ -591,18 +655,20 @@ mod tests {
             &MemoryConfig {
                 strategy: MemoryStrategy::StickyFacts,
                 recent_messages: 3,
+                summary_prompt: "Custom summary prompt".to_string(),
                 facts_prompt: "Custom facts prompt".to_string(),
                 active_branch: "alpha".to_string(),
+                ..MemoryConfig::default()
             },
             &memory,
         );
 
         assert!(description.contains("strategy=sticky-facts"));
         assert!(description.contains("recent_messages=3"));
+        assert!(description.contains("summary_prompt=Custom summary prompt"));
+        assert!(description.contains("summary=present@42"));
         assert!(description.contains("active_branch=alpha"));
         assert!(description.contains("facts_prompt=Custom facts prompt"));
         assert!(description.contains("goal=test context strategies"));
-        assert!(!description.contains("legacy summary"));
-        assert!(!description.contains("summarized_message_count"));
     }
 }

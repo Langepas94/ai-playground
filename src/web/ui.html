@@ -807,18 +807,43 @@
                 <label>
                   <span class="field-title">Стратегия</span>
                   <select id="memoryStrategy">
+                    <option value="summary">Summary</option>
                     <option value="sliding-window">Sliding Window</option>
                     <option value="sticky-facts">Sticky Facts</option>
                     <option value="branching">Branching</option>
                     <option value="scoped-branches">Scoped Branches</option>
                   </select>
-                  <span id="memoryStrategyHelp" class="field-help">Только последние N сообщений; старое отбрасывается.</span>
+                  <span id="memoryStrategyHelp" class="field-help">Summary + последние N raw сообщений. Старое сжимается отдельным запросом.</span>
                 </label>
                 <label>
-                  <span id="memoryRecentTitle" class="field-title">Хранить последние N сообщений</span>
+                  <span id="memoryRecentTitle" class="field-title">Raw сообщений рядом с summary</span>
                   <input id="memoryRecentMessages" type="number" min="0" step="1" value="12">
-                  <span id="memoryRecentHelp" class="field-help">System prompt не считается. Старые обычные сообщения отбрасываются.</span>
+                  <span id="memoryRecentHelp" class="field-help">Summary покрывает старое, N оставляет свежий диалог без сжатия.</span>
                 </label>
+                <div id="summarySettingsWrap">
+                  <div class="row">
+                    <label>
+                      <span class="field-title">Summary после сообщений</span>
+                      <input id="memorySummarizeAfterMessages" type="number" min="1" step="1" value="18">
+                      <span class="field-help">Когда history достаточно длинная, агент начинает сжимать старые сообщения.</span>
+                    </label>
+                    <label>
+                      <span class="field-title">Размер summary chunk</span>
+                      <input id="memorySummaryChunkMessages" type="number" min="1" step="1" value="10">
+                      <span class="field-help">Минимальный новый кусок истории для очередного сжатия.</span>
+                    </label>
+                  </div>
+                  <label>
+                    <span class="field-title">Порог контекста, %</span>
+                    <input id="memorySummarizeAtContextPercent" type="number" min="1" max="100" step="1" value="80">
+                    <span class="field-help">При приближении к context window summary запускается до основного ответа.</span>
+                  </label>
+                  <label>
+                    <span class="field-title">Summary prompt</span>
+                    <textarea id="memorySummaryPrompt">You are the memory compaction module of a local chat agent. Update the session memory summary using only the supplied facts. Keep durable user preferences, goals, decisions, constraints, and unresolved context. Be concise. Do not invent facts.</textarea>
+                    <span class="field-help">Этот prompt используется только для отдельного запроса сжатия истории.</span>
+                  </label>
+                </div>
                 <div id="factsPreviewWrap" style="display:none">
                   <label>
                     <span class="field-title">Facts prompt</span>
@@ -1302,6 +1327,10 @@
       return {
         strategy: $('memoryStrategy').value,
         recent_messages: numberValue('memoryRecentMessages'),
+        summarize_after_messages: numberValue('memorySummarizeAfterMessages'),
+        summary_chunk_messages: numberValue('memorySummaryChunkMessages'),
+        summarize_at_context_percent: numberValue('memorySummarizeAtContextPercent'),
+        summary_prompt: textValue('memorySummaryPrompt'),
         facts_prompt: textValue('memoryFactsPrompt'),
         active_branch: textValue('memoryActiveBranch') || 'default'
       };
@@ -1584,14 +1613,21 @@
     function renderBranchControls() {
       const showBranches = isBranchingMode();
       $('branchToolbar').style.display = showBranches ? '' : 'none';
-      $('factsPreviewWrap').style.display = $('memoryStrategy').value === 'sticky-facts' ? '' : 'none';
+      const strategy = $('memoryStrategy').value;
+      $('summarySettingsWrap').style.display = strategy === 'summary' ? '' : 'none';
+      $('factsPreviewWrap').style.display = strategy === 'sticky-facts' ? '' : 'none';
       const help = {
+        'summary': 'Summary + последние N raw сообщений. Старое сжимается отдельным provider-запросом.',
         'sliding-window': 'Только последние N сообщений; старое отбрасывается.',
         'sticky-facts': 'Facts + последние N сообщений. Facts обновляются из явных целей, ограничений, предпочтений и решений.',
         'branching': 'Сделайте checkpoint, получите ветки A/B и продолжайте каждую независимо.',
         'scoped-branches': 'Одна session и одно окно: provider видит только active branch.',
-      }[$('memoryStrategy').value] || '';
+      }[strategy] || '';
       const recentCopy = {
+        'summary': {
+          title: 'Raw сообщений рядом с summary',
+          help: 'Summary покрывает старое, N оставляет свежий диалог без сжатия.',
+        },
         'sliding-window': {
           title: 'Хранить последние N сообщений',
           help: 'System prompt не считается. Старые обычные сообщения отбрасываются.',
@@ -1608,11 +1644,11 @@
           title: 'Сообщения active branch',
           help: 'Одна session хранит все ветки; provider получает только N сообщений active branch.',
         },
-      }[$('memoryStrategy').value] || {};
+      }[strategy] || {};
       $('memoryStrategyHelp').textContent = help;
       $('memoryRecentTitle').textContent = recentCopy.title || 'Окно сообщений N';
       $('memoryRecentHelp').textContent = recentCopy.help || 'System prompt не считается.';
-      $('scopedBranchWrap').style.display = $('memoryStrategy').value === 'scoped-branches' ? '' : 'none';
+      $('scopedBranchWrap').style.display = strategy === 'scoped-branches' ? '' : 'none';
       $('branchA').classList.toggle('active', branchState.activeId === 'branch-a');
       $('branchB').classList.toggle('active', branchState.activeId === 'branch-b');
       $('branchA').disabled = !showBranches || !branchState.branches.length;
@@ -1698,6 +1734,7 @@
     function strategyContextLabel() {
       const strategy = $('memoryStrategy').value;
       if (strategy === 'sticky-facts') return 'facts обновлены локально';
+      if (strategy === 'summary') return 'summary не запускался';
       if (strategy === 'branching') return currentBranch() ? `активна ${currentBranch().name}` : 'checkpoint не создан';
       if (strategy === 'scoped-branches') return `branch: ${textValue('memoryActiveBranch') || 'default'}`;
       return `последние ${numberValue('memoryRecentMessages') ?? 0} сообщ.`;
