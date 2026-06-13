@@ -271,8 +271,19 @@ impl ChatAgent {
     }
 
     fn ingest_user_prompt(&mut self, prompt: &str) {
-        if self.memory_config.strategy == MemoryStrategy::StickyFacts {
-            self.memory.update_facts_from_user_message(prompt);
+        match self.memory_config.strategy {
+            MemoryStrategy::StickyFacts => {
+                self.memory.update_facts_from_user_message(prompt);
+            }
+            MemoryStrategy::ScopedBranches if self.memory_config.scoped_auto_route => {
+                let branch = self.memory.select_scoped_topic(
+                    prompt,
+                    &self.history,
+                    &self.memory_config.active_branch,
+                );
+                self.memory_config.active_branch = branch;
+            }
+            _ => {}
         }
     }
 
@@ -1047,6 +1058,7 @@ mod tests {
             strategy: MemoryStrategy::ScopedBranches,
             recent_messages: 8,
             active_branch: "alpha".to_string(),
+            scoped_auto_route: false,
             ..MemoryConfig::default()
         });
         agent
@@ -1106,6 +1118,124 @@ mod tests {
                 .get(&2)
                 .map(String::as_str),
             Some("beta")
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_branches_auto_route_back_to_existing_topic() {
+        let client = FakeClient {
+            replies: std::sync::Mutex::new(vec!["answer".to_string()]),
+            metrics: std::sync::Mutex::new(Vec::new()),
+            seen_messages: std::sync::Mutex::new(Vec::new()),
+        };
+        let history = vec![
+            ChatMessage {
+                role: Role::User,
+                content: "Rust async borrow checker problem".to_string(),
+            },
+            ChatMessage {
+                role: Role::Assistant,
+                content: "Use ownership boundaries.".to_string(),
+            },
+            ChatMessage {
+                role: Role::User,
+                content: "Vacation budget and hotel plan".to_string(),
+            },
+            ChatMessage {
+                role: Role::Assistant,
+                content: "Track flights and hotels.".to_string(),
+            },
+        ];
+        let mut memory = AgentMemory::default();
+        memory
+            .branch_assignments
+            .insert(0, "rust async".to_string());
+        memory
+            .branch_assignments
+            .insert(1, "rust async".to_string());
+        memory
+            .branch_assignments
+            .insert(2, "vacation budget".to_string());
+        memory
+            .branch_assignments
+            .insert(3, "vacation budget".to_string());
+        let mut agent = ChatAgent::new(
+            test_profile(),
+            "secret".to_string(),
+            history,
+            memory,
+            ResponseControl::uncontrolled(),
+            None,
+            None,
+        );
+        agent.set_memory_config(MemoryConfig {
+            strategy: MemoryStrategy::ScopedBranches,
+            recent_messages: 8,
+            active_branch: "vacation budget".to_string(),
+            scoped_auto_route: true,
+            ..MemoryConfig::default()
+        });
+
+        agent
+            .respond(&client, "Back to Rust async ownership".to_string())
+            .await
+            .expect("response");
+
+        assert_eq!(agent.memory_config().active_branch, "rust async");
+        let seen = client.seen_messages.lock().expect("seen messages");
+        assert!(
+            seen[0]
+                .iter()
+                .any(|message| message.content.contains("Rust async"))
+        );
+        assert!(
+            seen[0]
+                .iter()
+                .all(|message| !message.content.contains("Vacation budget"))
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_branches_allow_manual_topic_when_auto_route_is_off() {
+        let client = FakeClient {
+            replies: std::sync::Mutex::new(vec!["answer".to_string()]),
+            metrics: std::sync::Mutex::new(Vec::new()),
+            seen_messages: std::sync::Mutex::new(Vec::new()),
+        };
+        let history = vec![ChatMessage {
+            role: Role::User,
+            content: "Rust async borrow checker problem".to_string(),
+        }];
+        let mut agent = ChatAgent::new(
+            test_profile(),
+            "secret".to_string(),
+            history,
+            AgentMemory::default(),
+            ResponseControl::uncontrolled(),
+            None,
+            None,
+        );
+        agent.set_memory_config(MemoryConfig {
+            strategy: MemoryStrategy::ScopedBranches,
+            recent_messages: 8,
+            active_branch: "manual finance".to_string(),
+            scoped_auto_route: false,
+            ..MemoryConfig::default()
+        });
+
+        agent
+            .respond(&client, "Rust async ownership followup".to_string())
+            .await
+            .expect("response");
+
+        assert_eq!(agent.memory_config().active_branch, "manual finance");
+        assert_eq!(
+            agent
+                .memory()
+                .branch_assignments
+                .get(&1)
+                .map(String::as_str),
+            Some("manual finance")
         );
     }
 

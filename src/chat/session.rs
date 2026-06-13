@@ -381,8 +381,25 @@ pub async fn interactive_chat(
                 println!("Use /memory branch <branch-name>.");
             } else {
                 memory_config.active_branch = value.to_string();
+                memory_config.scoped_auto_route = false;
                 agent.set_memory_config(memory_config.clone());
-                println!("Memory active branch: {value}");
+                println!("Memory manual branch: {value}");
+            }
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("/memory scoped-auto ") {
+            match value {
+                "on" | "true" | "1" => {
+                    memory_config.scoped_auto_route = true;
+                    agent.set_memory_config(memory_config.clone());
+                    println!("Scoped topic auto-routing: on");
+                }
+                "off" | "false" | "0" => {
+                    memory_config.scoped_auto_route = false;
+                    agent.set_memory_config(memory_config.clone());
+                    println!("Scoped topic auto-routing: off");
+                }
+                _ => println!("Use /memory scoped-auto on|off."),
             }
             continue;
         }
@@ -503,7 +520,7 @@ pub fn describe_memory(config: &MemoryConfig, memory: &super::AgentMemory) -> St
         .collect::<Vec<_>>()
         .join("; ");
     format!(
-        "Memory: strategy={}, recent_messages={}, summarize_after_messages={}, summary_chunk_messages={}, summarize_at_context_percent={}, summary_prompt={}, {}, active_branch={}, facts_prompt={}, facts={}",
+        "Memory: strategy={}, recent_messages={}, summarize_after_messages={}, summary_chunk_messages={}, summarize_at_context_percent={}, summary_prompt={}, {}, active_branch={}, scoped_auto_route={}, facts_prompt={}, facts={}",
         config.strategy,
         config.recent_messages,
         config.summarize_after_messages,
@@ -512,6 +529,7 @@ pub fn describe_memory(config: &MemoryConfig, memory: &super::AgentMemory) -> St
         config.summary_prompt,
         summary,
         config.active_branch,
+        config.scoped_auto_route,
         config.facts_prompt,
         if facts.is_empty() { "none" } else { &facts }
     )
@@ -668,6 +686,7 @@ mod tests {
         assert!(description.contains("summary_prompt=Custom summary prompt"));
         assert!(description.contains("summary=present@42"));
         assert!(description.contains("active_branch=alpha"));
+        assert!(description.contains("scoped_auto_route=true"));
         assert!(description.contains("facts_prompt=Custom facts prompt"));
         assert!(description.contains("goal=test context strategies"));
     }

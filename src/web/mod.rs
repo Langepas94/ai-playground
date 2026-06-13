@@ -282,6 +282,8 @@ async fn chat(
         .save_session(&session_key, &session.id, agent.history())?;
     state.sessions.save_metrics(&session.id, &session_metrics)?;
     state.sessions.save_memory(&session.id, agent.memory())?;
+    let context_debug =
+        build_context_debug(agent.memory(), &agent.memory_config(), agent.history());
     Ok(Json(ChatWebResponse {
         agent_id: agent_spec.id.to_string(),
         session_id: session.id,
@@ -291,6 +293,7 @@ async fn chat(
         context_metrics,
         session_metrics,
         messages: agent.history().to_vec(),
+        context_debug,
         debug: ChatDebugView {
             provider_request: provider_debug.request,
             provider_response: provider_debug.response,
@@ -378,6 +381,8 @@ async fn chat_stream(
                 let _ = sessions.save_session(&session_key, &session_id, agent.history());
                 let _ = sessions.save_metrics(&session_id, &session_metrics);
                 let _ = sessions.save_memory(&session_id, agent.memory());
+                let context_debug =
+                    build_context_debug(agent.memory(), &agent.memory_config(), agent.history());
                 let done_event = serde_json::json!({
                     "done": true,
                     "session_id": session_id,
@@ -385,6 +390,7 @@ async fn chat_stream(
                     "context_metrics": context_metrics,
                     "session_metrics": session_metrics,
                     "messages": agent.history(),
+                    "context_debug": context_debug,
                     "debug": ChatDebugView {
                         provider_request: provider_debug.request,
                         provider_response: provider_debug.response,
@@ -675,6 +681,7 @@ struct WebMemoryConfig {
     summary_prompt: Option<String>,
     facts_prompt: Option<String>,
     active_branch: Option<String>,
+    scoped_auto_route: Option<bool>,
 }
 
 impl Default for WebMemoryConfig {
@@ -689,6 +696,7 @@ impl Default for WebMemoryConfig {
             summary_prompt: Some(defaults.summary_prompt),
             facts_prompt: Some(defaults.facts_prompt),
             active_branch: Some(defaults.active_branch),
+            scoped_auto_route: Some(defaults.scoped_auto_route),
         }
     }
 }
@@ -717,6 +725,7 @@ impl WebMemoryConfig {
             summary_prompt: blank_to_none(self.summary_prompt).unwrap_or(defaults.summary_prompt),
             facts_prompt: blank_to_none(self.facts_prompt).unwrap_or(defaults.facts_prompt),
             active_branch: blank_to_none(self.active_branch).unwrap_or(defaults.active_branch),
+            scoped_auto_route: self.scoped_auto_route.unwrap_or(defaults.scoped_auto_route),
         }
     }
 }
@@ -818,13 +827,57 @@ struct ChatWebResponse {
     context_metrics: Option<crate::providers::RequestMetrics>,
     session_metrics: crate::providers::RequestMetrics,
     messages: Vec<ChatMessage>,
+    context_debug: ContextDebugView,
     debug: ChatDebugView,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ContextDebugView {
+    strategy: String,
+    active_topic: String,
+    scoped_auto_route: bool,
+    scoped_topics: Vec<ScopedTopicDebugView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ScopedTopicDebugView {
+    name: String,
+    message_count: usize,
+    active: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct ChatDebugView {
     provider_request: HttpDebugRequest,
     provider_response: HttpDebugResponse,
+}
+
+fn build_context_debug(
+    memory: &crate::chat::AgentMemory,
+    config: &MemoryConfig,
+    history: &[ChatMessage],
+) -> ContextDebugView {
+    let active_topic = config.active_branch.trim();
+    let active_topic = if active_topic.is_empty() {
+        "default"
+    } else {
+        active_topic
+    };
+    let scoped_topics = memory
+        .branch_message_counts(history, active_topic)
+        .into_iter()
+        .map(|(name, message_count)| ScopedTopicDebugView {
+            active: name == active_topic,
+            name,
+            message_count,
+        })
+        .collect();
+    ContextDebugView {
+        strategy: config.strategy.to_string(),
+        active_topic: active_topic.to_string(),
+        scoped_auto_route: config.scoped_auto_route,
+        scoped_topics,
+    }
 }
 
 fn build_web_prompt(prompt: &str, attachments: Option<&[WebAttachment]>) -> String {
@@ -1071,6 +1124,7 @@ mod tests {
             summary_prompt: None,
             facts_prompt: Some("Custom provider facts prompt".to_string()),
             active_branch: Some("alpha".to_string()),
+            scoped_auto_route: Some(false),
         }
         .into_memory_config();
 
@@ -1078,6 +1132,7 @@ mod tests {
         assert_eq!(config.recent_messages, 4);
         assert_eq!(config.facts_prompt, "Custom provider facts prompt");
         assert_eq!(config.active_branch, "alpha");
+        assert!(!config.scoped_auto_route);
     }
 
     #[test]
@@ -1101,6 +1156,7 @@ mod tests {
                 summary_prompt: None,
                 facts_prompt: None,
                 active_branch: None,
+                scoped_auto_route: None,
             }
             .into_memory_config();
 
@@ -1120,6 +1176,7 @@ mod tests {
             summary_prompt: Some("   ".to_string()),
             facts_prompt: Some("   ".to_string()),
             active_branch: Some("   ".to_string()),
+            scoped_auto_route: None,
         }
         .into_memory_config();
 
@@ -1145,6 +1202,7 @@ mod tests {
             summary_prompt: Some("Keep only durable project memory.".to_string()),
             facts_prompt: None,
             active_branch: None,
+            scoped_auto_route: None,
         }
         .into_memory_config();
 
@@ -1154,6 +1212,52 @@ mod tests {
         assert_eq!(config.summary_chunk_messages, 5);
         assert_eq!(config.summarize_at_context_percent, 72);
         assert_eq!(config.summary_prompt, "Keep only durable project memory.");
+    }
+
+    #[test]
+    fn web_context_debug_reports_scoped_topics_and_active_topic() {
+        let history = vec![
+            ChatMessage {
+                role: Role::User,
+                content: "Rust async".to_string(),
+            },
+            ChatMessage {
+                role: Role::Assistant,
+                content: "Rust answer".to_string(),
+            },
+            ChatMessage {
+                role: Role::User,
+                content: "Vacation budget".to_string(),
+            },
+        ];
+        let mut memory = crate::chat::AgentMemory::default();
+        memory.branch_assignments.insert(0, "rust".to_string());
+        memory.branch_assignments.insert(1, "rust".to_string());
+        memory.branch_assignments.insert(2, "travel".to_string());
+        let config = MemoryConfig {
+            strategy: MemoryStrategy::ScopedBranches,
+            active_branch: "travel".to_string(),
+            scoped_auto_route: true,
+            ..MemoryConfig::default()
+        };
+
+        let debug = build_context_debug(&memory, &config, &history);
+
+        assert_eq!(debug.strategy, "scoped-branches");
+        assert_eq!(debug.active_topic, "travel");
+        assert!(debug.scoped_auto_route);
+        assert!(
+            debug
+                .scoped_topics
+                .iter()
+                .any(|topic| topic.name == "rust" && topic.message_count == 2 && !topic.active)
+        );
+        assert!(
+            debug
+                .scoped_topics
+                .iter()
+                .any(|topic| topic.name == "travel" && topic.message_count == 1 && topic.active)
+        );
     }
 
     #[test]
@@ -1456,7 +1560,11 @@ mod tests {
         assert!(INDEX_HTML.contains("Хранить последние N сообщений"));
         assert!(INDEX_HTML.contains("Свежие сообщения вместе с facts"));
         assert!(INDEX_HTML.contains("Сообщения текущей ветки"));
-        assert!(INDEX_HTML.contains("Сообщения active branch"));
+        assert!(INDEX_HTML.contains("Сообщения выбранной темы"));
+        assert!(INDEX_HTML.contains("Auto topics в одном чате"));
+        assert!(INDEX_HTML.contains("id=\"memoryScopedAutoRoute\""));
+        assert!(INDEX_HTML.contains("id=\"scopedTopicDebug\""));
+        assert!(INDEX_HTML.contains("id=\"contextDebugPanel\""));
         assert!(INDEX_HTML.contains("Summary prompt"));
         assert!(INDEX_HTML.contains("id=\"memorySummaryPrompt\""));
         assert!(INDEX_HTML.contains("id=\"memorySummarizeAfterMessages\""));
@@ -1532,8 +1640,21 @@ mod tests {
         );
         assert!(
             body.contains("active_branch: textValue('memoryActiveBranch') || 'default'"),
-            "active internal branch must be sent to the web API"
+            "manual internal topic must be sent to the web API"
         );
+        assert!(
+            body.contains("scoped_auto_route: $('memoryScopedAutoRoute').checked"),
+            "auto topic routing flag must be sent to the web API"
+        );
+    }
+
+    #[test]
+    fn web_ui_renders_context_topic_debug() {
+        assert!(INDEX_HTML.contains("function setContextDebug(contextDebug)"));
+        assert!(INDEX_HTML.contains("contextDebug.scoped_topics"));
+        assert!(INDEX_HTML.contains("Активная тема:"));
+        assert!(INDEX_HTML.contains("topic-chip"));
+        assert!(INDEX_HTML.contains("setContextDebug(data.context_debug);"));
     }
 
     #[test]

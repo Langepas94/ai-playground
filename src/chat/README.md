@@ -57,8 +57,9 @@ Branching
 
 Scoped Branches
   -> одна session и одно окно агента
-  -> каждое сообщение получает внутренний branch label
-  -> в provider request попадает только активная branch + system/facts
+  -> агент сам раскладывает сообщения по темам без ручного переключения юзером
+  -> каждое сообщение получает внутренний topic/branch label
+  -> в provider request попадает только автоматически выбранная тема + system/facts
 ```
 
 ## Что важно не ломать
@@ -68,7 +69,7 @@ Scoped Branches
 - Для sliding window source of truth - уже обрезанная история; старые сообщения намеренно удалены.
 - Для sticky facts source of truth - facts + последние N сообщений.
 - Для branching каждая ветка имеет свою историю/session; сообщения разных веток не смешиваются.
-- Для scoped branches история хранится в одной session, но context builder фильтрует ее по активной внутренней ветке.
+- Для scoped branches история хранится в одной session, а агент автоматически выбирает тему для каждого нового user message. Web debug должен показывать выбранную тему и счетчики сообщений по темам.
 - Slash-команды должны менять локальное состояние предсказуемо и не отправлять служебный текст провайдеру.
 - History, facts и memory не должны содержать токены.
 - Новый чатовый сценарий должен идти через `ChatAgent`, если только это не узкий unit test.
@@ -81,7 +82,7 @@ Scoped Branches
 - Summary не обновляется или prompt не применяется: `ChatAgent::precompact_before_request()`, `summary_prompt` и `AgentMemory::next_summary_range()`.
 - Facts не обновились или неверно ушли в запрос: `AgentMemory::update_facts_from_user_message()`, `facts_prompt` и `AgentMemory::build_context()`.
 - Branching в UI смешал ветки: `ui.html` branch state и `ChatWebRequest::initial_history()`.
-- Scoped branches смешали context: `AgentMemory.branch_assignments`, `active_branch` и `AgentMemory::build_context()`.
+- Scoped topics смешали context или не видны в debug: `AgentMemory.branch_assignments`, `active_branch`, `AgentMemory::build_context()` и `ContextDebugView` в web.
 - Goal завершается рано/поздно: `goal.rs`.
 - Метрики не печатаются или выглядят неверно: `format_request_metrics` в `mod.rs`.
 - Локальная оценка токенов/overflow неверная: `token_accounting.rs` и `ChatAgent::estimate_next_exchange()`.
