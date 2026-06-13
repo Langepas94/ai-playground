@@ -810,6 +810,7 @@
                     <option value="sliding-window">Sliding Window</option>
                     <option value="sticky-facts">Sticky Facts</option>
                     <option value="branching">Branching</option>
+                    <option value="scoped-branches">Scoped Branches</option>
                   </select>
                   <span id="memoryStrategyHelp" class="field-help">Только последние N сообщений; старое отбрасывается.</span>
                 </label>
@@ -827,6 +828,11 @@
                   <span class="field-title">Facts</span>
                   <div id="factsPreview" class="facts-preview">Появятся после сообщений вида “цель: …”, “предпочтение: …” или явных ограничений.</div>
                 </div>
+                <label id="scopedBranchWrap" style="display:none">
+                  <span class="field-title">Active branch</span>
+                  <input id="memoryActiveBranch" spellcheck="false" value="default">
+                  <span class="field-help">Одна session, но context request получает только эту внутреннюю ветку.</span>
+                </label>
                 <div id="branchToolbar" class="branch-toolbar" style="display:none">
                   <span class="field-title">Ветки диалога</span>
                   <div class="branch-buttons">
@@ -1296,7 +1302,8 @@
       return {
         strategy: $('memoryStrategy').value,
         recent_messages: numberValue('memoryRecentMessages'),
-        facts_prompt: textValue('memoryFactsPrompt')
+        facts_prompt: textValue('memoryFactsPrompt'),
+        active_branch: textValue('memoryActiveBranch') || 'default'
       };
     }
 
@@ -1582,8 +1589,10 @@
         'sliding-window': 'Только последние N сообщений; старое отбрасывается.',
         'sticky-facts': 'Facts + последние N сообщений. Facts обновляются из явных целей, ограничений, предпочтений и решений.',
         'branching': 'Сделайте checkpoint, получите ветки A/B и продолжайте каждую независимо.',
+        'scoped-branches': 'Одна session и одно окно: provider видит только active branch.',
       }[$('memoryStrategy').value] || '';
       $('memoryStrategyHelp').textContent = help;
+      $('scopedBranchWrap').style.display = $('memoryStrategy').value === 'scoped-branches' ? '' : 'none';
       $('branchA').classList.toggle('active', branchState.activeId === 'branch-a');
       $('branchB').classList.toggle('active', branchState.activeId === 'branch-b');
       $('branchA').disabled = !showBranches || !branchState.branches.length;
@@ -1670,6 +1679,7 @@
       const strategy = $('memoryStrategy').value;
       if (strategy === 'sticky-facts') return 'facts обновлены локально';
       if (strategy === 'branching') return currentBranch() ? `активна ${currentBranch().name}` : 'checkpoint не создан';
+      if (strategy === 'scoped-branches') return `branch: ${textValue('memoryActiveBranch') || 'default'}`;
       return `последние ${numberValue('memoryRecentMessages') ?? 0} сообщ.`;
     }
 

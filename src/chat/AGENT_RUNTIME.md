@@ -60,9 +60,10 @@ raw-history поведение.
 
 Основные параметры:
 
-- `strategy` - `sliding-window`, `sticky-facts` или `branching`;
+- `strategy` - `sliding-window`, `sticky-facts`, `branching` или `scoped-branches`;
 - `recent_messages` - размер окна N для обычных сообщений;
 - `facts_prompt` - system prompt, который вводит блок facts для provider request.
+- `active_branch` - имя внутренней branch для `scoped-branches`.
 
 UI должен показывать минимум настроек: strategy и N. Summary controls для этой
 модели не нужны.
@@ -116,12 +117,26 @@ UI сохраняет checkpoint текущей истории, создает �
 дальше отправляет каждую ветку как отдельную local session. Runtime получает уже
 выбранную ветку как обычную историю, поэтому сообщения веток не смешиваются.
 
+### Scoped Branches
+
+```text
+system prompt
++ facts system block, если есть
++ last N messages from active internal branch
++ new user prompt
+```
+
+Это optional strategy для одного агентского окна и одной local session. Runtime
+помечает сообщения активной branch label в `AgentMemory.branch_assignments`.
+Context builder отбрасывает сообщения других branch labels при сборке request.
+
 ## Что хранится локально
 
 Локально сохраняется:
 
 - история текущей session/branch;
 - facts текущей session/branch;
+- internal branch labels для scoped branches;
 - индекс последней сессии.
 
 Токены не пишутся в историю или memory-файлы.
@@ -132,7 +147,7 @@ UI сохраняет checkpoint текущей истории, создает �
 
 - system prompt, если он есть;
 - facts как system message, если выбрана sticky facts и facts не пустые;
-- выбранное окно raw messages;
+- выбранное окно raw messages или active internal branch window;
 - текущий user prompt;
 - control/pricing/billing параметры.
 
@@ -179,6 +194,7 @@ runtime, а не routes провайдера. Провайдер вызывае�
 - Агент - наша локальная сущность.
 - Provider API не знает про `agent_id`.
 - Strategy всегда явная: sliding window, sticky facts или branching.
+- Scoped branches не должны смешивать сообщения разных internal branch labels.
 - В provider API нельзя отправлять всю историю без выбранной strategy.
 - Facts не являются глобальной пользовательской памятью.
 - Branch histories не должны смешиваться.

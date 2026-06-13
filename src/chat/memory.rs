@@ -12,6 +12,7 @@ pub enum MemoryStrategy {
     SlidingWindow,
     StickyFacts,
     Branching,
+    ScopedBranches,
 }
 
 impl fmt::Display for MemoryStrategy {
@@ -20,6 +21,7 @@ impl fmt::Display for MemoryStrategy {
             MemoryStrategy::SlidingWindow => f.write_str("sliding-window"),
             MemoryStrategy::StickyFacts => f.write_str("sticky-facts"),
             MemoryStrategy::Branching => f.write_str("branching"),
+            MemoryStrategy::ScopedBranches => f.write_str("scoped-branches"),
         }
     }
 }
@@ -29,6 +31,7 @@ pub struct MemoryConfig {
     pub strategy: MemoryStrategy,
     pub recent_messages: usize,
     pub facts_prompt: String,
+    pub active_branch: String,
 }
 
 impl Default for MemoryConfig {
@@ -37,6 +40,7 @@ impl Default for MemoryConfig {
             strategy: MemoryStrategy::SlidingWindow,
             recent_messages: DEFAULT_RECENT_MESSAGES,
             facts_prompt: DEFAULT_FACTS_PROMPT.to_string(),
+            active_branch: "default".to_string(),
         }
     }
 }
@@ -45,6 +49,8 @@ impl Default for MemoryConfig {
 pub struct AgentMemory {
     #[serde(default)]
     pub facts: BTreeMap<String, String>,
+    #[serde(default)]
+    pub branch_assignments: BTreeMap<usize, String>,
     #[serde(default)]
     pub session_summary: Option<String>,
     #[serde(default)]
@@ -66,7 +72,11 @@ impl AgentMemory {
                 });
             }
         }
-        context.extend(recent_non_system_messages(history, config.recent_messages));
+        if config.strategy == MemoryStrategy::ScopedBranches {
+            context.extend(self.recent_branch_messages(history, config));
+        } else {
+            context.extend(recent_non_system_messages(history, config.recent_messages));
+        }
         context
     }
 
@@ -79,7 +89,62 @@ impl AgentMemory {
                 pruned.extend(recent_non_system_messages(history, config.recent_messages));
                 *history = pruned;
             }
+            MemoryStrategy::ScopedBranches => {}
         }
+    }
+
+    pub fn apply_scoped_branch_storage_policy(
+        &mut self,
+        history: &mut Vec<ChatMessage>,
+        config: &MemoryConfig,
+    ) {
+        if config.strategy != MemoryStrategy::ScopedBranches {
+            self.apply_storage_policy(history, config);
+            return;
+        }
+        let mut kept = system_messages(history);
+        let mut per_branch_counts = BTreeMap::<String, usize>::new();
+        let mut keep_indices = history
+            .iter()
+            .enumerate()
+            .rev()
+            .filter_map(|(index, message)| {
+                if message.role == Role::System {
+                    return None;
+                }
+                let branch = self.branch_for_index(index, config);
+                let count = per_branch_counts.entry(branch).or_default();
+                if *count >= config.recent_messages {
+                    return None;
+                }
+                *count += 1;
+                Some(index)
+            })
+            .collect::<Vec<_>>();
+        keep_indices.reverse();
+
+        let mut remapped = BTreeMap::new();
+        for old_index in keep_indices {
+            let new_index = kept.len();
+            kept.push(history[old_index].clone());
+            remapped.insert(new_index, self.branch_for_index(old_index, config));
+        }
+        *history = kept;
+        self.branch_assignments = remapped;
+    }
+
+    pub fn record_turn_branch(
+        &mut self,
+        user_index: usize,
+        assistant_index: usize,
+        config: &MemoryConfig,
+    ) {
+        if config.strategy != MemoryStrategy::ScopedBranches {
+            return;
+        }
+        let branch = normalized_branch(config.active_branch.as_str());
+        self.branch_assignments.insert(user_index, branch.clone());
+        self.branch_assignments.insert(assistant_index, branch);
     }
 
     pub fn update_facts_from_user_message(&mut self, message: &str) {
@@ -182,6 +247,35 @@ impl AgentMemory {
             })
             .or_insert(value);
     }
+
+    fn recent_branch_messages(
+        &self,
+        history: &[ChatMessage],
+        config: &MemoryConfig,
+    ) -> Vec<ChatMessage> {
+        if config.recent_messages == 0 {
+            return Vec::new();
+        }
+        let active_branch = normalized_branch(config.active_branch.as_str());
+        let mut messages = history
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, message)| message.role != Role::System)
+            .filter(|(index, _)| self.branch_for_index(*index, config) == active_branch)
+            .take(config.recent_messages)
+            .map(|(_, message)| message.clone())
+            .collect::<Vec<_>>();
+        messages.reverse();
+        messages
+    }
+
+    fn branch_for_index(&self, index: usize, config: &MemoryConfig) -> String {
+        self.branch_assignments
+            .get(&index)
+            .map(|value| normalized_branch(value))
+            .unwrap_or_else(|| normalized_branch(config.active_branch.as_str()))
+    }
 }
 
 fn system_messages(history: &[ChatMessage]) -> Vec<ChatMessage> {
@@ -267,6 +361,15 @@ fn looks_sensitive(value: &str) -> bool {
             "sk-",
         ],
     )
+}
+
+fn normalized_branch(value: &str) -> String {
+    let branch = value.trim();
+    if branch.is_empty() {
+        "default".to_string()
+    } else {
+        branch.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -368,6 +471,7 @@ mod tests {
                 strategy: MemoryStrategy::StickyFacts,
                 recent_messages: 1,
                 facts_prompt: "Custom facts instruction.".to_string(),
+                ..MemoryConfig::default()
             },
         );
 
@@ -466,5 +570,83 @@ mod tests {
         assert_eq!(history[0].content, "System");
         assert_eq!(history[1].content, "2");
         assert_eq!(history[2].content, "3");
+    }
+
+    #[test]
+    fn scoped_branches_build_context_only_from_active_branch() {
+        let mut memory = AgentMemory::default();
+        let history = vec![
+            message(Role::System, "System"),
+            message(Role::User, "alpha user"),
+            message(Role::Assistant, "alpha assistant"),
+            message(Role::User, "beta user"),
+            message(Role::Assistant, "beta assistant"),
+        ];
+        memory.branch_assignments.insert(1, "alpha".to_string());
+        memory.branch_assignments.insert(2, "alpha".to_string());
+        memory.branch_assignments.insert(3, "beta".to_string());
+        memory.branch_assignments.insert(4, "beta".to_string());
+
+        let context = memory.build_context(
+            &history,
+            &MemoryConfig {
+                strategy: MemoryStrategy::ScopedBranches,
+                recent_messages: 8,
+                active_branch: "beta".to_string(),
+                ..MemoryConfig::default()
+            },
+        );
+
+        assert_eq!(context.len(), 3);
+        assert_eq!(context[0].content, "System");
+        assert_eq!(context[1].content, "beta user");
+        assert_eq!(context[2].content, "beta assistant");
+        assert!(
+            context
+                .iter()
+                .all(|message| !message.content.contains("alpha"))
+        );
+    }
+
+    #[test]
+    fn scoped_branch_pruning_keeps_recent_window_per_branch() {
+        let mut memory = AgentMemory::default();
+        let mut history = vec![
+            message(Role::System, "System"),
+            message(Role::User, "alpha old"),
+            message(Role::Assistant, "alpha recent"),
+            message(Role::User, "beta old"),
+            message(Role::Assistant, "beta recent"),
+        ];
+        memory.branch_assignments.insert(1, "alpha".to_string());
+        memory.branch_assignments.insert(2, "alpha".to_string());
+        memory.branch_assignments.insert(3, "beta".to_string());
+        memory.branch_assignments.insert(4, "beta".to_string());
+
+        memory.apply_scoped_branch_storage_policy(
+            &mut history,
+            &MemoryConfig {
+                strategy: MemoryStrategy::ScopedBranches,
+                recent_messages: 1,
+                active_branch: "alpha".to_string(),
+                ..MemoryConfig::default()
+            },
+        );
+
+        assert_eq!(
+            history
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["System", "alpha recent", "beta recent"]
+        );
+        assert_eq!(
+            memory.branch_assignments.get(&1).map(String::as_str),
+            Some("alpha")
+        );
+        assert_eq!(
+            memory.branch_assignments.get(&2).map(String::as_str),
+            Some("beta")
+        );
     }
 }
