@@ -375,6 +375,17 @@ pub async fn interactive_chat(
             }
             continue;
         }
+        if let Some(value) = line.strip_prefix("/memory facts-extraction-prompt ") {
+            let value = value.trim();
+            if value.is_empty() {
+                println!("Use /memory facts-extraction-prompt <prompt>.");
+            } else {
+                memory_config.facts_extraction_prompt = value.to_string();
+                agent.set_memory_config(memory_config.clone());
+                println!("Memory facts extraction prompt updated.");
+            }
+            continue;
+        }
         if let Some(value) = line.strip_prefix("/memory branch ") {
             let value = value.trim();
             if value.is_empty() {
@@ -520,7 +531,7 @@ pub fn describe_memory(config: &MemoryConfig, memory: &super::AgentMemory) -> St
         .collect::<Vec<_>>()
         .join("; ");
     format!(
-        "Memory: strategy={}, recent_messages={}, summarize_after_messages={}, summary_chunk_messages={}, summarize_at_context_percent={}, summary_prompt={}, {}, active_branch={}, scoped_auto_route={}, facts_prompt={}, facts={}",
+        "Memory: strategy={}, recent_messages={}, summarize_after_messages={}, summary_chunk_messages={}, summarize_at_context_percent={}, summary_prompt={}, {}, active_branch={}, scoped_auto_route={}, facts_extraction_prompt={}, facts_prompt={}, facts={}",
         config.strategy,
         config.recent_messages,
         config.summarize_after_messages,
@@ -530,6 +541,7 @@ pub fn describe_memory(config: &MemoryConfig, memory: &super::AgentMemory) -> St
         summary,
         config.active_branch,
         config.scoped_auto_route,
+        config.facts_extraction_prompt,
         config.facts_prompt,
         if facts.is_empty() { "none" } else { &facts }
     )
@@ -674,6 +686,7 @@ mod tests {
                 strategy: MemoryStrategy::StickyFacts,
                 recent_messages: 3,
                 summary_prompt: "Custom summary prompt".to_string(),
+                facts_extraction_prompt: "Collect only constraints.".to_string(),
                 facts_prompt: "Custom facts prompt".to_string(),
                 active_branch: "alpha".to_string(),
                 ..MemoryConfig::default()
@@ -687,6 +700,7 @@ mod tests {
         assert!(description.contains("summary=present@42"));
         assert!(description.contains("active_branch=alpha"));
         assert!(description.contains("scoped_auto_route=true"));
+        assert!(description.contains("facts_extraction_prompt=Collect only constraints."));
         assert!(description.contains("facts_prompt=Custom facts prompt"));
         assert!(description.contains("goal=test context strategies"));
     }

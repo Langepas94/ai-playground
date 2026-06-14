@@ -47,8 +47,9 @@ Sliding Window
   -> старые обычные сообщения не отправляет провайдеру, но не удаляет из local history/UI
 
 Sticky Facts
-  -> обновляет key-value facts после каждого user message
+  -> обновляет key-value facts после каждого user message через настраиваемый extraction prompt
   -> хранит facts в `AgentMemory.facts` как local key-value sidecar
+  -> использует настраиваемый facts extraction prompt, чтобы выбрать категории KV
   -> извлекает атомарные KV-факты, а не сохраняет весь user prompt по слову-триггеру
   -> отправляет отдельный read-only facts block + последние N сообщений, включая текущий user prompt
   -> Web debug показывает persisted KV facts и точный facts block для provider request
@@ -72,6 +73,7 @@ Scoped Branches
 - Для sliding window source of truth - полная local history. N применяется только при сборке provider request; UI/session history не режется.
 - Для sticky facts source of truth - полная local history + `AgentMemory.facts` в memory sidecar. N влияет только на provider request и включает текущий user prompt. Нельзя обрезать сохраненную историю sticky facts policy.
 - Sticky facts extraction не должна превращать фразы вида “поэтому я хочу …” в `preferences=<весь prompt>`. Нужно выделять смысловой KV: `goal=...`, `location=...`, `age=...`, `appearance_hair=...`, `interests=...`, `preferences=...` только для настоящих style/preference-инструкций.
+- `facts_extraction_prompt` управляет тем, какие KV-факты собирать. `facts_prompt`/Facts preamble управляет только тем, как уже сохраненный KV-блок отправляется provider в request.
 - Для branching каждая ветка имеет свою историю/session; сообщения разных веток не смешиваются.
 - Для scoped branches история хранится в одной session, а агент автоматически выбирает тему для каждого нового user message. Web debug должен показывать выбранную тему и счетчики сообщений по темам.
 - Slash-команды должны менять локальное состояние предсказуемо и не отправлять служебный текст провайдеру.
@@ -84,7 +86,7 @@ Scoped Branches
 - `/profile`, `/model`, `/goal` ведут себя странно: `session.rs`.
 - Сессия не восстанавливается: `store.rs`.
 - Summary не обновляется или prompt не применяется: `ChatAgent::precompact_before_request()`, `summary_prompt` и `AgentMemory::next_summary_range()`.
-- Facts не обновились, не видны или неверно ушли в запрос: `AgentMemory::update_facts_from_user_message()`, `facts_block`, `ContextDebugView.facts` и `AgentMemory::build_context()`.
+- Facts не обновились, не видны или неверно ушли в запрос: `ChatAgent::update_sticky_facts()`, `facts_extraction_prompt`, fallback `AgentMemory::update_facts_from_user_message()`, `facts_block`, `ContextDebugView.facts` и `AgentMemory::build_context()`.
 - Branching в UI смешал ветки: `ui.html` branch state и `ChatWebRequest::initial_history()`.
 - Scoped topics смешали context или не видны в debug: `AgentMemory.branch_assignments`, `active_branch`, `AgentMemory::build_context()` и `ContextDebugView` в web.
 - Goal завершается рано/поздно: `goal.rs`.

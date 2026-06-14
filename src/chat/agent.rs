@@ -3,7 +3,7 @@ use crate::{
     errors::AppError,
     providers::{
         BillingLookup, ChatMessage, ChatRequest, ChatResponse, ModelPricing, ProviderClient,
-        ProviderExchangeDebug, ResponseControl, Role,
+        ProviderExchangeDebug, RequestMetrics, ResponseControl, Role,
     },
 };
 
@@ -13,6 +13,7 @@ use tokio::time::{Duration, timeout};
 
 pub const LOCAL_SESSION_AGENT_ID: &str = "local-session-agent";
 const MEMORY_COMPACT_TIMEOUT: Duration = Duration::from_secs(30);
+const MEMORY_FACTS_EXTRACT_TIMEOUT: Duration = Duration::from_secs(20);
 const PREFLIGHT_COMPACT_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_PREFLIGHT_SUMMARY_PASSES: usize = 3;
 
@@ -133,8 +134,11 @@ impl ChatAgent {
         client: &dyn ProviderClient,
         prompt: String,
     ) -> Result<ChatResponse, AppError> {
-        self.ingest_user_prompt(&prompt);
-        let context_metrics = self.precompact_before_request(client, &prompt).await;
+        let mut context_metrics = self.ingest_user_prompt(client, &prompt).await;
+        context_metrics = merge_optional_metrics(
+            context_metrics,
+            self.precompact_before_request(client, &prompt).await,
+        );
         let response = client
             .chat_completion(
                 &self.profile,
@@ -177,8 +181,11 @@ impl ChatAgent {
         ),
         AppError,
     > {
-        self.ingest_user_prompt(&prompt);
-        let mut context_metrics = self.precompact_before_request(client, &prompt).await;
+        let mut context_metrics = self.ingest_user_prompt(client, &prompt).await;
+        context_metrics = merge_optional_metrics(
+            context_metrics,
+            self.precompact_before_request(client, &prompt).await,
+        );
         let (response, debug) = client
             .chat_completion_with_debug(
                 &self.profile,
@@ -210,8 +217,11 @@ impl ChatAgent {
         crate::providers::ChatRequest,
         Option<crate::providers::RequestMetrics>,
     ) {
-        self.ingest_user_prompt(prompt);
-        let context_metrics = self.precompact_before_request(client, prompt).await;
+        let mut context_metrics = self.ingest_user_prompt(client, prompt).await;
+        context_metrics = merge_optional_metrics(
+            context_metrics,
+            self.precompact_before_request(client, prompt).await,
+        );
         (
             self.request_with_user_prompt(prompt.to_string()),
             context_metrics,
@@ -274,10 +284,14 @@ impl ChatAgent {
             .record_turn_branch(user_index, assistant_index, &self.memory_config);
     }
 
-    fn ingest_user_prompt(&mut self, prompt: &str) {
+    async fn ingest_user_prompt(
+        &mut self,
+        client: &dyn ProviderClient,
+        prompt: &str,
+    ) -> Option<RequestMetrics> {
         match self.memory_config.strategy {
             MemoryStrategy::StickyFacts => {
-                self.memory.update_facts_from_user_message(prompt);
+                return self.update_sticky_facts(client, prompt).await;
             }
             MemoryStrategy::ScopedBranches if self.memory_config.scoped_auto_route => {
                 let branch = self.memory.select_scoped_topic(
@@ -289,6 +303,57 @@ impl ChatAgent {
             }
             _ => {}
         }
+        None
+    }
+
+    async fn update_sticky_facts(
+        &mut self,
+        client: &dyn ProviderClient,
+        prompt: &str,
+    ) -> Option<RequestMetrics> {
+        let extraction_prompt = self.memory_config.facts_extraction_prompt.trim();
+        if extraction_prompt.is_empty() {
+            self.memory.update_facts_from_user_message(prompt);
+            return None;
+        }
+        let existing_facts =
+            serde_json::to_string(&self.memory.facts).unwrap_or_else(|_| "{}".to_string());
+        let request = ChatRequest {
+            model: self.profile.model.clone(),
+            messages: vec![
+                ChatMessage {
+                    role: Role::System,
+                    content: extraction_prompt.to_string(),
+                },
+                ChatMessage {
+                    role: Role::User,
+                    content: format!(
+                        "Existing facts JSON:\n{existing_facts}\n\nLatest user message:\n{prompt}\n\nReturn JSON object with fact updates only."
+                    ),
+                },
+            ],
+            control: memory_facts_extraction_control(),
+            pricing: self.pricing.clone(),
+            billing: self.billing.clone(),
+        };
+        let result = timeout(
+            MEMORY_FACTS_EXTRACT_TIMEOUT,
+            client.chat_completion(&self.profile, &self.token, request),
+        )
+        .await;
+        let Ok(Ok(response)) = result else {
+            self.memory.update_facts_from_user_message(prompt);
+            return None;
+        };
+        if let Some(facts) = parse_extracted_facts(response.text.as_str()) {
+            if facts.is_empty() {
+                return Some(response.metrics);
+            }
+            self.memory.merge_extracted_facts(facts);
+        } else {
+            self.memory.update_facts_from_user_message(prompt);
+        }
+        Some(response.metrics)
     }
 
     fn apply_context_storage_policy(&mut self) {
@@ -444,6 +509,58 @@ fn memory_summary_control() -> ResponseControl {
     control.temperature = Some(0.2);
     control.max_tokens = Some(700);
     control
+}
+
+fn memory_facts_extraction_control() -> ResponseControl {
+    let mut control = ResponseControl::uncontrolled();
+    control.temperature = Some(0.0);
+    control.max_tokens = Some(500);
+    control
+}
+
+fn parse_extracted_facts(text: &str) -> Option<std::collections::BTreeMap<String, String>> {
+    let value: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
+    let object = value.as_object()?;
+    let mut facts = std::collections::BTreeMap::new();
+    for (key, value) in object {
+        let Some(value) = fact_value_to_string(value) else {
+            continue;
+        };
+        let value = value.trim();
+        if !key.trim().is_empty() && !value.is_empty() {
+            facts.insert(key.clone(), value.to_string());
+        }
+    }
+    Some(facts)
+}
+
+fn fact_value_to_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Array(values) => {
+            let joined = values
+                .iter()
+                .filter_map(fact_value_to_string)
+                .collect::<Vec<_>>()
+                .join("; ");
+            (!joined.is_empty()).then_some(joined)
+        }
+        _ => None,
+    }
+}
+
+fn merge_optional_metrics(
+    current: Option<RequestMetrics>,
+    next: Option<RequestMetrics>,
+) -> Option<RequestMetrics> {
+    match (current, next) {
+        (Some(current), Some(next)) => Some(crate::chat::add_request_metrics(&current, &next)),
+        (Some(current), None) => Some(current),
+        (None, Some(next)) => Some(next),
+        (None, None) => None,
+    }
 }
 
 #[cfg(test)]
@@ -609,6 +726,7 @@ mod tests {
         agent.set_memory_config(MemoryConfig {
             strategy: MemoryStrategy::StickyFacts,
             recent_messages: 4,
+            facts_extraction_prompt: String::new(),
             ..MemoryConfig::default()
         });
 
@@ -664,6 +782,7 @@ mod tests {
         agent.set_memory_config(MemoryConfig {
             strategy: MemoryStrategy::StickyFacts,
             recent_messages: 2,
+            facts_extraction_prompt: String::new(),
             ..MemoryConfig::default()
         });
 
@@ -679,7 +798,7 @@ mod tests {
         assert_eq!(
             seen.len(),
             1,
-            "facts extraction must be local, not a second provider request"
+            "blank facts extraction prompt keeps the local fallback path"
         );
         let request = &seen[0];
         assert_eq!(
@@ -737,6 +856,7 @@ mod tests {
         agent.set_memory_config(MemoryConfig {
             strategy: MemoryStrategy::StickyFacts,
             recent_messages: 3,
+            facts_extraction_prompt: String::new(),
             ..MemoryConfig::default()
         });
 
@@ -830,6 +950,7 @@ mod tests {
         agent.set_memory_config(MemoryConfig {
             strategy: MemoryStrategy::StickyFacts,
             recent_messages: 2,
+            facts_extraction_prompt: String::new(),
             facts_prompt: "Use these project facts when answering.".to_string(),
             ..MemoryConfig::default()
         });
@@ -850,6 +971,71 @@ mod tests {
             seen[0][0]
                 .content
                 .contains("goal: expose custom facts prompt")
+        );
+    }
+
+    #[tokio::test]
+    async fn sticky_facts_custom_extraction_prompt_controls_saved_kv() {
+        let client = FakeClient {
+            replies: std::sync::Mutex::new(vec![
+                "main answer".to_string(),
+                r#"{"favorite_color":"зеленый","interests":"собаки"}"#.to_string(),
+            ]),
+            metrics: std::sync::Mutex::new(Vec::new()),
+            seen_messages: std::sync::Mutex::new(Vec::new()),
+        };
+        let mut agent = ChatAgent::new(
+            test_profile(),
+            "secret".to_string(),
+            Vec::new(),
+            AgentMemory::default(),
+            ResponseControl::uncontrolled(),
+            None,
+            None,
+        );
+        agent.set_memory_config(MemoryConfig {
+            strategy: MemoryStrategy::StickyFacts,
+            recent_messages: 2,
+            facts_extraction_prompt: "Collect only favorite colors and interests. Return JSON."
+                .to_string(),
+            ..MemoryConfig::default()
+        });
+
+        agent
+            .respond(
+                &client,
+                "Мой любимый цвет зеленый, и я люблю собак".to_string(),
+            )
+            .await
+            .expect("response");
+
+        let seen = client.seen_messages.lock().expect("seen messages");
+        assert_eq!(
+            seen.len(),
+            2,
+            "Sticky Facts with extraction prompt must call extractor before the main request"
+        );
+        assert_eq!(seen[0][0].role, Role::System);
+        assert!(seen[0][0].content.contains("favorite colors"));
+        assert!(seen[0][1].content.contains("Мой любимый цвет зеленый"));
+        assert_eq!(
+            agent
+                .memory()
+                .facts
+                .get("favorite_color")
+                .map(String::as_str),
+            Some("зеленый")
+        );
+        assert_eq!(
+            agent.memory().facts.get("interests").map(String::as_str),
+            Some("собаки")
+        );
+        assert!(seen[1][0].content.contains("FACTS_KV:"));
+        assert!(seen[1][0].content.contains("- favorite_color: зеленый"));
+        assert!(seen[1][0].content.contains("- interests: собаки"));
+        assert_eq!(
+            seen[1].last().map(|message| message.content.as_str()),
+            Some("Мой любимый цвет зеленый, и я люблю собак")
         );
     }
 

@@ -505,6 +505,12 @@ pub struct MemoryArgs {
     pub memory_facts_prompt: String,
     #[arg(
         long,
+        default_value = chat::memory::DEFAULT_FACTS_EXTRACTION_PROMPT,
+        help = "Prompt used to choose which Sticky Facts key-value facts are saved after each user message"
+    )]
+    pub memory_facts_extraction_prompt: String,
+    #[arg(
+        long,
         default_value = "default",
         help = "Active internal branch for scoped-branches strategy"
     )]
@@ -633,6 +639,7 @@ impl From<&MemoryArgs> for chat::MemoryConfig {
             summary_chunk_messages: args.memory_summary_chunk_messages,
             summarize_at_context_percent: args.memory_summarize_at_context_percent,
             summary_prompt: args.memory_summary_prompt.clone(),
+            facts_extraction_prompt: args.memory_facts_extraction_prompt.clone(),
             facts_prompt: args.memory_facts_prompt.clone(),
             active_branch: args.memory_active_branch.clone(),
             scoped_auto_route: args.memory_scoped_auto_route,
@@ -676,6 +683,7 @@ mod tests {
             memory_summarize_at_context_percent: 80,
             memory_summary_prompt: "Custom summary prompt".to_string(),
             memory_facts_prompt: "Custom facts prompt".to_string(),
+            memory_facts_extraction_prompt: "Collect only project constraints.".to_string(),
             memory_active_branch: "default".to_string(),
             memory_scoped_auto_route: true,
         };
@@ -685,6 +693,10 @@ mod tests {
         assert_eq!(config.strategy, chat::memory::MemoryStrategy::StickyFacts);
         assert_eq!(config.recent_messages, 5);
         assert_eq!(config.facts_prompt, "Custom facts prompt");
+        assert_eq!(
+            config.facts_extraction_prompt,
+            "Collect only project constraints."
+        );
     }
 
     #[test]
@@ -697,6 +709,8 @@ mod tests {
             memory_summarize_at_context_percent: 70,
             memory_summary_prompt: "Summarize only stable decisions.".to_string(),
             memory_facts_prompt: chat::memory::DEFAULT_FACTS_PROMPT.to_string(),
+            memory_facts_extraction_prompt: chat::memory::DEFAULT_FACTS_EXTRACTION_PROMPT
+                .to_string(),
             memory_active_branch: "default".to_string(),
             memory_scoped_auto_route: true,
         };
