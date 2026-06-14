@@ -118,14 +118,14 @@ system prompt
 ```text
 system prompt
 + read-only facts block built from local key-value memory
-+ last N non-system messages
-+ new user prompt
++ last N non-system messages, including current user prompt
 ```
 
 Facts обновляются после каждого user message и хранятся локально в
 `AgentMemory.facts` как key-value sidecar (`<session_id>.memory.toon`). Это не
 summary и не raw history. В provider request отправляется отдельный facts block
-с уже сохраненными KV facts плюс последние N сообщений. Web debug обязан
+с уже сохраненными KV facts плюс последние N raw сообщений, где текущий user
+prompt входит в N. Web debug обязан
 показывать:
 
 - persisted KV facts;
