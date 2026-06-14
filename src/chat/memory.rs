@@ -128,10 +128,8 @@ impl AgentMemory {
 
     pub fn apply_storage_policy(&self, history: &mut Vec<ChatMessage>, config: &MemoryConfig) {
         match config.strategy {
-            MemoryStrategy::Summary => {}
-            MemoryStrategy::SlidingWindow
-            | MemoryStrategy::StickyFacts
-            | MemoryStrategy::Branching => {
+            MemoryStrategy::Summary | MemoryStrategy::StickyFacts => {}
+            MemoryStrategy::SlidingWindow | MemoryStrategy::Branching => {
                 let mut pruned = system_messages(history);
                 pruned.extend(recent_non_system_messages(history, config.recent_messages));
                 *history = pruned;
@@ -930,6 +928,34 @@ mod tests {
         assert_eq!(history[0].content, "System");
         assert_eq!(history[1].content, "2");
         assert_eq!(history[2].content, "3");
+    }
+
+    #[test]
+    fn sticky_facts_storage_policy_keeps_complete_history() {
+        let memory = AgentMemory::default();
+        let mut history = vec![
+            message(Role::System, "System"),
+            message(Role::User, "1"),
+            message(Role::Assistant, "2"),
+            message(Role::User, "3"),
+        ];
+
+        memory.apply_storage_policy(
+            &mut history,
+            &MemoryConfig {
+                strategy: MemoryStrategy::StickyFacts,
+                recent_messages: 1,
+                ..MemoryConfig::default()
+            },
+        );
+
+        assert_eq!(
+            history
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["System", "1", "2", "3"]
+        );
     }
 
     #[test]
