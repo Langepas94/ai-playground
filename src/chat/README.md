@@ -49,6 +49,7 @@ Sliding Window
 Sticky Facts
   -> обновляет key-value facts после каждого user message
   -> хранит facts в `AgentMemory.facts` как local key-value sidecar
+  -> извлекает атомарные KV-факты, а не сохраняет весь user prompt по слову-триггеру
   -> отправляет отдельный read-only facts block + последние N сообщений, включая текущий user prompt
   -> Web debug показывает persisted KV facts и точный facts block для provider request
 
@@ -70,6 +71,7 @@ Scoped Branches
 - Для summary source of truth - полная local history плюс sidecar summary; raw history не режется sliding-policy.
 - Для sliding window source of truth - уже обрезанная история; старые сообщения намеренно удалены.
 - Для sticky facts source of truth - полная local history + `AgentMemory.facts` в memory sidecar. N влияет только на provider request и включает текущий user prompt. Нельзя обрезать сохраненную историю sticky facts policy.
+- Sticky facts extraction не должна превращать фразы вида “поэтому я хочу …” в `preferences=<весь prompt>`. Нужно выделять смысловой KV: `goal=...`, `location=...`, `age=...`, `appearance_hair=...`, `preferences=...` только для настоящих style/preference-инструкций.
 - Для branching каждая ветка имеет свою историю/session; сообщения разных веток не смешиваются.
 - Для scoped branches история хранится в одной session, а агент автоматически выбирает тему для каждого нового user message. Web debug должен показывать выбранную тему и счетчики сообщений по темам.
 - Slash-команды должны менять локальное состояние предсказуемо и не отправлять служебный текст провайдеру.
