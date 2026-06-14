@@ -834,9 +834,23 @@ struct ChatWebResponse {
 #[derive(Debug, Clone, Serialize)]
 struct ContextDebugView {
     strategy: String,
+    facts: FactsDebugView,
     active_topic: String,
     scoped_auto_route: bool,
     scoped_topics: Vec<ScopedTopicDebugView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FactsDebugView {
+    persisted: Vec<FactDebugView>,
+    request_block: Option<String>,
+    recent_messages_sent: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FactDebugView {
+    key: String,
+    value: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -872,8 +886,34 @@ fn build_context_debug(
             message_count,
         })
         .collect();
+    let persisted = memory
+        .facts
+        .iter()
+        .map(|(key, value)| FactDebugView {
+            key: key.clone(),
+            value: value.clone(),
+        })
+        .collect::<Vec<_>>();
+    let recent_messages_sent = if config.strategy == MemoryStrategy::StickyFacts {
+        history
+            .iter()
+            .filter(|message| message.role != Role::System)
+            .count()
+            .min(config.recent_messages)
+    } else {
+        0
+    };
     ContextDebugView {
         strategy: config.strategy.to_string(),
+        facts: FactsDebugView {
+            persisted,
+            request_block: if config.strategy == MemoryStrategy::StickyFacts {
+                memory.facts_block(config.facts_prompt.as_str())
+            } else {
+                None
+            },
+            recent_messages_sent,
+        },
         active_topic: active_topic.to_string(),
         scoped_auto_route: config.scoped_auto_route,
         scoped_topics,
@@ -1261,6 +1301,55 @@ mod tests {
     }
 
     #[test]
+    fn web_context_debug_reports_persisted_facts_and_request_block() {
+        let history = vec![
+            ChatMessage {
+                role: Role::User,
+                content: "goal: ship KV facts".to_string(),
+            },
+            ChatMessage {
+                role: Role::Assistant,
+                content: "ok".to_string(),
+            },
+            ChatMessage {
+                role: Role::User,
+                content: "recent question".to_string(),
+            },
+        ];
+        let mut memory = crate::chat::AgentMemory::default();
+        memory
+            .facts
+            .insert("goal".to_string(), "ship KV facts".to_string());
+        memory
+            .facts
+            .insert("constraints".to_string(), "show debug".to_string());
+        let config = MemoryConfig {
+            strategy: MemoryStrategy::StickyFacts,
+            recent_messages: 2,
+            facts_prompt: "Facts are read-only.".to_string(),
+            ..MemoryConfig::default()
+        };
+
+        let debug = build_context_debug(&memory, &config, &history);
+
+        assert_eq!(debug.strategy, "sticky-facts");
+        assert_eq!(debug.facts.persisted.len(), 2);
+        assert!(
+            debug
+                .facts
+                .persisted
+                .iter()
+                .any(|fact| fact.key == "goal" && fact.value == "ship KV facts")
+        );
+        let request_block = debug.facts.request_block.expect("facts request block");
+        assert!(request_block.starts_with("Facts are read-only."));
+        assert!(request_block.contains("FACTS_KV:"));
+        assert!(request_block.contains("- goal: ship KV facts"));
+        assert!(request_block.contains("- constraints: show debug"));
+        assert_eq!(debug.facts.recent_messages_sent, 2);
+    }
+
+    #[test]
     fn web_request_pricing_uses_official_deepseek_pricing_before_stale_catalog() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("prices.json");
@@ -1570,8 +1659,10 @@ mod tests {
         assert!(INDEX_HTML.contains("id=\"memorySummarizeAfterMessages\""));
         assert!(INDEX_HTML.contains("id=\"memorySummaryChunkMessages\""));
         assert!(INDEX_HTML.contains("id=\"memorySummarizeAtContextPercent\""));
-        assert!(INDEX_HTML.contains("Facts prompt"));
+        assert!(INDEX_HTML.contains("Facts preamble"));
         assert!(INDEX_HTML.contains("id=\"memoryFactsPrompt\""));
+        assert!(INDEX_HTML.contains("id=\"factsKvPreview\""));
+        assert!(INDEX_HTML.contains("Provider facts block"));
         assert!(INDEX_HTML.contains("id=\"memoryActiveBranch\""));
         assert!(
             !INDEX_HTML.contains(">memory_strategy<"),
@@ -1664,9 +1755,18 @@ mod tests {
         let body = &INDEX_HTML[start..INDEX_HTML.len().min(start + 700)];
 
         assert!(
-            body.contains("/^- [^:\\n]+: /m.test"),
-            "facts preview should detect facts by key-value lines, not only by default prompt"
+            body.contains("includes('FACTS_KV:')"),
+            "facts preview should detect the explicit provider facts block marker"
         );
+    }
+
+    #[test]
+    fn web_ui_renders_persisted_facts_and_provider_block() {
+        assert!(INDEX_HTML.contains("function renderFactsDebug(factsDebug)"));
+        assert!(INDEX_HTML.contains("factsDebug?.persisted"));
+        assert!(INDEX_HTML.contains("factsDebug.request_block"));
+        assert!(INDEX_HTML.contains("RECENT_MESSAGES_SENT"));
+        assert!(INDEX_HTML.contains("renderFactsDebug(contextDebug.facts);"));
     }
 
     #[test]

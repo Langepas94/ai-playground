@@ -615,6 +615,7 @@ mod tests {
         assert_eq!(seen[0][0].role, Role::System);
         assert_eq!(seen[0][0].content, "Base system");
         assert_eq!(seen[0][1].role, Role::System);
+        assert!(seen[0][1].content.contains("FACTS_KV:"));
         assert!(
             seen[0][1]
                 .content
@@ -673,6 +674,7 @@ mod tests {
         let request = &seen[0];
         assert_eq!(request.len(), 4);
         assert_eq!(request[0].role, Role::System);
+        assert!(request[0].content.contains("FACTS_KV:"));
         assert!(request[0].content.contains("goal: keep durable facts"));
         assert!(!request[0].content.contains("sk-should-not-leak"));
         assert_eq!(request[1].content, "history 4");
