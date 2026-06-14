@@ -37,7 +37,7 @@ CLI / web UI
 - `AppError` остается единым пользовательским типом ошибок.
 - Provider-specific поведение живет в `providers/`, а не размазывается по CLI/web.
 - Context strategy должна быть явной: summary, sliding window, sticky facts, branching или scoped branches. Нельзя незаметно подменять одну strategy другой.
-- Sticky facts хранят только устойчивые ключ-значение факты: цель, ограничения, предпочтения, решения и договоренности.
+- Sticky facts хранят только устойчивые ключ-значение факты. Набор категорий задает редактируемый `facts_extraction_prompt`; `facts_prompt` только оборачивает уже сохраненный KV block для provider request.
 
 ## Документы рядом
 
