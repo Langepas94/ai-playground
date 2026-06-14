@@ -123,9 +123,11 @@ system prompt
 
 Facts обновляются после каждого user message и хранятся локально в
 `AgentMemory.facts` как key-value sidecar (`<session_id>.memory.toon`). Это не
-summary и не raw history. В provider request отправляется отдельный facts block
-с уже сохраненными KV facts плюс последние N raw сообщений, где текущий user
-prompt входит в N. Web debug обязан
+summary и не raw history. Sticky facts не режет сохраненную историю: вся session
+history остается локальным source of truth, а N применяется только при сборке
+provider request. В provider request отправляется отдельный facts block с уже
+сохраненными KV facts плюс последние N raw сообщений, где текущий user prompt
+входит в N. Web debug обязан
 показывать:
 
 - persisted KV facts;
