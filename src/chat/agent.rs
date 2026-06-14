@@ -695,12 +695,18 @@ mod tests {
                 .iter()
                 .all(|message| !message.content.contains("history 0"))
         );
-        assert_eq!(agent.history().len(), 2);
         assert_eq!(
-            agent.history()[0].content,
+            agent.history().len(),
+            8,
+            "Sticky Facts must keep full local conversation history; recent_messages only limits provider request"
+        );
+        assert_eq!(agent.history()[0].content, "history 0");
+        assert_eq!(agent.history()[5].content, "history 5");
+        assert_eq!(
+            agent.history()[6].content,
             "goal: keep durable facts\napi key: sk-should-not-leak"
         );
-        assert_eq!(agent.history()[1].content, "answer");
+        assert_eq!(agent.history()[7].content, "answer");
     }
 
     #[tokio::test]
@@ -782,6 +788,20 @@ mod tests {
         assert_eq!(
             agent.memory().facts.get("constraint").map(String::as_str),
             Some("show persisted KV and provider block")
+        );
+        assert_eq!(
+            agent
+                .history()
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "goal: build reliable facts memory",
+                "first answer",
+                "constraint: show persisted KV and provider block",
+                "second answer"
+            ],
+            "Sticky Facts keeps full saved history while request uses only a recent window"
         );
     }
 
