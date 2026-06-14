@@ -239,9 +239,13 @@ impl ChatAgent {
     }
 
     fn request_with_user_prompt(&self, prompt: String) -> ChatRequest {
-        let mut messages = self
-            .memory
-            .build_context(&self.history, &self.memory_config);
+        let mut memory_config = self.memory_config.clone();
+        if memory_config.strategy == MemoryStrategy::StickyFacts {
+            // The current user prompt is part of "last N messages", so only
+            // N-1 previous non-system messages are pulled from history here.
+            memory_config.recent_messages = memory_config.recent_messages.saturating_sub(1);
+        }
+        let mut messages = self.memory.build_context(&self.history, &memory_config);
         messages.push(ChatMessage {
             role: Role::User,
             content: prompt,
@@ -672,13 +676,20 @@ mod tests {
             "facts extraction must be local, not a second provider request"
         );
         let request = &seen[0];
-        assert_eq!(request.len(), 4);
+        assert_eq!(
+            request.len(),
+            3,
+            "provider request must be facts + exactly last N raw messages including current prompt"
+        );
         assert_eq!(request[0].role, Role::System);
         assert!(request[0].content.contains("FACTS_KV:"));
         assert!(request[0].content.contains("goal: keep durable facts"));
         assert!(!request[0].content.contains("sk-should-not-leak"));
-        assert_eq!(request[1].content, "history 4");
-        assert_eq!(request[2].content, "history 5");
+        assert_eq!(request[1].content, "history 5");
+        assert_eq!(
+            request[2].content,
+            "goal: keep durable facts\napi key: sk-should-not-leak"
+        );
         assert!(
             request
                 .iter()
@@ -690,6 +701,88 @@ mod tests {
             "goal: keep durable facts\napi key: sk-should-not-leak"
         );
         assert_eq!(agent.history()[1].content, "answer");
+    }
+
+    #[tokio::test]
+    async fn sticky_facts_update_after_every_user_message_and_request_sends_facts_plus_last_n() {
+        let client = FakeClient {
+            replies: std::sync::Mutex::new(vec![
+                "second answer".to_string(),
+                "first answer".to_string(),
+            ]),
+            metrics: std::sync::Mutex::new(Vec::new()),
+            seen_messages: std::sync::Mutex::new(Vec::new()),
+        };
+        let mut agent = ChatAgent::new(
+            test_profile(),
+            "secret".to_string(),
+            Vec::new(),
+            AgentMemory::default(),
+            ResponseControl::uncontrolled(),
+            None,
+            None,
+        );
+        agent.set_memory_config(MemoryConfig {
+            strategy: MemoryStrategy::StickyFacts,
+            recent_messages: 3,
+            ..MemoryConfig::default()
+        });
+
+        agent
+            .respond(&client, "goal: build reliable facts memory".to_string())
+            .await
+            .expect("first response");
+        agent
+            .respond(
+                &client,
+                "constraint: show persisted KV and provider block".to_string(),
+            )
+            .await
+            .expect("second response");
+
+        let seen = client.seen_messages.lock().expect("seen messages");
+        assert_eq!(seen.len(), 2);
+        assert!(
+            seen[0][0]
+                .content
+                .contains("goal: build reliable facts memory")
+        );
+        assert_eq!(
+            seen[0]
+                .iter()
+                .filter(|message| message.role != Role::System)
+                .count(),
+            1,
+            "first request has facts plus the current user message"
+        );
+
+        let second_request = &seen[1];
+        let facts = &second_request[0].content;
+        assert!(facts.contains("FACTS_KV:"));
+        assert!(facts.contains("- goal: build reliable facts memory"));
+        assert!(facts.contains("- constraint: show persisted KV and provider block"));
+        let raw_messages = second_request
+            .iter()
+            .filter(|message| message.role != Role::System)
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            raw_messages,
+            vec![
+                "goal: build reliable facts memory",
+                "first answer",
+                "constraint: show persisted KV and provider block"
+            ],
+            "recent_messages=3 means the provider sees exactly the last 3 raw messages including current user prompt"
+        );
+        assert_eq!(
+            agent.memory().facts.get("goal").map(String::as_str),
+            Some("build reliable facts memory")
+        );
+        assert_eq!(
+            agent.memory().facts.get("constraint").map(String::as_str),
+            Some("show persisted KV and provider block")
+        );
     }
 
     #[tokio::test]
