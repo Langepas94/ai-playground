@@ -127,15 +127,7 @@ impl AgentMemory {
     }
 
     pub fn apply_storage_policy(&self, history: &mut Vec<ChatMessage>, config: &MemoryConfig) {
-        match config.strategy {
-            MemoryStrategy::Summary | MemoryStrategy::StickyFacts => {}
-            MemoryStrategy::SlidingWindow | MemoryStrategy::Branching => {
-                let mut pruned = system_messages(history);
-                pruned.extend(recent_non_system_messages(history, config.recent_messages));
-                *history = pruned;
-            }
-            MemoryStrategy::ScopedBranches => {}
-        }
+        let _ = (history, config);
     }
 
     pub fn next_summary_range(
@@ -180,39 +172,7 @@ impl AgentMemory {
         history: &mut Vec<ChatMessage>,
         config: &MemoryConfig,
     ) {
-        if config.strategy != MemoryStrategy::ScopedBranches {
-            self.apply_storage_policy(history, config);
-            return;
-        }
-        let mut kept = system_messages(history);
-        let mut per_branch_counts = BTreeMap::<String, usize>::new();
-        let mut keep_indices = history
-            .iter()
-            .enumerate()
-            .rev()
-            .filter_map(|(index, message)| {
-                if message.role == Role::System {
-                    return None;
-                }
-                let branch = self.branch_for_index(index, config);
-                let count = per_branch_counts.entry(branch).or_default();
-                if *count >= config.recent_messages {
-                    return None;
-                }
-                *count += 1;
-                Some(index)
-            })
-            .collect::<Vec<_>>();
-        keep_indices.reverse();
-
-        let mut remapped = BTreeMap::new();
-        for old_index in keep_indices {
-            let new_index = kept.len();
-            kept.push(history[old_index].clone());
-            remapped.insert(new_index, self.branch_for_index(old_index, config));
-        }
-        *history = kept;
-        self.branch_assignments = remapped;
+        let _ = (history, config);
     }
 
     pub fn record_turn_branch(
@@ -1051,7 +1011,7 @@ mod tests {
     }
 
     #[test]
-    fn storage_policy_prunes_history_for_windowed_strategies() {
+    fn storage_policy_keeps_complete_history_for_context_strategies() {
         let memory = AgentMemory::default();
         let mut history = vec![
             message(Role::System, "System"),
@@ -1063,16 +1023,19 @@ mod tests {
         memory.apply_storage_policy(
             &mut history,
             &MemoryConfig {
-                strategy: MemoryStrategy::Branching,
-                recent_messages: 2,
+                strategy: MemoryStrategy::SlidingWindow,
+                recent_messages: 1,
                 ..MemoryConfig::default()
             },
         );
 
-        assert_eq!(history.len(), 3);
-        assert_eq!(history[0].content, "System");
-        assert_eq!(history[1].content, "2");
-        assert_eq!(history[2].content, "3");
+        assert_eq!(
+            history
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["System", "1", "2", "3"]
+        );
     }
 
     #[test]
@@ -1203,7 +1166,7 @@ mod tests {
     }
 
     #[test]
-    fn scoped_branch_pruning_keeps_recent_window_per_branch() {
+    fn scoped_branch_storage_policy_keeps_complete_history_and_assignments() {
         let mut memory = AgentMemory::default();
         let mut history = vec![
             message(Role::System, "System"),
@@ -1232,7 +1195,13 @@ mod tests {
                 .iter()
                 .map(|message| message.content.as_str())
                 .collect::<Vec<_>>(),
-            vec!["System", "alpha recent", "beta recent"]
+            vec![
+                "System",
+                "alpha old",
+                "alpha recent",
+                "beta old",
+                "beta recent"
+            ]
         );
         assert_eq!(
             memory.branch_assignments.get(&1).map(String::as_str),
@@ -1240,6 +1209,10 @@ mod tests {
         );
         assert_eq!(
             memory.branch_assignments.get(&2).map(String::as_str),
+            Some("alpha")
+        );
+        assert_eq!(
+            memory.branch_assignments.get(&3).map(String::as_str),
             Some("beta")
         );
     }

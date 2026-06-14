@@ -534,7 +534,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sliding_window_sends_only_recent_messages_and_prunes_history() {
+    async fn sliding_window_sends_only_recent_messages_and_keeps_history() {
         let client = FakeClient {
             replies: std::sync::Mutex::new(vec!["answer".to_string()]),
             metrics: std::sync::Mutex::new(Vec::new()),
@@ -576,9 +576,15 @@ mod tests {
         assert_eq!(seen[0][0].content, "history 4");
         assert_eq!(seen[0][1].content, "history 5");
         assert_eq!(seen[0][2].content, "current question");
-        assert_eq!(agent.history().len(), 2);
-        assert_eq!(agent.history()[0].content, "current question");
-        assert_eq!(agent.history()[1].content, "answer");
+        assert_eq!(
+            agent.history().len(),
+            8,
+            "Sliding Window must only limit provider context; local/UI history stays complete"
+        );
+        assert_eq!(agent.history()[0].content, "history 0");
+        assert_eq!(agent.history()[5].content, "history 5");
+        assert_eq!(agent.history()[6].content, "current question");
+        assert_eq!(agent.history()[7].content, "answer");
     }
 
     #[tokio::test]

@@ -43,7 +43,7 @@ ChatWebRequest
 ## UI контекста
 
 - Переключатель стратегий находится в `Параметры -> Контекст`.
-- `Sliding Window` показывает только размер окна N.
+- `Sliding Window` показывает только размер окна N. Оно ограничивает provider request, но не удаляет сообщения из UI/session history.
 - `Summary` показывает размер окна raw сообщений, пороги compaction и настраиваемый summary prompt.
 - `Sticky Facts` показывает размер окна N, facts preamble, persisted KV facts и точный facts block из provider request. Пользователь должен видеть, что хранится в memory sidecar и что уйдет модели.
 - `Branching` показывает кнопки checkpoint, создания двух веток и переключения между ними. Каждая ветка отправляется как отдельная local session, чтобы histories не смешивались.
