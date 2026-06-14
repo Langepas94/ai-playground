@@ -49,7 +49,7 @@ Sliding Window
 Sticky Facts
   -> обновляет key-value facts после каждого user message
   -> хранит facts в `AgentMemory.facts` как local key-value sidecar
-  -> отправляет отдельный read-only facts block + последние N сообщений
+  -> отправляет отдельный read-only facts block + последние N сообщений, включая текущий user prompt
   -> Web debug показывает persisted KV facts и точный facts block для provider request
 
 Branching
@@ -69,7 +69,7 @@ Scoped Branches
 - Provider API не знает про `agent_id`; это локальная сущность.
 - Для summary source of truth - полная local history плюс sidecar summary; raw history не режется sliding-policy.
 - Для sliding window source of truth - уже обрезанная история; старые сообщения намеренно удалены.
-- Для sticky facts source of truth - `AgentMemory.facts` в memory sidecar + последние N сообщений. UI/debug должен показывать и persisted KV, и точный request block.
+- Для sticky facts source of truth - `AgentMemory.facts` в memory sidecar + последние N raw сообщений. N в provider request включает текущий user prompt. UI/debug должен показывать и persisted KV, и точный request block.
 - Для branching каждая ветка имеет свою историю/session; сообщения разных веток не смешиваются.
 - Для scoped branches история хранится в одной session, а агент автоматически выбирает тему для каждого нового user message. Web debug должен показывать выбранную тему и счетчики сообщений по темам.
 - Slash-команды должны менять локальное состояние предсказуемо и не отправлять служебный текст провайдеру.
