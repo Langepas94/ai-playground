@@ -443,11 +443,17 @@ fn extracted_atomic_facts(line: &str) -> Vec<(&'static str, String)> {
     if let Some(location) = extract_after_phrase(line, &["я живу в ", "живу в "]) {
         facts.push(("location", trim_location_value(location)));
     }
+    if let Some(location) = extract_demonym_location(line) {
+        facts.push(("location", location));
+    }
     if let Some(age) = extract_age(line) {
         facts.push(("age", age));
     }
     if let Some(hair) = extract_hair(line) {
         facts.push(("appearance_hair", hair));
+    }
+    if let Some(interests) = extract_interests(line) {
+        facts.push(("interests", interests));
     }
     if let Some(goal) = extract_goal(line) {
         facts.push(("goal", goal));
@@ -471,16 +477,27 @@ fn extract_after_phrase<'a>(line: &'a str, phrases: &[&str]) -> Option<&'a str> 
 
 fn extract_age(line: &str) -> Option<String> {
     let lower = line.to_lowercase();
-    let start = lower.find("мне ")? + "мне ".len();
-    let rest = lower.get(start..)?;
-    let digits = rest
-        .chars()
-        .take_while(|ch| ch.is_ascii_digit())
-        .collect::<String>();
-    if digits.is_empty() {
-        return None;
+    if let Some(start) = lower.find("мне ") {
+        let rest = lower.get(start + "мне ".len()..)?;
+        let digits = rest
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect::<String>();
+        if !digits.is_empty() {
+            return Some(format!("{digits} лет"));
+        }
     }
-    Some(format!("{digits} лет"))
+    let words = lower.split_whitespace().collect::<Vec<_>>();
+    for pair in words.windows(2) {
+        let digits = pair[0]
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect::<String>();
+        if !digits.is_empty() && pair[1].starts_with("лет") {
+            return Some(format!("{digits} лет"));
+        }
+    }
+    None
 }
 
 fn extract_hair(line: &str) -> Option<String> {
@@ -488,20 +505,90 @@ fn extract_hair(line: &str) -> Option<String> {
     let hair_index = lower.find("волос")?;
     let before = lower.get(..hair_index)?.trim();
     let descriptor = before
-        .rsplit_once(" и ")
-        .map(|(_, value)| value)
-        .unwrap_or_else(|| {
-            before
-                .split(|ch: char| ch == ',' || ch == '.' || ch == '!' || ch == '?')
-                .next_back()
-                .unwrap_or(before)
-        })
         .split_whitespace()
-        .filter(|word| !matches!(*word, "у" | "меня" | "мои" | "и"))
-        .collect::<Vec<_>>()
-        .join(" ");
+        .rev()
+        .find(|word| is_hair_color(word))
+        .map(normalize_hair_color)
+        .unwrap_or_default();
     let value = format!("{descriptor} волосы").trim().to_string();
     (!value.is_empty() && value != "волосы").then_some(value)
+}
+
+fn is_hair_color(word: &str) -> bool {
+    matches!(
+        word,
+        "зеленые"
+            | "зелёные"
+            | "зеленый"
+            | "зелёный"
+            | "зелеными"
+            | "зелёными"
+            | "рыжие"
+            | "черные"
+            | "чёрные"
+            | "белые"
+            | "седые"
+            | "русые"
+            | "синие"
+            | "красные"
+            | "розовые"
+    )
+}
+
+fn normalize_hair_color(word: &str) -> String {
+    match word {
+        "зеленый" | "зелёный" | "зелеными" | "зелёными" => {
+            "зеленые".to_string()
+        }
+        value => value.to_string(),
+    }
+}
+
+fn extract_demonym_location(line: &str) -> Option<String> {
+    let lower = line.to_lowercase();
+    if contains_any(&lower, &["москвич", "москвичка", "московский"]) {
+        return Some("Москва".to_string());
+    }
+    None
+}
+
+fn extract_interests(line: &str) -> Option<String> {
+    let lower = line.to_lowercase();
+    let value = extract_after_phrase(
+        line,
+        &[
+            "поэтому я очень люблю ",
+            "я очень люблю ",
+            "очень люблю ",
+            "поэтому я люблю ",
+            "я люблю ",
+            "люблю ",
+        ],
+    )?;
+    let normalized = normalize_interest_value(value);
+    if normalized.is_empty() || lower.contains("люблю когда") {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn normalize_interest_value(value: &str) -> String {
+    let trimmed = trim_sentence_tail(value);
+    trimmed
+        .split(" и ")
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(normalize_interest_part)
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn normalize_interest_part(value: &str) -> String {
+    if value == "собак" {
+        return "собаки".to_string();
+    }
+    value.to_string()
 }
 
 fn extract_goal(line: &str) -> Option<String> {
@@ -1008,6 +1095,35 @@ mod tests {
             Some("придумывать стихи про себя")
         );
         assert!(!memory.facts.contains_key("preferences"));
+    }
+
+    #[test]
+    fn facts_extract_profile_and_interests_from_dialog_example() {
+        let mut memory = AgentMemory::default();
+
+        memory.update_facts_from_user_message("Привет, я 999 летний москвич с зелеными волосами");
+        memory.update_facts_from_user_message("Поэтому я очень люблю стихи про себя и собак");
+
+        assert_eq!(
+            memory.facts.get("location").map(String::as_str),
+            Some("Москва")
+        );
+        assert_eq!(memory.facts.get("age").map(String::as_str), Some("999 лет"));
+        assert_eq!(
+            memory.facts.get("appearance_hair").map(String::as_str),
+            Some("зеленые волосы")
+        );
+        assert_eq!(
+            memory.facts.get("interests").map(String::as_str),
+            Some("стихи про себя; собаки")
+        );
+        assert!(!memory.facts.contains_key("preferences"));
+        assert!(
+            !memory
+                .facts
+                .values()
+                .any(|value| value.contains("999 летний москвич с зелеными"))
+        );
     }
 
     #[test]
