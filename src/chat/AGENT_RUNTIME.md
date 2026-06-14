@@ -111,7 +111,9 @@ system prompt
 ```
 
 После ответа агент сохраняет только system messages и последние N обычных
-сообщений. Старое отбрасывается намеренно.
+сообщений в provider request. Сохраненная local history и UI history не
+обрезаются: sliding window - это request-time context policy, а не storage
+policy.
 
 ### Sticky Facts
 

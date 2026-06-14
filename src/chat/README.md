@@ -44,7 +44,7 @@ Summary
 
 Sliding Window
   -> хранит system prompt + последние N обычных сообщений
-  -> старые обычные сообщения отбрасывает после каждого хода
+  -> старые обычные сообщения не отправляет провайдеру, но не удаляет из local history/UI
 
 Sticky Facts
   -> обновляет key-value facts после каждого user message
@@ -69,7 +69,7 @@ Scoped Branches
 
 - Provider API не знает про `agent_id`; это локальная сущность.
 - Для summary source of truth - полная local history плюс sidecar summary; raw history не режется sliding-policy.
-- Для sliding window source of truth - уже обрезанная история; старые сообщения намеренно удалены.
+- Для sliding window source of truth - полная local history. N применяется только при сборке provider request; UI/session history не режется.
 - Для sticky facts source of truth - полная local history + `AgentMemory.facts` в memory sidecar. N влияет только на provider request и включает текущий user prompt. Нельзя обрезать сохраненную историю sticky facts policy.
 - Sticky facts extraction не должна превращать фразы вида “поэтому я хочу …” в `preferences=<весь prompt>`. Нужно выделять смысловой KV: `goal=...`, `location=...`, `age=...`, `appearance_hair=...`, `preferences=...` только для настоящих style/preference-инструкций.
 - Для branching каждая ветка имеет свою историю/session; сообщения разных веток не смешиваются.
