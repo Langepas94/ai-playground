@@ -292,6 +292,14 @@ impl AgentMemory {
                 self.set_fact(key, value);
                 continue;
             }
+            let extracted = extracted_atomic_facts(line);
+            let has_extracted = !extracted.is_empty();
+            for (key, value) in extracted {
+                self.merge_fact(key, value);
+            }
+            if has_extracted {
+                continue;
+            }
             let lower = line.to_lowercase();
             if contains_any(&lower, &["цель", "goal", "задача"]) {
                 self.merge_fact("goal", compact_fact_value(line));
@@ -309,20 +317,9 @@ impl AgentMemory {
                 ],
             ) {
                 self.merge_fact("constraints", compact_fact_value(line));
-            } else if contains_any(
-                &lower,
-                &[
-                    "предпоч",
-                    "люблю",
-                    "хочу",
-                    "отвечай",
-                    "говори",
-                    "prefer",
-                    "preference",
-                    "style",
-                ],
-            ) {
-                self.merge_fact("preferences", compact_fact_value(line));
+            } else if contains_any(&lower, &["предпоч", "отвечай", "говори", "prefer", "style"])
+            {
+                self.merge_fact("preferences", clean_preference_value(line));
             } else if contains_any(
                 &lower,
                 &[
@@ -481,6 +478,106 @@ fn explicit_key_value(line: &str) -> Option<(String, String)> {
     Some((key, value))
 }
 
+fn extracted_atomic_facts(line: &str) -> Vec<(&'static str, String)> {
+    let mut facts = Vec::new();
+    if let Some(location) = extract_after_phrase(line, &["я живу в ", "живу в "]) {
+        facts.push(("location", trim_location_value(location)));
+    }
+    if let Some(age) = extract_age(line) {
+        facts.push(("age", age));
+    }
+    if let Some(hair) = extract_hair(line) {
+        facts.push(("appearance_hair", hair));
+    }
+    if let Some(goal) = extract_goal(line) {
+        facts.push(("goal", goal));
+    }
+    facts
+        .into_iter()
+        .filter(|(_, value)| !value.is_empty())
+        .collect()
+}
+
+fn extract_after_phrase<'a>(line: &'a str, phrases: &[&str]) -> Option<&'a str> {
+    let lower = line.to_lowercase();
+    for phrase in phrases {
+        if let Some(start) = lower.find(phrase) {
+            let value_start = start + phrase.len();
+            return line.get(value_start..);
+        }
+    }
+    None
+}
+
+fn extract_age(line: &str) -> Option<String> {
+    let lower = line.to_lowercase();
+    let start = lower.find("мне ")? + "мне ".len();
+    let rest = lower.get(start..)?;
+    let digits = rest
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    if digits.is_empty() {
+        return None;
+    }
+    Some(format!("{digits} лет"))
+}
+
+fn extract_hair(line: &str) -> Option<String> {
+    let lower = line.to_lowercase();
+    let hair_index = lower.find("волос")?;
+    let before = lower.get(..hair_index)?.trim();
+    let descriptor = before
+        .rsplit_once(" и ")
+        .map(|(_, value)| value)
+        .unwrap_or_else(|| {
+            before
+                .split(|ch: char| ch == ',' || ch == '.' || ch == '!' || ch == '?')
+                .next_back()
+                .unwrap_or(before)
+        })
+        .split_whitespace()
+        .filter(|word| !matches!(*word, "у" | "меня" | "мои" | "и"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let value = format!("{descriptor} волосы").trim().to_string();
+    (!value.is_empty() && value != "волосы").then_some(value)
+}
+
+fn extract_goal(line: &str) -> Option<String> {
+    let value = extract_after_phrase(
+        line,
+        &[
+            "поэтому я хочу ",
+            "я хочу ",
+            "хочу ",
+            "моя цель ",
+            "цель ",
+            "задача ",
+        ],
+    )?;
+    Some(trim_sentence_tail(value))
+}
+
+fn trim_sentence_tail(value: &str) -> String {
+    let first_part = value
+        .split(|ch: char| ch == '.' || ch == '!' || ch == '?' || ch == '\n')
+        .next()
+        .unwrap_or(value);
+    compact_fact_value(first_part.trim_matches(|ch: char| ch == ',' || ch == ';' || ch == ':'))
+}
+
+fn trim_location_value(value: &str) -> String {
+    let first_part = value
+        .split(',')
+        .next()
+        .unwrap_or(value)
+        .split(" и ")
+        .next()
+        .unwrap_or(value);
+    trim_sentence_tail(first_part)
+}
+
 fn normalize_key(value: &str) -> String {
     let key = value
         .trim()
@@ -490,13 +587,38 @@ fn normalize_key(value: &str) -> String {
     if key.chars().count() > 32 || key.chars().any(|ch| ch.is_control()) {
         return String::new();
     }
-    key
+    canonical_fact_key(&key).to_string()
+}
+
+fn canonical_fact_key(key: &str) -> &str {
+    match key {
+        "цель" | "задача" | "goal" => "goal",
+        "ограничение" | "ограничения" | "constraint" | "constraints" => {
+            "constraints"
+        }
+        "предпочтение" | "предпочтения" | "preference" | "preferences" => {
+            "preferences"
+        }
+        "решение" | "решения" | "decision" | "decisions" => "decisions",
+        "договоренность" | "договоренности" | "agreement" | "agreements" => {
+            "agreements"
+        }
+        value => value,
+    }
 }
 
 fn compact_fact_value(value: &str) -> String {
     let mut compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
     truncate_to_char_boundary(&mut compact, 260);
     compact
+}
+
+fn clean_preference_value(value: &str) -> String {
+    let mut cleaned = value.trim();
+    for prefix in ["пожалуйста", "please"] {
+        cleaned = cleaned.trim_start_matches(prefix).trim();
+    }
+    compact_fact_value(cleaned)
 }
 
 fn truncate_to_char_boundary(value: &mut String, max_chars: usize) {
@@ -856,7 +978,7 @@ mod tests {
         );
 
         assert_eq!(
-            memory.facts.get("цель").map(String::as_str),
+            memory.facts.get("goal").map(String::as_str),
             Some("сделать удобное управление")
         );
         assert!(
@@ -900,9 +1022,32 @@ mod tests {
 
         assert!(!memory.facts.contains_key("api_key"));
         assert_eq!(
-            memory.facts.get("цель").map(String::as_str),
+            memory.facts.get("goal").map(String::as_str),
             Some("безопасная память")
         );
+    }
+
+    #[test]
+    fn facts_extract_atomic_profile_and_goal_without_prompt_garbage() {
+        let mut memory = AgentMemory::default();
+
+        memory.update_facts_from_user_message("Я живу в Москве, мне 999 лет и зеленые волосы");
+        memory.update_facts_from_user_message("Поэтому я хочу придумывать стихи про себя");
+
+        assert_eq!(
+            memory.facts.get("location").map(String::as_str),
+            Some("Москве")
+        );
+        assert_eq!(memory.facts.get("age").map(String::as_str), Some("999 лет"));
+        assert_eq!(
+            memory.facts.get("appearance_hair").map(String::as_str),
+            Some("зеленые волосы")
+        );
+        assert_eq!(
+            memory.facts.get("goal").map(String::as_str),
+            Some("придумывать стихи про себя")
+        );
+        assert!(!memory.facts.contains_key("preferences"));
     }
 
     #[test]

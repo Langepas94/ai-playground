@@ -623,10 +623,10 @@ mod tests {
         assert!(
             seen[0][1]
                 .content
-                .contains("цель: реализовать context strategies")
+                .contains("goal: реализовать context strategies")
         );
         assert!(seen[0][1].content.contains("preferences: Отвечай кратко"));
-        assert!(agent.memory().facts.contains_key("цель"));
+        assert!(agent.memory().facts.contains_key("goal"));
     }
 
     #[tokio::test]
@@ -766,7 +766,7 @@ mod tests {
         let facts = &second_request[0].content;
         assert!(facts.contains("FACTS_KV:"));
         assert!(facts.contains("- goal: build reliable facts memory"));
-        assert!(facts.contains("- constraint: show persisted KV and provider block"));
+        assert!(facts.contains("- constraints: show persisted KV and provider block"));
         let raw_messages = second_request
             .iter()
             .filter(|message| message.role != Role::System)
@@ -786,7 +786,7 @@ mod tests {
             Some("build reliable facts memory")
         );
         assert_eq!(
-            agent.memory().facts.get("constraint").map(String::as_str),
+            agent.memory().facts.get("constraints").map(String::as_str),
             Some("show persisted KV and provider block")
         );
         assert_eq!(
