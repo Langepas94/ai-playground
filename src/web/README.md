@@ -45,7 +45,7 @@ ChatWebRequest
 - Переключатель стратегий находится в `Параметры -> Контекст`.
 - `Sliding Window` показывает только размер окна N. Оно ограничивает provider request, но не удаляет сообщения из UI/session history.
 - `Summary` показывает размер окна raw сообщений, пороги compaction и настраиваемый summary prompt.
-- `Sticky Facts` показывает размер окна N, facts preamble, persisted KV facts и точный facts block из provider request. Пользователь должен видеть, что хранится в memory sidecar и что уйдет модели.
+- `Sticky Facts` показывает размер окна N, facts extraction prompt, facts preamble, persisted KV facts и точный facts block из provider request. Extraction prompt выбирает, что сохранять; preamble описывает provider request.
 - `Branching` показывает кнопки checkpoint, создания двух веток и переключения между ними. Каждая ветка отправляется как отдельная local session, чтобы histories не смешивались.
 - `Scoped Branches` в UI называется и ощущается как auto topics в одном окне: юзер не переключает темы руками, агент сам выбирает/создает тему, а debug-блок показывает выбранную тему и счетчики. Все остается в одной session, но provider request получает только выбранную тему.
 - UI показывает только настройки, нужные выбранной strategy: summary prompt не должен исчезать, но и не должен шуметь в других strategies.
@@ -60,7 +60,7 @@ ChatWebRequest
 - Debug JSON странный: `ChatDebugView` и provider debug в `ChatAgent`.
 - Ошибка приходит без понятного текста: `error::WebError::into_response()`.
 - Strategy/topic control странно работает: `WebMemoryConfig::into_memory_config()`, `ContextDebugView` и topic helpers в `ui.html`.
-- Sticky facts не видно или неясно, что отправлено: `ContextDebugView.facts`, `updateFactsPreview()` и `AgentMemory::facts_block()`.
+- Sticky facts не видно, неясно что собирается или что отправлено: `WebMemoryConfig::facts_extraction_prompt`, `ContextDebugView.facts`, `updateFactsPreview()` и `AgentMemory::facts_block()`.
 - Branch switch потерял сообщения: branch state в `ui.html`, `session_id/new_session/messages` payload.
 
 ## Инварианты UI
@@ -70,4 +70,4 @@ ChatWebRequest
 - Debug view должен редактировать секреты.
 - Web API не должен обходить `ProviderClient` или `ChatAgent`.
 - UI разделяет метрики последнего запроса и накопленные метрики диалога.
-- UI не должен показывать нерелевантные controls: summary controls только для `Summary`, facts prompt только для `Sticky Facts`, auto-topic debug только для `Scoped Branches`.
+- UI не должен показывать нерелевантные controls: summary controls только для `Summary`, facts extraction prompt/facts preamble только для `Sticky Facts`, auto-topic debug только для `Scoped Branches`.

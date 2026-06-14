@@ -679,6 +679,7 @@ struct WebMemoryConfig {
     summary_chunk_messages: Option<usize>,
     summarize_at_context_percent: Option<u8>,
     summary_prompt: Option<String>,
+    facts_extraction_prompt: Option<String>,
     facts_prompt: Option<String>,
     active_branch: Option<String>,
     scoped_auto_route: Option<bool>,
@@ -694,6 +695,7 @@ impl Default for WebMemoryConfig {
             summary_chunk_messages: Some(defaults.summary_chunk_messages),
             summarize_at_context_percent: Some(defaults.summarize_at_context_percent),
             summary_prompt: Some(defaults.summary_prompt),
+            facts_extraction_prompt: Some(defaults.facts_extraction_prompt),
             facts_prompt: Some(defaults.facts_prompt),
             active_branch: Some(defaults.active_branch),
             scoped_auto_route: Some(defaults.scoped_auto_route),
@@ -723,6 +725,8 @@ impl WebMemoryConfig {
                 .summarize_at_context_percent
                 .unwrap_or(defaults.summarize_at_context_percent),
             summary_prompt: blank_to_none(self.summary_prompt).unwrap_or(defaults.summary_prompt),
+            facts_extraction_prompt: blank_to_none(self.facts_extraction_prompt)
+                .unwrap_or(defaults.facts_extraction_prompt),
             facts_prompt: blank_to_none(self.facts_prompt).unwrap_or(defaults.facts_prompt),
             active_branch: blank_to_none(self.active_branch).unwrap_or(defaults.active_branch),
             scoped_auto_route: self.scoped_auto_route.unwrap_or(defaults.scoped_auto_route),
@@ -843,6 +847,7 @@ struct ContextDebugView {
 #[derive(Debug, Clone, Serialize)]
 struct FactsDebugView {
     persisted: Vec<FactDebugView>,
+    extraction_prompt: Option<String>,
     request_block: Option<String>,
     recent_messages_sent: usize,
 }
@@ -907,6 +912,11 @@ fn build_context_debug(
         strategy: config.strategy.to_string(),
         facts: FactsDebugView {
             persisted,
+            extraction_prompt: if config.strategy == MemoryStrategy::StickyFacts {
+                Some(config.facts_extraction_prompt.clone())
+            } else {
+                None
+            },
             request_block: if config.strategy == MemoryStrategy::StickyFacts {
                 memory.facts_block(config.facts_prompt.as_str())
             } else {
@@ -1162,6 +1172,7 @@ mod tests {
             summary_chunk_messages: None,
             summarize_at_context_percent: None,
             summary_prompt: None,
+            facts_extraction_prompt: Some("Collect only favorite colors.".to_string()),
             facts_prompt: Some("Custom provider facts prompt".to_string()),
             active_branch: Some("alpha".to_string()),
             scoped_auto_route: Some(false),
@@ -1170,6 +1181,10 @@ mod tests {
 
         assert_eq!(config.strategy, MemoryStrategy::StickyFacts);
         assert_eq!(config.recent_messages, 4);
+        assert_eq!(
+            config.facts_extraction_prompt,
+            "Collect only favorite colors."
+        );
         assert_eq!(config.facts_prompt, "Custom provider facts prompt");
         assert_eq!(config.active_branch, "alpha");
         assert!(!config.scoped_auto_route);
@@ -1194,6 +1209,7 @@ mod tests {
                 summary_chunk_messages: None,
                 summarize_at_context_percent: None,
                 summary_prompt: None,
+                facts_extraction_prompt: None,
                 facts_prompt: None,
                 active_branch: None,
                 scoped_auto_route: None,
@@ -1214,6 +1230,7 @@ mod tests {
             summary_chunk_messages: None,
             summarize_at_context_percent: None,
             summary_prompt: Some("   ".to_string()),
+            facts_extraction_prompt: Some("   ".to_string()),
             facts_prompt: Some("   ".to_string()),
             active_branch: Some("   ".to_string()),
             scoped_auto_route: None,
@@ -1223,6 +1240,10 @@ mod tests {
         assert_eq!(
             config.summary_prompt,
             crate::chat::memory::DEFAULT_SUMMARY_PROMPT
+        );
+        assert_eq!(
+            config.facts_extraction_prompt,
+            crate::chat::memory::DEFAULT_FACTS_EXTRACTION_PROMPT
         );
         assert_eq!(
             config.facts_prompt,
@@ -1240,6 +1261,7 @@ mod tests {
             summary_chunk_messages: Some(5),
             summarize_at_context_percent: Some(72),
             summary_prompt: Some("Keep only durable project memory.".to_string()),
+            facts_extraction_prompt: None,
             facts_prompt: None,
             active_branch: None,
             scoped_auto_route: None,
@@ -1342,6 +1364,10 @@ mod tests {
                 .any(|fact| fact.key == "goal" && fact.value == "ship KV facts")
         );
         let request_block = debug.facts.request_block.expect("facts request block");
+        assert_eq!(
+            debug.facts.extraction_prompt.as_deref(),
+            Some(crate::chat::memory::DEFAULT_FACTS_EXTRACTION_PROMPT)
+        );
         assert!(request_block.starts_with("Facts are read-only."));
         assert!(request_block.contains("FACTS_KV:"));
         assert!(request_block.contains("- goal: ship KV facts"));
@@ -1659,10 +1685,13 @@ mod tests {
         assert!(INDEX_HTML.contains("id=\"memorySummarizeAfterMessages\""));
         assert!(INDEX_HTML.contains("id=\"memorySummaryChunkMessages\""));
         assert!(INDEX_HTML.contains("id=\"memorySummarizeAtContextPercent\""));
+        assert!(INDEX_HTML.contains("Facts extraction prompt"));
+        assert!(INDEX_HTML.contains("id=\"memoryFactsExtractionPrompt\""));
         assert!(INDEX_HTML.contains("Facts preamble"));
         assert!(INDEX_HTML.contains("id=\"memoryFactsPrompt\""));
         assert!(INDEX_HTML.contains("id=\"factsKvPreview\""));
         assert!(INDEX_HTML.contains("Provider facts block"));
+        assert!(INDEX_HTML.contains("EXTRACTION_PROMPT:"));
         assert!(INDEX_HTML.contains("id=\"memoryActiveBranch\""));
         assert!(
             !INDEX_HTML.contains(">memory_strategy<"),
@@ -1724,6 +1753,10 @@ mod tests {
                 "summarize_at_context_percent: numberValue('memorySummarizeAtContextPercent')"
             ),
             "summary context-pressure percent must be sent to the web API"
+        );
+        assert!(
+            body.contains("facts_extraction_prompt: textValue('memoryFactsExtractionPrompt')"),
+            "custom facts extraction prompt must be sent to the web API"
         );
         assert!(
             body.contains("facts_prompt: textValue('memoryFactsPrompt')"),

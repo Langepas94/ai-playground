@@ -65,7 +65,8 @@ raw-history поведение.
 - `recent_messages` - размер окна N для обычных сообщений;
 - `summarize_after_messages`, `summary_chunk_messages`, `summarize_at_context_percent` - пороги summary compaction;
 - `summary_prompt` - system prompt отдельного summary-запроса;
-- `facts_prompt` - system prompt, который вводит блок facts для provider request.
+- `facts_extraction_prompt` - prompt обновления KV facts после user message;
+- `facts_prompt` - preamble, который вводит уже сохраненный facts block для provider request.
 - `active_branch` - id темы, которую агент выбрал для текущего хода в `scoped-branches`.
 
 UI должен показывать только релевантные настройки выбранной strategy. Summary
@@ -124,12 +125,18 @@ system prompt
 ```
 
 Facts обновляются после каждого user message и хранятся локально в
-`AgentMemory.facts` как key-value sidecar (`<session_id>.memory.toon`). Это не
-summary и не raw history. Sticky facts не режет сохраненную историю: вся session
-history остается локальным source of truth, а N применяется только при сборке
-provider request. В provider request отправляется отдельный facts block с уже
-сохраненными KV facts плюс последние N raw сообщений, где текущий user prompt
-входит в N. Web debug обязан
+`AgentMemory.facts` как key-value sidecar (`<session_id>.memory.toon`). Если
+`facts_extraction_prompt` не пустой, runtime сначала делает отдельный короткий
+provider-запрос: system message = этот extraction prompt, user message =
+существующие facts JSON + последний user prompt. Ответ обязан быть JSON object с
+KV updates. Если prompt пустой или extractor вернул невалидный JSON, используется
+локальный fallback `AgentMemory::update_facts_from_user_message()`.
+
+Это не summary и не raw history. Sticky facts не режет сохраненную историю: вся
+session history остается локальным source of truth, а N применяется только при
+сборке provider request. В основной provider request отправляется отдельный
+facts block с уже сохраненными KV facts плюс последние N raw сообщений, где
+текущий user prompt входит в N. Web debug обязан
 показывать:
 
 - persisted KV facts;
@@ -155,6 +162,11 @@ Extractor обязан сохранять атомарные KV-факты. Не
 - `interests=стихи про себя; собаки`;
 - `goal=придумывать стихи про себя`;
 - `preferences=отвечай кратко`.
+
+Пользователь может менять `facts_extraction_prompt`, чтобы выбрать, какие
+категории собирать: только ограничения, данные о человеке, любимые цвета,
+питомцы, проектные решения и т.д. `facts_prompt` не выбирает категории; он только
+объясняет provider request уже собранный `FACTS_KV`.
 
 ### Branching
 
@@ -203,8 +215,9 @@ labels при сборке request. Debug view должен показывать
 - control/pricing/billing параметры.
 
 Отдельный summary-запрос выполняется только для strategy `summary`. Настраиваемый
-`facts_prompt` влияет только на system block перед facts в основном запросе, а
-`summary_prompt` влияет только на compaction-запрос.
+`facts_extraction_prompt` выполняет отдельный extraction-запрос только для
+strategy `sticky-facts`; `facts_prompt` влияет только на system block перед facts
+в основном запросе; `summary_prompt` влияет только на compaction-запрос.
 
 ## CLI и Web
 
