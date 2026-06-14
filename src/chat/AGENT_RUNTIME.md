@@ -117,12 +117,22 @@ system prompt
 
 ```text
 system prompt
-+ facts system block with configurable prompt
++ read-only facts block built from local key-value memory
 + last N non-system messages
 + new user prompt
 ```
 
-Facts обновляются после каждого user message. Хранятся устойчивые данные:
+Facts обновляются после каждого user message и хранятся локально в
+`AgentMemory.facts` как key-value sidecar (`<session_id>.memory.toon`). Это не
+summary и не raw history. В provider request отправляется отдельный facts block
+с уже сохраненными KV facts плюс последние N сообщений. Web debug обязан
+показывать:
+
+- persisted KV facts;
+- точный facts block, который попал в provider request;
+- сколько raw messages отправлено вместе с facts.
+
+Хранятся устойчивые данные:
 
 - цель;
 - ограничения;
@@ -171,7 +181,7 @@ labels при сборке request. Debug view должен показывать
 
 - system prompt, если он есть;
 - summary как system message, если выбрана `summary` и summary уже есть;
-- facts как system message, если выбрана sticky facts и facts не пустые;
+- facts как отдельный read-only context message, если выбрана sticky facts и facts не пустые;
 - выбранное окно raw messages или active internal branch window;
 - текущий user prompt;
 - control/pricing/billing параметры.

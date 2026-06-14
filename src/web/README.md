@@ -45,7 +45,7 @@ ChatWebRequest
 - Переключатель стратегий находится в `Параметры -> Контекст`.
 - `Sliding Window` показывает только размер окна N.
 - `Summary` показывает размер окна raw сообщений, пороги compaction и настраиваемый summary prompt.
-- `Sticky Facts` показывает размер окна N, настраиваемый facts prompt и текущие facts как read-only блок в UI/debug request.
+- `Sticky Facts` показывает размер окна N, facts preamble, persisted KV facts и точный facts block из provider request. Пользователь должен видеть, что хранится в memory sidecar и что уйдет модели.
 - `Branching` показывает кнопки checkpoint, создания двух веток и переключения между ними. Каждая ветка отправляется как отдельная local session, чтобы histories не смешивались.
 - `Scoped Branches` в UI называется и ощущается как auto topics в одном окне: юзер не переключает темы руками, агент сам выбирает/создает тему, а debug-блок показывает выбранную тему и счетчики. Все остается в одной session, но provider request получает только выбранную тему.
 - UI показывает только настройки, нужные выбранной strategy: summary prompt не должен исчезать, но и не должен шуметь в других strategies.
@@ -60,6 +60,7 @@ ChatWebRequest
 - Debug JSON странный: `ChatDebugView` и provider debug в `ChatAgent`.
 - Ошибка приходит без понятного текста: `error::WebError::into_response()`.
 - Strategy/topic control странно работает: `WebMemoryConfig::into_memory_config()`, `ContextDebugView` и topic helpers в `ui.html`.
+- Sticky facts не видно или неясно, что отправлено: `ContextDebugView.facts`, `updateFactsPreview()` и `AgentMemory::facts_block()`.
 - Branch switch потерял сообщения: branch state в `ui.html`, `session_id/new_session/messages` payload.
 
 ## Инварианты UI
