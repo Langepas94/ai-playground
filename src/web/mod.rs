@@ -1293,9 +1293,9 @@ mod tests {
             },
         ];
         let mut memory = crate::chat::AgentMemory::default();
-        memory.branch_assignments.insert(0, "rust".to_string());
-        memory.branch_assignments.insert(1, "rust".to_string());
-        memory.branch_assignments.insert(2, "travel".to_string());
+        memory.branch_assignments.insert("0".to_string(), "rust".to_string());
+        memory.branch_assignments.insert("1".to_string(), "rust".to_string());
+        memory.branch_assignments.insert("2".to_string(), "travel".to_string());
         let config = MemoryConfig {
             strategy: MemoryStrategy::ScopedBranches,
             active_branch: "travel".to_string(),

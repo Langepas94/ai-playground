@@ -69,7 +69,7 @@ pub struct AgentMemory {
     #[serde(default)]
     pub facts: BTreeMap<String, String>,
     #[serde(default)]
-    pub branch_assignments: BTreeMap<usize, String>,
+    pub branch_assignments: BTreeMap<String, String>,
     #[serde(default)]
     pub session_summary: Option<String>,
     #[serde(default)]
@@ -188,8 +188,8 @@ impl AgentMemory {
             return;
         }
         let branch = normalized_branch(config.active_branch.as_str());
-        self.branch_assignments.insert(user_index, branch.clone());
-        self.branch_assignments.insert(assistant_index, branch);
+        self.branch_assignments.insert(user_index.to_string(), branch.clone());
+        self.branch_assignments.insert(assistant_index.to_string(), branch);
     }
 
     pub fn select_scoped_topic(
@@ -237,7 +237,7 @@ impl AgentMemory {
             }
             let branch = self
                 .branch_assignments
-                .get(&index)
+                .get(&index.to_string())
                 .map(|value| normalized_branch(value))
                 .unwrap_or_else(|| fallback_branch.clone());
             *counts.entry(branch).or_insert(0) += 1;
@@ -382,7 +382,7 @@ impl AgentMemory {
 
     fn branch_for_index(&self, index: usize, config: &MemoryConfig) -> String {
         self.branch_assignments
-            .get(&index)
+            .get(&index.to_string())
             .map(|value| normalized_branch(value))
             .unwrap_or_else(|| normalized_branch(config.active_branch.as_str()))
     }
@@ -393,7 +393,7 @@ impl AgentMemory {
             if message.role == Role::System {
                 continue;
             }
-            let Some(branch) = self.branch_assignments.get(&index) else {
+            let Some(branch) = self.branch_assignments.get(&index.to_string()) else {
                 continue;
             };
             let entry = keywords.entry(normalized_branch(branch)).or_default();
@@ -1228,10 +1228,10 @@ mod tests {
             message(Role::User, "beta user"),
             message(Role::Assistant, "beta assistant"),
         ];
-        memory.branch_assignments.insert(1, "alpha".to_string());
-        memory.branch_assignments.insert(2, "alpha".to_string());
-        memory.branch_assignments.insert(3, "beta".to_string());
-        memory.branch_assignments.insert(4, "beta".to_string());
+        memory.branch_assignments.insert("1".to_string(), "alpha".to_string());
+        memory.branch_assignments.insert("2".to_string(), "alpha".to_string());
+        memory.branch_assignments.insert("3".to_string(), "beta".to_string());
+        memory.branch_assignments.insert("4".to_string(), "beta".to_string());
 
         let context = memory.build_context(
             &history,
@@ -1265,16 +1265,16 @@ mod tests {
         ];
         memory
             .branch_assignments
-            .insert(0, "rust async".to_string());
+            .insert("0".to_string(), "rust async".to_string());
         memory
             .branch_assignments
-            .insert(1, "rust async".to_string());
+            .insert("1".to_string(), "rust async".to_string());
         memory
             .branch_assignments
-            .insert(2, "vacation budget".to_string());
+            .insert("2".to_string(), "vacation budget".to_string());
         memory
             .branch_assignments
-            .insert(3, "vacation budget".to_string());
+            .insert("3".to_string(), "vacation budget".to_string());
 
         let selected = memory.select_scoped_topic(
             "Back to Rust async ownership please",
@@ -1294,10 +1294,10 @@ mod tests {
         ];
         memory
             .branch_assignments
-            .insert(0, "rust async".to_string());
+            .insert("0".to_string(), "rust async".to_string());
         memory
             .branch_assignments
-            .insert(1, "rust async".to_string());
+            .insert("1".to_string(), "rust async".to_string());
 
         let selected = memory.select_scoped_topic(
             "Plan family vacation tickets and hotel budget",
@@ -1327,10 +1327,10 @@ mod tests {
             message(Role::User, "beta old"),
             message(Role::Assistant, "beta recent"),
         ];
-        memory.branch_assignments.insert(1, "alpha".to_string());
-        memory.branch_assignments.insert(2, "alpha".to_string());
-        memory.branch_assignments.insert(3, "beta".to_string());
-        memory.branch_assignments.insert(4, "beta".to_string());
+        memory.branch_assignments.insert("1".to_string(), "alpha".to_string());
+        memory.branch_assignments.insert("2".to_string(), "alpha".to_string());
+        memory.branch_assignments.insert("3".to_string(), "beta".to_string());
+        memory.branch_assignments.insert("4".to_string(), "beta".to_string());
 
         memory.apply_scoped_branch_storage_policy(
             &mut history,
@@ -1356,16 +1356,49 @@ mod tests {
             ]
         );
         assert_eq!(
-            memory.branch_assignments.get(&1).map(String::as_str),
+            memory.branch_assignments.get("1").map(String::as_str),
             Some("alpha")
         );
         assert_eq!(
-            memory.branch_assignments.get(&2).map(String::as_str),
+            memory.branch_assignments.get("2").map(String::as_str),
             Some("alpha")
         );
         assert_eq!(
-            memory.branch_assignments.get(&3).map(String::as_str),
+            memory.branch_assignments.get("3").map(String::as_str),
             Some("beta")
         );
+    }
+
+    #[test]
+    fn agent_memory_toon_roundtrip_with_branch_assignments() {
+        let mut memory = AgentMemory::default();
+        memory.branch_assignments.insert("0".to_string(), "feature-x".to_string());
+        memory.branch_assignments.insert("1".to_string(), "main".to_string());
+        memory.branch_assignments.insert("2".to_string(), "feature-x".to_string());
+        memory.facts.insert("topic".to_string(), "database design".to_string());
+        memory.session_summary = Some("Discussed indexes and caching".to_string());
+        memory.summarized_message_count = 5;
+
+        let toon_str = crate::toon_codec::to_string(&memory).expect("encode to TOON");
+        let decoded: AgentMemory = crate::toon_codec::from_str(&toon_str).expect("decode from TOON");
+
+        assert_eq!(decoded.branch_assignments.get("0"), Some(&"feature-x".to_string()));
+        assert_eq!(decoded.branch_assignments.get("1"), Some(&"main".to_string()));
+        assert_eq!(decoded.branch_assignments.get("2"), Some(&"feature-x".to_string()));
+        assert_eq!(decoded.facts.get("topic"), Some(&"database design".to_string()));
+        assert_eq!(decoded.session_summary, Some("Discussed indexes and caching".to_string()));
+        assert_eq!(decoded.summarized_message_count, 5);
+    }
+
+    #[test]
+    fn agent_memory_json_fallback_with_branch_assignments() {
+        let json = r#"{"facts":{},"branch_assignments":{"0":"feature-x","1":"main","2":"feature-x"},"session_summary":"Old session","summarized_message_count":3}"#;
+        let decoded: AgentMemory = crate::toon_codec::from_str_or_json(json).expect("decode from JSON");
+
+        assert_eq!(decoded.branch_assignments.get("0"), Some(&"feature-x".to_string()));
+        assert_eq!(decoded.branch_assignments.get("1"), Some(&"main".to_string()));
+        assert_eq!(decoded.branch_assignments.get("2"), Some(&"feature-x".to_string()));
+        assert_eq!(decoded.session_summary, Some("Old session".to_string()));
+        assert_eq!(decoded.summarized_message_count, 3);
     }
 }

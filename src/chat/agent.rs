@@ -1414,7 +1414,7 @@ mod tests {
             agent
                 .memory()
                 .branch_assignments
-                .get(&0)
+                .get("0")
                 .map(String::as_str),
             Some("alpha")
         );
@@ -1422,7 +1422,7 @@ mod tests {
             agent
                 .memory()
                 .branch_assignments
-                .get(&2)
+                .get("2")
                 .map(String::as_str),
             Some("beta")
         );
@@ -1456,16 +1456,16 @@ mod tests {
         let mut memory = AgentMemory::default();
         memory
             .branch_assignments
-            .insert(0, "rust async".to_string());
+            .insert("0".to_string(), "rust async".to_string());
         memory
             .branch_assignments
-            .insert(1, "rust async".to_string());
+            .insert("1".to_string(), "rust async".to_string());
         memory
             .branch_assignments
-            .insert(2, "vacation budget".to_string());
+            .insert("2".to_string(), "vacation budget".to_string());
         memory
             .branch_assignments
-            .insert(3, "vacation budget".to_string());
+            .insert("3".to_string(), "vacation budget".to_string());
         let mut agent = ChatAgent::new(
             test_profile(),
             "secret".to_string(),
@@ -1540,7 +1540,7 @@ mod tests {
             agent
                 .memory()
                 .branch_assignments
-                .get(&1)
+                .get("1")
                 .map(String::as_str),
             Some("manual finance")
         );
