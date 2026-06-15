@@ -39,6 +39,7 @@ pub async fn interactive_chat(
     );
     agent.set_memory_config(memory_config.clone());
     agent.set_context_limit(options.context_limit);
+    agent.set_topic_store(Some(store.topic_file_storage(&session.id)?));
     let mut goal_state = GoalState::new(goal.required_fields.clone());
     let mut pending_attachments: Vec<PathBuf> = Vec::new();
     println!(
@@ -79,6 +80,7 @@ pub async fn interactive_chat(
             "/clear" => {
                 agent.clear_history();
                 session = store.create_session()?;
+                agent.set_topic_store(Some(store.topic_file_storage(&session.id)?));
                 memory = agent.memory().clone();
                 store.save_session(&session_key, &session.id, agent.history())?;
                 store.save_memory(&session.id, &memory)?;
@@ -679,6 +681,7 @@ mod tests {
             branch_assignments: Default::default(),
             session_summary: Some("legacy summary should stay hidden".to_string()),
             summarized_message_count: 42,
+            ..super::super::AgentMemory::default()
         };
 
         let description = describe_memory(

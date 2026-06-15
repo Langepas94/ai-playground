@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::secrets::MemorySecretStore;
 
@@ -189,6 +188,10 @@ fn web_memory_config_maps_strategy_and_limits() {
         facts_prompt: Some("Custom provider facts prompt".to_string()),
         active_branch: Some("alpha".to_string()),
         scoped_auto_route: Some(false),
+        topic_file_routing: None,
+        topic_drift_guard: None,
+        topic_auto_create: None,
+        topic_classifier_prompt: None,
     }
     .into_memory_config();
 
@@ -226,6 +229,10 @@ fn web_memory_config_supports_all_context_strategies() {
             facts_prompt: None,
             active_branch: None,
             scoped_auto_route: None,
+            topic_file_routing: None,
+            topic_drift_guard: None,
+            topic_auto_create: None,
+            topic_classifier_prompt: None,
         }
         .into_memory_config();
 
@@ -247,6 +254,10 @@ fn web_memory_config_blank_facts_prompt_uses_default() {
         facts_prompt: Some("   ".to_string()),
         active_branch: Some("   ".to_string()),
         scoped_auto_route: None,
+        topic_file_routing: None,
+        topic_drift_guard: None,
+        topic_auto_create: None,
+        topic_classifier_prompt: Some("   ".to_string()),
     }
     .into_memory_config();
 
@@ -278,6 +289,10 @@ fn web_memory_config_maps_summary_settings_and_prompt() {
         facts_prompt: None,
         active_branch: None,
         scoped_auto_route: None,
+        topic_file_routing: None,
+        topic_drift_guard: None,
+        topic_auto_create: None,
+        topic_classifier_prompt: None,
     }
     .into_memory_config();
 

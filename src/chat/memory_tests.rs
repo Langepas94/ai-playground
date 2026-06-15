@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn message(role: Role, content: &str) -> ChatMessage {
@@ -124,6 +123,7 @@ fn summary_context_layers_summary_before_unsummarized_tail() {
         branch_assignments: Default::default(),
         session_summary: Some("User likes concise answers.".to_string()),
         summarized_message_count: 3,
+        ..AgentMemory::default()
     };
     let history = vec![
         message(Role::System, "Base system prompt"),

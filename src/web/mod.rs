@@ -273,6 +273,7 @@ async fn chat(
     );
     agent.set_memory_config(memory_config);
     agent.set_context_limit(context_limit);
+    agent.set_topic_store(Some(state.sessions.topic_file_storage(&session.id)?));
     let (response, provider_debug, context_metrics) = agent
         .respond_with_debug_and_context_metrics(&state.client, prompt)
         .await?;
@@ -351,12 +352,52 @@ async fn chat_stream(
     );
     agent.set_memory_config(memory_config);
     agent.set_context_limit(context_limit);
-    let (chat_request, context_metrics) =
-        agent.prepare_stream_request(&state.client, &prompt).await;
+    agent.set_topic_store(Some(state.sessions.topic_file_storage(&session.id)?));
+    let prepared_stream = agent.prepare_stream_request(&state.client, &prompt).await?;
     let session_id = session.id.clone();
     let session_metrics_before = session.metrics.clone();
 
     let (tx, rx) = mpsc::unbounded_channel::<String>();
+    if let Some(local_response) = prepared_stream.local_response {
+        let session_metrics = add_request_metrics(&session_metrics_before, &local_response.metrics);
+        state
+            .sessions
+            .save_session(&session_key, &session_id, agent.history())?;
+        state.sessions.save_metrics(&session_id, &session_metrics)?;
+        state.sessions.save_memory(&session_id, agent.memory())?;
+        let context_debug =
+            build_context_debug(agent.memory(), &agent.memory_config(), agent.history());
+        let done_event = serde_json::json!({
+            "done": true,
+            "session_id": session_id,
+            "metrics": local_response.metrics,
+            "context_metrics": prepared_stream.context_metrics,
+            "session_metrics": session_metrics,
+            "messages": agent.history(),
+            "context_debug": context_debug,
+            "debug": ChatDebugView {
+                provider_request: crate::providers::HttpDebugRequest {
+                    method: "LOCAL".to_string(),
+                    url: "local://topic-file-routing/not-found".to_string(),
+                    headers: Default::default(),
+                    body: serde_json::json!({}),
+                },
+                provider_response: crate::providers::HttpDebugResponse {
+                    status: 200,
+                    headers: Default::default(),
+                    body: serde_json::json!({ "finish_reason": "topic_not_found" }),
+                },
+            },
+        });
+        let _ = tx.send(local_response.text);
+        let _ = tx.send(format!("\x00DONE\x00{done_event}"));
+        drop(tx);
+        return Ok(Sse::new(sse_event_stream(rx)));
+    }
+    let chat_request = prepared_stream
+        .request
+        .ok_or_else(|| AppError::InvalidInput("Stream request was not prepared".to_string()))?;
+    let context_metrics = prepared_stream.context_metrics;
     let client = state.client.clone();
     let sessions = state.sessions.clone();
 
@@ -405,7 +446,13 @@ async fn chat_stream(
         }
     });
 
-    let sse_stream = stream::unfold(rx, |mut rx| async move {
+    Ok(Sse::new(sse_event_stream(rx)))
+}
+
+fn sse_event_stream(
+    rx: mpsc::UnboundedReceiver<String>,
+) -> impl Stream<Item = Result<Event, Infallible>> {
+    stream::unfold(rx, |mut rx| async move {
         let msg = rx.recv().await?;
         if let Some(payload) = msg.strip_prefix("\x00DONE\x00") {
             let event = Event::default().event("done").data(payload.to_string());
@@ -417,9 +464,7 @@ async fn chat_stream(
             let event = Event::default().event("token").data(msg);
             Some((Ok(event), rx))
         }
-    });
-
-    Ok(Sse::new(sse_stream))
+    })
 }
 
 async fn chat_session(
@@ -683,6 +728,10 @@ struct WebMemoryConfig {
     facts_prompt: Option<String>,
     active_branch: Option<String>,
     scoped_auto_route: Option<bool>,
+    topic_file_routing: Option<bool>,
+    topic_drift_guard: Option<bool>,
+    topic_auto_create: Option<bool>,
+    topic_classifier_prompt: Option<String>,
 }
 
 impl Default for WebMemoryConfig {
@@ -699,6 +748,10 @@ impl Default for WebMemoryConfig {
             facts_prompt: Some(defaults.facts_prompt),
             active_branch: Some(defaults.active_branch),
             scoped_auto_route: Some(defaults.scoped_auto_route),
+            topic_file_routing: Some(defaults.topic_file_routing),
+            topic_drift_guard: Some(defaults.topic_drift_guard),
+            topic_auto_create: Some(defaults.topic_auto_create),
+            topic_classifier_prompt: Some(defaults.topic_classifier_prompt),
         }
     }
 }
@@ -730,6 +783,13 @@ impl WebMemoryConfig {
             facts_prompt: blank_to_none(self.facts_prompt).unwrap_or(defaults.facts_prompt),
             active_branch: blank_to_none(self.active_branch).unwrap_or(defaults.active_branch),
             scoped_auto_route: self.scoped_auto_route.unwrap_or(defaults.scoped_auto_route),
+            topic_file_routing: self
+                .topic_file_routing
+                .unwrap_or(defaults.topic_file_routing),
+            topic_drift_guard: self.topic_drift_guard.unwrap_or(defaults.topic_drift_guard),
+            topic_auto_create: self.topic_auto_create.unwrap_or(defaults.topic_auto_create),
+            topic_classifier_prompt: blank_to_none(self.topic_classifier_prompt)
+                .unwrap_or(defaults.topic_classifier_prompt),
         }
     }
 }
