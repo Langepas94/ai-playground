@@ -14,7 +14,7 @@ use crate::{
     providers::{ChatMessage, RequestCost, RequestMetrics, Role, TokenUsage},
 };
 
-use super::memory::AgentMemory;
+use super::memory::{AgentMemory, TopicFile};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConversationSession {
@@ -26,6 +26,12 @@ pub struct ConversationSession {
 #[derive(Debug, Clone)]
 pub struct LocalSessionStore {
     root: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct TopicFileStorage {
+    root: PathBuf,
+    session_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -228,6 +234,14 @@ impl LocalSessionStore {
         Ok(())
     }
 
+    pub fn topic_file_storage(&self, session_id: &str) -> Result<TopicFileStorage, AppError> {
+        validate_session_id(session_id)?;
+        Ok(TopicFileStorage {
+            root: self.sessions_dir(),
+            session_id: session_id.to_string(),
+        })
+    }
+
     pub fn save_metrics(&self, session_id: &str, metrics: &RequestMetrics) -> Result<(), AppError> {
         validate_session_id(session_id)?;
         fs::create_dir_all(self.sessions_dir()).map_err(|error| {
@@ -324,6 +338,56 @@ impl LocalSessionStore {
     fn index_path(&self, profile_key: &str) -> PathBuf {
         self.index_dir()
             .join(format!("{}.txt", safe_key(profile_key)))
+    }
+}
+
+impl TopicFileStorage {
+    pub fn load_topic_file(&self, topic_id: &str) -> Result<Option<TopicFile>, AppError> {
+        validate_session_id(&self.session_id)?;
+        let path = self.topic_path(topic_id);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let raw = fs::read_to_string(&path)
+            .map_err(|error| config_error(path.clone(), format!("read failed: {error}")))?;
+        crate::toon_codec::from_str_or_json::<TopicFile>(&raw).map(Some)
+    }
+
+    pub fn save_topic_file(&self, topic_file: &TopicFile) -> Result<(), AppError> {
+        validate_session_id(&self.session_id)?;
+        fs::create_dir_all(self.topic_dir()).map_err(|error| {
+            config_error(
+                self.topic_dir(),
+                format!("could not create directory: {error}"),
+            )
+        })?;
+        let path = self.topic_path(&topic_file.metadata.id);
+        let temp_path = path.with_extension("topic.toon.tmp");
+        {
+            let mut file = fs::File::create(&temp_path).map_err(|error| {
+                config_error(temp_path.clone(), format!("create failed: {error}"))
+            })?;
+            let raw = crate::toon_codec::to_string(topic_file)?;
+            writeln!(file, "{raw}").map_err(|error| {
+                config_error(temp_path.clone(), format!("write failed: {error}"))
+            })?;
+        }
+        fs::rename(&temp_path, &path).map_err(|error| {
+            config_error(
+                path.clone(),
+                format!("could not replace topic file: {error}"),
+            )
+        })?;
+        Ok(())
+    }
+
+    fn topic_dir(&self) -> PathBuf {
+        self.root.join(format!("{}.topics", self.session_id))
+    }
+
+    fn topic_path(&self, topic_id: &str) -> PathBuf {
+        self.topic_dir()
+            .join(format!("{}.topic.toon", safe_key(topic_id)))
     }
 }
 
@@ -669,6 +733,7 @@ mod tests {
             branch_assignments: Default::default(),
             session_summary: Some("User prefers short technical answers.".to_string()),
             summarized_message_count: 8,
+            ..AgentMemory::default()
         };
 
         store
@@ -677,6 +742,33 @@ mod tests {
         let loaded = store.load_memory(&session.id).expect("load memory");
 
         assert_eq!(loaded, memory);
+    }
+
+    #[test]
+    fn local_session_store_roundtrips_topic_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalSessionStore::from_root(dir.path().join("sessions"));
+        let session = store.create_session().expect("create session");
+        let topic_store = store.topic_file_storage(&session.id).expect("topic store");
+        let topic = TopicFile {
+            metadata: crate::chat::memory::TopicMetadata {
+                id: "rust async".to_string(),
+                title: "Rust async".to_string(),
+                short_description: "Ownership and async context.".to_string(),
+                tags: vec!["rust".to_string(), "async".to_string()],
+                message_count: 4,
+                updated_at_unix: 123,
+            },
+            context: "user: borrow checker\nassistant: use ownership boundaries".to_string(),
+        };
+
+        topic_store.save_topic_file(&topic).expect("save topic");
+        let loaded = topic_store
+            .load_topic_file("rust async")
+            .expect("load topic")
+            .expect("topic exists");
+
+        assert_eq!(loaded, topic);
     }
 
     #[test]

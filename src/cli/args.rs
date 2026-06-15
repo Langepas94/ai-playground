@@ -643,6 +643,10 @@ impl From<&MemoryArgs> for chat::MemoryConfig {
             facts_prompt: args.memory_facts_prompt.clone(),
             active_branch: args.memory_active_branch.clone(),
             scoped_auto_route: args.memory_scoped_auto_route,
+            topic_file_routing: chat::MemoryConfig::default().topic_file_routing,
+            topic_drift_guard: chat::MemoryConfig::default().topic_drift_guard,
+            topic_auto_create: chat::MemoryConfig::default().topic_auto_create,
+            topic_classifier_prompt: chat::MemoryConfig::default().topic_classifier_prompt,
         }
     }
 }

@@ -7,13 +7,17 @@ use crate::{
     },
 };
 
-use super::memory::{AgentMemory, MemoryConfig, MemoryStrategy, format_messages_for_summary};
+use super::memory::{
+    AgentMemory, MemoryConfig, MemoryStrategy, TopicRouteDecision, format_messages_for_summary,
+};
+use super::store::TopicFileStorage;
 use super::token_accounting::{TokenEstimate, estimate_exchange, estimate_messages_tokens};
 use tokio::time::{Duration, timeout};
 
 pub const LOCAL_SESSION_AGENT_ID: &str = "local-session-agent";
 const MEMORY_COMPACT_TIMEOUT: Duration = Duration::from_secs(30);
 const MEMORY_FACTS_EXTRACT_TIMEOUT: Duration = Duration::from_secs(20);
+const TOPIC_CLASSIFIER_TIMEOUT: Duration = Duration::from_secs(20);
 const PREFLIGHT_COMPACT_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_PREFLIGHT_SUMMARY_PASSES: usize = 3;
 
@@ -47,6 +51,31 @@ pub fn selected_agent(agent_id: Option<&str>) -> Result<&'static AgentDescriptor
         .ok_or_else(|| AppError::InvalidInput(format!("Unsupported agent: {id}")))
 }
 
+#[derive(Debug)]
+enum PromptIngest {
+    Continue(Option<RequestMetrics>),
+    TopicNotFound {
+        metrics: Option<RequestMetrics>,
+        message: String,
+    },
+}
+
+impl PromptIngest {
+    fn into_parts(self) -> (Option<RequestMetrics>, Option<String>) {
+        match self {
+            Self::Continue(metrics) => (metrics, None),
+            Self::TopicNotFound { metrics, message } => (metrics, Some(message)),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct PreparedStreamRequest {
+    pub request: Option<ChatRequest>,
+    pub context_metrics: Option<RequestMetrics>,
+    pub local_response: Option<ChatResponse>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatAgent {
     profile: ProfileConfig,
@@ -58,6 +87,7 @@ pub struct ChatAgent {
     pricing: Option<ModelPricing>,
     billing: Option<BillingLookup>,
     context_limit: Option<u32>,
+    topic_store: Option<TopicFileStorage>,
 }
 
 impl ChatAgent {
@@ -80,6 +110,7 @@ impl ChatAgent {
             pricing,
             billing,
             context_limit: None,
+            topic_store: None,
         }
     }
 
@@ -103,6 +134,10 @@ impl ChatAgent {
         self.context_limit = context_limit.filter(|limit| *limit > 0);
     }
 
+    pub fn set_topic_store(&mut self, topic_store: Option<TopicFileStorage>) {
+        self.topic_store = topic_store;
+    }
+
     pub fn context_limit(&self) -> Option<u32> {
         self.context_limit
     }
@@ -118,8 +153,9 @@ impl ChatAgent {
 
     /// Record user prompt + assistant response into history after streaming completes.
     pub fn record_stream_response(&mut self, prompt: String, answer: String) {
-        self.commit_turn(prompt, answer);
+        self.commit_turn(prompt.clone(), answer.clone());
         self.apply_context_storage_policy();
+        let _ = self.update_active_topic_file(&prompt, &answer);
     }
 
     pub async fn compact_memory(
@@ -134,7 +170,12 @@ impl ChatAgent {
         client: &dyn ProviderClient,
         prompt: String,
     ) -> Result<ChatResponse, AppError> {
-        let mut context_metrics = self.ingest_user_prompt(client, &prompt).await;
+        let (mut context_metrics, topic_not_found) =
+            self.ingest_user_prompt(client, &prompt).await?.into_parts();
+        if let Some(message) = topic_not_found {
+            self.commit_turn(prompt, message.clone());
+            return Ok(local_chat_response(message, context_metrics));
+        }
         context_metrics = merge_optional_metrics(
             context_metrics,
             self.precompact_before_request(client, &prompt).await,
@@ -146,8 +187,9 @@ impl ChatAgent {
                 self.request_with_user_prompt(prompt.clone()),
             )
             .await?;
-        self.commit_turn(prompt, response.text.clone());
+        self.commit_turn(prompt.clone(), response.text.clone());
         self.apply_context_storage_policy();
+        self.update_active_topic_file(prompt.as_str(), response.text.as_str())?;
         let mut response = response;
         if let Some(metrics) = context_metrics {
             response.metrics = crate::chat::add_request_metrics(&response.metrics, &metrics);
@@ -181,7 +223,13 @@ impl ChatAgent {
         ),
         AppError,
     > {
-        let mut context_metrics = self.ingest_user_prompt(client, &prompt).await;
+        let (mut context_metrics, topic_not_found) =
+            self.ingest_user_prompt(client, &prompt).await?.into_parts();
+        if let Some(message) = topic_not_found {
+            self.commit_turn(prompt, message.clone());
+            let response = local_chat_response(message, context_metrics.clone());
+            return Ok((response, local_provider_debug(), context_metrics));
+        }
         context_metrics = merge_optional_metrics(
             context_metrics,
             self.precompact_before_request(client, &prompt).await,
@@ -193,8 +241,9 @@ impl ChatAgent {
                 self.request_with_user_prompt(prompt.clone()),
             )
             .await?;
-        self.commit_turn(prompt, response.text.clone());
+        self.commit_turn(prompt.clone(), response.text.clone());
         self.apply_context_storage_policy();
+        self.update_active_topic_file(prompt.as_str(), response.text.as_str())?;
         let mut response = response;
         if let Some(metrics) = &context_metrics {
             response.metrics = crate::chat::add_request_metrics(&response.metrics, metrics);
@@ -213,19 +262,28 @@ impl ChatAgent {
         &mut self,
         client: &dyn ProviderClient,
         prompt: &str,
-    ) -> (
-        crate::providers::ChatRequest,
-        Option<crate::providers::RequestMetrics>,
-    ) {
-        let mut context_metrics = self.ingest_user_prompt(client, prompt).await;
+    ) -> Result<PreparedStreamRequest, AppError> {
+        let (mut context_metrics, topic_not_found) = self
+            .ingest_user_prompt(client, prompt)
+            .await
+            .map(PromptIngest::into_parts)?;
+        if let Some(message) = topic_not_found {
+            self.commit_turn(prompt.to_string(), message.clone());
+            return Ok(PreparedStreamRequest {
+                request: None,
+                context_metrics: context_metrics.clone(),
+                local_response: Some(local_chat_response(message, context_metrics)),
+            });
+        }
         context_metrics = merge_optional_metrics(
             context_metrics,
             self.precompact_before_request(client, prompt).await,
         );
-        (
-            self.request_with_user_prompt(prompt.to_string()),
+        Ok(PreparedStreamRequest {
+            request: Some(self.request_with_user_prompt(prompt.to_string())),
             context_metrics,
-        )
+            local_response: None,
+        })
     }
 
     pub fn control(&self) -> &ResponseControl {
@@ -288,10 +346,15 @@ impl ChatAgent {
         &mut self,
         client: &dyn ProviderClient,
         prompt: &str,
-    ) -> Option<RequestMetrics> {
+    ) -> Result<PromptIngest, AppError> {
         match self.memory_config.strategy {
             MemoryStrategy::StickyFacts => {
-                return self.update_sticky_facts(client, prompt).await;
+                return Ok(PromptIngest::Continue(
+                    self.update_sticky_facts(client, prompt).await,
+                ));
+            }
+            MemoryStrategy::ScopedBranches if self.memory_config.topic_file_routing => {
+                return self.route_topic_file(client, prompt).await;
             }
             MemoryStrategy::ScopedBranches if self.memory_config.scoped_auto_route => {
                 let branch = self.memory.select_scoped_topic(
@@ -303,7 +366,136 @@ impl ChatAgent {
             }
             _ => {}
         }
-        None
+        Ok(PromptIngest::Continue(None))
+    }
+
+    async fn route_topic_file(
+        &mut self,
+        client: &dyn ProviderClient,
+        prompt: &str,
+    ) -> Result<PromptIngest, AppError> {
+        self.memory
+            .ensure_topic_catalog_from_branches(&self.history, &self.memory_config.active_branch);
+        if self.memory.topic_catalog.is_empty() {
+            if self.memory_config.topic_auto_create {
+                let topic_id = self.memory.select_scoped_topic(
+                    prompt,
+                    &self.history,
+                    &self.memory_config.active_branch,
+                );
+                self.activate_topic_file(topic_id.as_str(), prompt)?;
+                return Ok(PromptIngest::Continue(None));
+            }
+            return Ok(PromptIngest::TopicNotFound {
+                metrics: None,
+                message: topic_not_found_message("topic catalog is empty"),
+            });
+        }
+
+        let classifier_prompt = self.memory_config.topic_classifier_prompt.trim();
+        let classifier_prompt = if classifier_prompt.is_empty() {
+            super::memory::DEFAULT_TOPIC_CLASSIFIER_PROMPT
+        } else {
+            classifier_prompt
+        };
+        let request = ChatRequest {
+            model: self.profile.model.clone(),
+            messages: vec![
+                ChatMessage {
+                    role: Role::System,
+                    content: classifier_prompt.to_string(),
+                },
+                ChatMessage {
+                    role: Role::User,
+                    content: format!(
+                        "{}\n\nLatest user message:\n{prompt}\n\nReturn the JSON route decision only.",
+                        self.memory.compact_topic_catalog()
+                    ),
+                },
+            ],
+            control: topic_classifier_control(),
+            pricing: self.pricing.clone(),
+            billing: self.billing.clone(),
+        };
+        let result = timeout(
+            TOPIC_CLASSIFIER_TIMEOUT,
+            client.chat_completion(&self.profile, &self.token, request),
+        )
+        .await;
+        let Ok(Ok(response)) = result else {
+            return Ok(PromptIngest::TopicNotFound {
+                metrics: None,
+                message: topic_not_found_message("classifier did not return a route"),
+            });
+        };
+        let metrics = Some(response.metrics);
+        let decision =
+            parse_topic_route_decision(response.text.as_str()).unwrap_or(TopicRouteDecision {
+                found: false,
+                topic_id: None,
+                confidence: 0.0,
+                reason: "classifier response was not valid JSON".to_string(),
+            });
+        self.memory.last_topic_route = Some(decision.clone());
+        if decision.found
+            && let Some(topic_id) = decision.topic_id.as_deref()
+            && self.memory.topic_catalog.contains_key(topic_id)
+        {
+            self.activate_topic_file(topic_id, prompt)?;
+            return Ok(PromptIngest::Continue(metrics));
+        }
+
+        if self.memory_config.topic_auto_create {
+            let topic_id = self.memory.select_scoped_topic(
+                prompt,
+                &self.history,
+                &self.memory_config.active_branch,
+            );
+            self.activate_topic_file(topic_id.as_str(), prompt)?;
+            return Ok(PromptIngest::Continue(metrics));
+        }
+
+        Ok(PromptIngest::TopicNotFound {
+            metrics,
+            message: topic_not_found_message(&decision.reason),
+        })
+    }
+
+    fn activate_topic_file(&mut self, topic_id: &str, prompt: &str) -> Result<(), AppError> {
+        let topic_id = topic_id.trim();
+        if topic_id.is_empty() {
+            return Ok(());
+        }
+        self.memory_config.active_branch = topic_id.to_string();
+        let loaded = self
+            .topic_store
+            .as_ref()
+            .map(|store| store.load_topic_file(topic_id))
+            .transpose()?
+            .flatten();
+        let topic_file = loaded.unwrap_or_else(|| {
+            let config = self.memory_config.clone();
+            self.memory
+                .topic_file_from_branch_history(topic_id, prompt, &self.history, &config)
+        });
+        self.memory.active_topic_file = Some(topic_file);
+        Ok(())
+    }
+
+    fn update_active_topic_file(&mut self, prompt: &str, answer: &str) -> Result<(), AppError> {
+        if self.memory_config.strategy != MemoryStrategy::ScopedBranches
+            || !self.memory_config.topic_file_routing
+        {
+            return Ok(());
+        }
+        self.memory.update_active_topic_file(prompt, answer);
+        if let (Some(store), Some(topic_file)) = (
+            self.topic_store.as_ref(),
+            self.memory.active_topic_file.as_ref(),
+        ) {
+            store.save_topic_file(topic_file)?;
+        }
+        Ok(())
     }
 
     async fn update_sticky_facts(
@@ -516,6 +708,77 @@ fn memory_facts_extraction_control() -> ResponseControl {
     control.temperature = Some(0.0);
     control.max_tokens = Some(500);
     control
+}
+
+fn topic_classifier_control() -> ResponseControl {
+    let mut control = ResponseControl::uncontrolled();
+    control.temperature = Some(0.0);
+    control.max_tokens = Some(250);
+    control
+}
+
+fn parse_topic_route_decision(text: &str) -> Option<TopicRouteDecision> {
+    let value: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
+    let object = value.as_object()?;
+    let found = object.get("found")?.as_bool()?;
+    let topic_id = object
+        .get("topic_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let confidence = object
+        .get("confidence")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0) as f32;
+    let reason = object
+        .get("reason")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Some(TopicRouteDecision {
+        found,
+        topic_id,
+        confidence,
+        reason,
+    })
+}
+
+fn topic_not_found_message(reason: &str) -> String {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        "Не нашёл подходящий topic-файл для этого сообщения. Контекст другой темы не подгружал."
+            .to_string()
+    } else {
+        format!(
+            "Не нашёл подходящий topic-файл для этого сообщения. Контекст другой темы не подгружал. Причина: {reason}"
+        )
+    }
+}
+
+fn local_chat_response(text: String, metrics: Option<RequestMetrics>) -> ChatResponse {
+    ChatResponse {
+        text,
+        finish_reason: Some("topic_not_found".to_string()),
+        metrics: metrics.unwrap_or_default(),
+    }
+}
+
+fn local_provider_debug() -> ProviderExchangeDebug {
+    ProviderExchangeDebug {
+        request: crate::providers::HttpDebugRequest {
+            method: "LOCAL".to_string(),
+            url: "local://topic-file-routing/not-found".to_string(),
+            headers: Default::default(),
+            body: serde_json::json!({}),
+        },
+        response: crate::providers::HttpDebugResponse {
+            status: 200,
+            headers: Default::default(),
+            body: serde_json::json!({ "finish_reason": "topic_not_found" }),
+        },
+    }
 }
 
 fn parse_extracted_facts(text: &str) -> Option<std::collections::BTreeMap<String, String>> {
