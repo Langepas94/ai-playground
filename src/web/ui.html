@@ -874,7 +874,16 @@
         <h2>Создать агента</h2>
         <label>Имя<input id="gateName" spellcheck="false" placeholder="напр. Android-ассистент"></label>
         <label>Provider<select id="gateProvider"></select></label>
-        <label>Model<input id="gateModel" spellcheck="false" placeholder="напр. gpt-4.1-mini"></label>
+        <label>Model<select id="gateModel"></select></label>
+        <div class="actions">
+          <button id="gateLoadModels" class="secondary" type="button">Загрузить модели</button>
+        </div>
+        <details class="panel">
+          <summary>Другая модель</summary>
+          <div class="panel-body">
+            <label>Custom model id<input id="gateCustomModel" spellcheck="false" placeholder="Если нужной модели нет в списке"></label>
+          </div>
+        </details>
         <label>Base URL<input id="gateBaseUrl" spellcheck="false" placeholder="оставь пустым для дефолта провайдера"></label>
         <label>Домен — чем агент занимается<textarea id="gateDomain" rows="3" placeholder="напр. помощник Android-разработчика: Kotlin, Compose, MVI"></textarea></label>
         <label>Обязательные поля профиля (по одному на строку, опционально)<textarea id="gateSeed" rows="2" placeholder="стек&#10;размер команды&#10;уровень"></textarea></label>
@@ -1909,7 +1918,8 @@
       const item = (providers || []).find((p) => p.id === $('gateProvider').value);
       if (!item) return;
       $('gateBaseUrl').value = item.default_base_url || '';
-      if (!$('gateModel').value.trim()) $('gateModel').placeholder = item.default_model || 'model id';
+      $('gateCustomModel').value = '';
+      setGateModelOptions(restoreModelListFor(item.id) || [{ id: item.default_model, pricing: null }], item.default_model);
     }
 
     function populateGateProviders() {
@@ -1918,11 +1928,49 @@
       applyGateProviderDefaults();
     }
 
+    function gateProviderPayload() {
+      return {
+        provider: $('gateProvider').value,
+        base_url: $('gateBaseUrl').value.trim(),
+        token: $('token').value.trim(),
+        token_provider: $('gateProvider').value
+      };
+    }
+
+    function setGateModelOptions(models, selectedModel) {
+      const normalized = models.map((model) => typeof model === 'string' ? { id: model, pricing: null } : model).filter((model) => model?.id);
+      const uniqueModels = [...new Map(normalized.map((model) => [model.id, model])).values()];
+      $('gateModel').innerHTML = uniqueModels.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.id)}</option>`).join('');
+      if (selectedModel && uniqueModels.some((model) => model.id === selectedModel)) {
+        $('gateModel').value = selectedModel;
+      }
+    }
+
+    async function gateLoadModels() {
+      if (!$('gateProvider').value) { $('gateCreateStatus').textContent = 'Выбери provider.'; return; }
+      $('gateLoadModels').disabled = true;
+      $('gateCreateStatus').textContent = 'Загружаю модели…';
+      try {
+        const data = await requestJson('/api/models', gateProviderPayload());
+        const models = data.models || [];
+        const ids = models.map((model) => model.id).filter(Boolean);
+        if (ids.length) localStorage.setItem(`ai_models:${$('gateProvider').value}`, JSON.stringify(ids));
+        const current = $('gateModel').value;
+        const fallback = ids[0] || current;
+        setGateModelOptions(models, ids.includes(current) ? current : fallback);
+        $('gateCreateStatus').textContent = ids.length ? `Загружено моделей: ${ids.length}` : 'Провайдер вернул пустой список моделей.';
+      } catch (error) {
+        $('gateCreateStatus').textContent = 'Ошибка загрузки моделей: ' + error.message;
+      } finally {
+        $('gateLoadModels').disabled = false;
+      }
+    }
+
     function gatePayload() {
       return {
         name: $('gateName').value.trim(),
         provider: $('gateProvider').value,
-        model: $('gateModel').value.trim(),
+        model: $('gateCustomModel').value.trim() || $('gateModel').value.trim(),
         base_url: $('gateBaseUrl').value.trim(),
         domain: $('gateDomain').value.trim(),
         seed_fields: lineToList('gateSeed'),
@@ -2620,7 +2668,9 @@
       }
     }
     function restoreModelList() {
-      const provider = currentProvider();
+      return restoreModelListFor(currentProvider());
+    }
+    function restoreModelListFor(provider) {
       const raw = localStorage.getItem(`ai_models:${provider}`);
       if (!raw) return null;
       try { return JSON.parse(raw).map((id) => ({ id, pricing: null })); } catch { return null; }
@@ -3062,6 +3112,7 @@
     $('gateDelete').addEventListener('click', deleteFromGate);
     $('gateAgentList').addEventListener('dblclick', () => enterAgent($('gateAgentList').value));
     $('gateProvider').addEventListener('change', applyGateProviderDefaults);
+    $('gateLoadModels').addEventListener('click', gateLoadModels);
     $('gateBuildSchema').addEventListener('click', gateBuildSchema);
     $('gateSchemaAdd').addEventListener('click', () => addSchemaRow());
     $('gateCreate').addEventListener('click', createAgentFromGate);

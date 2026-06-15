@@ -840,6 +840,11 @@ fn web_ui_is_agent_centric() {
     assert!(INDEX_HTML.contains("id=\"activeAgentBar\""));
     assert!(INDEX_HTML.contains("Создать агента"));
     assert!(INDEX_HTML.contains("Сгенерировать интервью"));
+    assert!(INDEX_HTML.contains("id=\"gateModel\""));
+    assert!(INDEX_HTML.contains("id=\"gateLoadModels\""));
+    assert!(INDEX_HTML.contains("function gateLoadModels()"));
+    assert!(INDEX_HTML.contains("function gateProviderPayload()"));
+    assert!(INDEX_HTML.contains("id=\"gateCustomModel\""));
     // Stateful panes: profile (interview), task (stage FSM), invariants.
     assert!(INDEX_HTML.contains("data-tab=\"aprofile\""));
     assert!(INDEX_HTML.contains("data-tab=\"task\""));
