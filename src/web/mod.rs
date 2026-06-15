@@ -1671,11 +1671,7 @@ fn build_context_debug(
             } else {
                 None
             },
-            request_block: if config.strategy == MemoryStrategy::StickyFacts {
-                memory.facts_block(config.facts_prompt.as_str())
-            } else {
-                None
-            },
+            request_block: memory.facts_block(config.facts_prompt.as_str()),
             recent_messages_sent,
         },
         active_topic: active_topic.to_string(),

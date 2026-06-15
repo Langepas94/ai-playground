@@ -117,6 +117,7 @@ ChatWebRequest
 - `Sliding Window` показывает только размер окна N. Оно ограничивает provider request, но не удаляет сообщения из UI/session history.
 - `Summary` показывает размер окна raw сообщений, пороги compaction и настраиваемый summary prompt.
 - `Sticky Facts` показывает размер окна N, facts extraction prompt, facts preamble, persisted KV facts и точный facts block из provider request. Extraction prompt выбирает, что сохранять; preamble описывает provider request.
+- Сохранённые KV-факты (`working`/`long-term`) попадают в provider facts block при любой context strategy; `Sticky Facts` нужен для авто-извлечения новых фактов, а не для чтения уже сохранённых.
 - Каждый persisted KV-факт помечен бейджем слоя памяти (`short-term` / `working` / `long-term`): `FactDebugView.layer` приходит из `AgentMemory::fact_layer()`. Provider facts block группирует KV по слоям (`[working]` / `[long-term]`), так что видно источник факта. `long-term` факты переживают новую сессию, `working` — нет.
 - `Branching` показывает кнопки checkpoint, создания двух веток и переключения между ними. Каждая ветка отправляется как отдельная local session, чтобы histories не смешивались.
 - `Scoped Branches` в UI называется и ощущается как auto topics в одном окне: юзер не переключает темы руками, агент сам выбирает/создает тему, а debug-блок показывает выбранную тему и счетчики. Все остается в одной session, но provider request получает только выбранную тему.

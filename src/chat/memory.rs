@@ -253,9 +253,7 @@ impl AgentMemory {
                 ),
             });
         }
-        if config.strategy == MemoryStrategy::StickyFacts
-            && let Some(facts_block) = self.facts_block(config.facts_prompt.as_str())
-        {
+        if let Some(facts_block) = self.facts_block(config.facts_prompt.as_str()) {
             context.push(ChatMessage {
                 role: Role::System,
                 content: facts_block,

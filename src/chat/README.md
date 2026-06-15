@@ -53,8 +53,7 @@ Sticky Facts
   -> хранит facts в `AgentMemory.facts` как local key-value sidecar
   -> использует настраиваемый facts extraction prompt, чтобы выбрать категории KV
   -> извлекает атомарные KV-факты, а не сохраняет весь user prompt по слову-триггеру
-  -> отправляет отдельный read-only facts block + последние N сообщений, включая текущий user prompt
-  -> Web debug показывает persisted KV facts и точный facts block для provider request
+  -> последние N сообщений включают текущий user prompt
 
 Branching
   -> работает с независимой веткой истории
@@ -88,6 +87,10 @@ long-term
   -> lifetime: между сессиями; дублируется в profile-shared store
      (`longterm-<profile>.memory.toon`) и seed-ится в каждую новую сессию
 ```
+
+Persisted KV facts (`working`/`long-term`) отправляются в provider request как
+read-only facts block при любой context strategy. `Sticky Facts` отвечает только
+за автоматическое извлечение/обновление этих facts из сообщений.
 
 - Явный выбор слоя — это работа агента: при Sticky Facts экстрактор
   (`facts_extraction_prompt`) возвращает для каждого факта `layer`

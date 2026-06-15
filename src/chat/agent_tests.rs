@@ -348,6 +348,57 @@ async fn sticky_facts_updates_before_request_and_sends_facts_block() {
 }
 
 #[tokio::test]
+async fn saved_long_term_facts_are_sent_with_default_strategy() {
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec!["answer".to_string()]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut memory = AgentMemory::default();
+    memory.set_fact_in_layer(
+        "project_context".to_string(),
+        "Пиццерия находится в Волгограде; город должен фигурировать в названии.".to_string(),
+        MemoryLayer::LongTerm,
+    );
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        memory,
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_memory_config(MemoryConfig {
+        strategy: MemoryStrategy::SlidingWindow,
+        recent_messages: 4,
+        ..MemoryConfig::default()
+    });
+
+    agent
+        .respond(
+            &client,
+            "Помоги придумать название, город обязательно должен фигурировать.".to_string(),
+        )
+        .await
+        .expect("response");
+
+    let seen = client.seen_messages.lock().expect("seen messages");
+    let joined = seen[0]
+        .iter()
+        .map(|message| message.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        joined.contains("FACTS_KV:"),
+        "persisted facts block must be sent even outside Sticky Facts"
+    );
+    assert!(joined.contains("[long-term]"));
+    assert!(joined.contains("project_context"));
+    assert!(joined.contains("Волгограде"));
+}
+
+#[tokio::test]
 async fn sticky_facts_uses_facts_plus_window_without_extra_provider_call() {
     let client = FakeClient {
         replies: std::sync::Mutex::new(vec!["answer".to_string()]),
