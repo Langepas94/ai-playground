@@ -255,6 +255,107 @@ fn facts_update_from_key_value_and_keywords() {
 }
 
 #[test]
+fn facts_route_to_default_layers() {
+    let mut memory = AgentMemory::default();
+
+    memory.update_facts_from_user_message(
+        "цель: сделать удобное управление\nНе трогай .DS_Store\nОтвечай кратко",
+    );
+
+    // goal + constraints belong to the working layer (current task).
+    assert_eq!(memory.fact_layer("goal"), MemoryLayer::Working);
+    assert_eq!(memory.fact_layer("constraints"), MemoryLayer::Working);
+    // preferences are durable knowledge → long-term.
+    assert_eq!(memory.fact_layer("preferences"), MemoryLayer::LongTerm);
+
+    let working: Vec<&str> = memory
+        .facts_in_layer(MemoryLayer::Working)
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    assert!(working.contains(&"goal"));
+    assert!(working.contains(&"constraints"));
+    assert!(!working.contains(&"preferences"));
+
+    // Missing-layer keys fall back to the default routing rule.
+    assert_eq!(memory.fact_layer("unknown_key"), MemoryLayer::LongTerm);
+}
+
+#[test]
+fn merge_extracted_facts_honors_agent_chosen_layer() {
+    let mut memory = AgentMemory::default();
+
+    memory.merge_extracted_facts_with_layers(vec![
+        // agent put a profile fact into working — honored verbatim
+        (
+            "favorite_color".to_string(),
+            "green".to_string(),
+            Some(MemoryLayer::Working),
+        ),
+        // no layer given → default routing (long-term for non goal/constraint)
+        ("interests".to_string(), "dogs".to_string(), None),
+        // agent picked short-term for a KV fact → demoted to working
+        (
+            "todo".to_string(),
+            "write tests".to_string(),
+            Some(MemoryLayer::ShortTerm),
+        ),
+        // sensitive value never stored
+        (
+            "api_key".to_string(),
+            "sk-secret".to_string(),
+            Some(MemoryLayer::LongTerm),
+        ),
+    ]);
+
+    assert_eq!(memory.fact_layer("favorite_color"), MemoryLayer::Working);
+    assert_eq!(memory.fact_layer("interests"), MemoryLayer::LongTerm);
+    assert_eq!(memory.fact_layer("todo"), MemoryLayer::Working);
+    assert!(!memory.facts.contains_key("api_key"));
+}
+
+#[test]
+fn agent_memory_toon_roundtrip_with_fact_layers() {
+    let mut memory = AgentMemory::default();
+    memory.set_fact_in_layer("goal".to_string(), "ship".to_string(), MemoryLayer::Working);
+    memory.set_fact_in_layer(
+        "preferences".to_string(),
+        "concise".to_string(),
+        MemoryLayer::LongTerm,
+    );
+
+    let toon = crate::toon_codec::to_string(&memory).expect("encode to TOON");
+    let decoded: AgentMemory = crate::toon_codec::from_str(&toon).expect("decode from TOON");
+
+    assert_eq!(decoded.fact_layer("goal"), MemoryLayer::Working);
+    assert_eq!(decoded.fact_layer("preferences"), MemoryLayer::LongTerm);
+}
+
+#[test]
+fn facts_block_groups_entries_by_layer() {
+    let mut memory = AgentMemory::default();
+    memory.set_fact_in_layer(
+        "goal".to_string(),
+        "ship it".to_string(),
+        MemoryLayer::Working,
+    );
+    memory.set_fact_in_layer(
+        "preferences".to_string(),
+        "concise".to_string(),
+        MemoryLayer::LongTerm,
+    );
+
+    let block = memory.facts_block("prompt").expect("facts block");
+    assert!(block.contains("FACTS_KV:"));
+    assert!(block.contains("[working]"));
+    assert!(block.contains("[long-term]"));
+    // Working section is rendered before long-term (volatile → durable order).
+    let working_at = block.find("[working]").unwrap();
+    let long_at = block.find("[long-term]").unwrap();
+    assert!(working_at < long_at);
+}
+
+#[test]
 fn explicit_facts_overwrite_same_key_without_duplicates() {
     let mut memory = AgentMemory::default();
 

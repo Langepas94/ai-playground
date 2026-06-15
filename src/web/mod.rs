@@ -17,10 +17,11 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, sleep};
 
 use crate::{
-    chat::memory::{MemoryConfig, MemoryStrategy},
+    chat::memory::{MemoryConfig, MemoryLayer, MemoryStrategy},
     chat::{
-        AgentMemory, ChatAgent, LocalSessionStore, add_request_metrics, available_agents,
-        selected_agent, web_session_key,
+        AgentMemory, AgentSummary, ChatAgent, KnowledgeDoc, LocalSessionStore, SavedAgent,
+        SavedMemoryConfig, TaskContext, add_request_metrics, available_agents, selected_agent,
+        web_session_key,
     },
     config::ProfileConfig,
     errors::AppError,
@@ -74,6 +75,8 @@ pub async fn serve(addr: SocketAddr) -> Result<(), AppError> {
         .route("/api/agent/chat/stream", post(chat_stream))
         .route("/api/chat/session", post(chat_session))
         .route("/api/chat", post(chat))
+        .route("/api/memory/update", post(memory_update))
+        .route("/api/agents/manage", post(agents_manage))
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // 50 MB — для вложений
         .with_state(AppState {
             client,
@@ -240,7 +243,10 @@ async fn chat(
         &request.token,
         request.token_provider.as_deref(),
     )?;
-    let session_key = web_session_key(agent_spec.id, &profile.provider.to_string(), &profile.model);
+    let session_key = effective_session_key(
+        request.saved_agent_id.as_deref(),
+        &web_session_key(agent_spec.id, &profile.provider.to_string(), &profile.model),
+    );
     let session = if request.new_session {
         state.sessions.create_session()?
     } else {
@@ -249,7 +255,8 @@ async fn chat(
             None => state.sessions.load_or_create_latest(&session_key)?,
         }
     };
-    let memory = state.sessions.load_memory(&session.id)?;
+    let mut memory = state.sessions.load_memory(&session.id)?;
+    state.sessions.seed_long_term(&session_key, &mut memory)?;
     let control = request.control.clone().into_control();
     let memory_config = request
         .memory
@@ -274,6 +281,11 @@ async fn chat(
     agent.set_memory_config(memory_config);
     agent.set_context_limit(context_limit);
     agent.set_topic_store(Some(state.sessions.topic_file_storage(&session.id)?));
+    apply_saved_agent_memory(
+        &state.sessions,
+        request.saved_agent_id.as_deref(),
+        &mut agent,
+    )?;
     let (response, provider_debug, context_metrics) = agent
         .respond_with_debug_and_context_metrics(&state.client, prompt)
         .await?;
@@ -283,6 +295,9 @@ async fn chat(
         .save_session(&session_key, &session.id, agent.history())?;
     state.sessions.save_metrics(&session.id, &session_metrics)?;
     state.sessions.save_memory(&session.id, agent.memory())?;
+    state
+        .sessions
+        .save_long_term(&session_key, agent.memory())?;
     let context_debug =
         build_context_debug(agent.memory(), &agent.memory_config(), agent.history());
     Ok(Json(ChatWebResponse {
@@ -319,7 +334,10 @@ async fn chat_stream(
         &request.token,
         request.token_provider.as_deref(),
     )?;
-    let session_key = web_session_key(agent_spec.id, &profile.provider.to_string(), &profile.model);
+    let session_key = effective_session_key(
+        request.saved_agent_id.as_deref(),
+        &web_session_key(agent_spec.id, &profile.provider.to_string(), &profile.model),
+    );
     let session = if request.new_session {
         state.sessions.create_session()?
     } else {
@@ -328,7 +346,8 @@ async fn chat_stream(
             None => state.sessions.load_or_create_latest(&session_key)?,
         }
     };
-    let memory = state.sessions.load_memory(&session.id)?;
+    let mut memory = state.sessions.load_memory(&session.id)?;
+    state.sessions.seed_long_term(&session_key, &mut memory)?;
     let control = request.control.clone().into_control();
     let memory_config = request
         .memory
@@ -353,6 +372,11 @@ async fn chat_stream(
     agent.set_memory_config(memory_config);
     agent.set_context_limit(context_limit);
     agent.set_topic_store(Some(state.sessions.topic_file_storage(&session.id)?));
+    apply_saved_agent_memory(
+        &state.sessions,
+        request.saved_agent_id.as_deref(),
+        &mut agent,
+    )?;
     let prepared_stream = agent.prepare_stream_request(&state.client, &prompt).await?;
     let session_id = session.id.clone();
     let session_metrics_before = session.metrics.clone();
@@ -365,6 +389,9 @@ async fn chat_stream(
             .save_session(&session_key, &session_id, agent.history())?;
         state.sessions.save_metrics(&session_id, &session_metrics)?;
         state.sessions.save_memory(&session_id, agent.memory())?;
+        state
+            .sessions
+            .save_long_term(&session_key, agent.memory())?;
         let context_debug =
             build_context_debug(agent.memory(), &agent.memory_config(), agent.history());
         let done_event = serde_json::json!({
@@ -422,6 +449,7 @@ async fn chat_stream(
                 let _ = sessions.save_session(&session_key, &session_id, agent.history());
                 let _ = sessions.save_metrics(&session_id, &session_metrics);
                 let _ = sessions.save_memory(&session_id, agent.memory());
+                let _ = sessions.save_long_term(&session_key, agent.memory());
                 let context_debug =
                     build_context_debug(agent.memory(), &agent.memory_config(), agent.history());
                 let done_event = serde_json::json!({
@@ -498,6 +526,318 @@ async fn chat_session(
         messages: session.messages,
         metrics: session.metrics,
     }))
+}
+
+/// Session key for a request: a stable `agent:<id>` key when a saved agent is
+/// active, otherwise the provider/model-derived key.
+fn effective_session_key(saved_agent_id: Option<&str>, fallback: &str) -> String {
+    match saved_agent_id.and_then(blank_str_to_none) {
+        Some(id) => format!("agent:{id}"),
+        None => fallback.to_string(),
+    }
+}
+
+/// Load the saved agent's explicit memory layers (TaskContext + knowledge doc)
+/// and attach them to the agent so they are injected into the next request.
+fn apply_saved_agent_memory(
+    store: &LocalSessionStore,
+    saved_agent_id: Option<&str>,
+    agent: &mut ChatAgent,
+) -> Result<(), AppError> {
+    if let Some(id) = saved_agent_id.and_then(blank_str_to_none) {
+        agent.set_working_context(Some(store.load_task(id)?));
+        agent.set_knowledge(Some(store.load_knowledge(id)?.content));
+    }
+    Ok(())
+}
+
+async fn agents_manage(
+    State(state): State<AppState>,
+    Json(request): Json<AgentsManageRequest>,
+) -> Result<Json<AgentsManageResponse>, WebError> {
+    let mut response = AgentsManageResponse::default();
+    match request.action.as_str() {
+        "list" => {
+            response.agents = state.sessions.list_agents()?;
+        }
+        "load" => {
+            let id = require_agent_id(request.id.as_deref())?;
+            let agent = state
+                .sessions
+                .load_agent(&id)?
+                .ok_or_else(|| AppError::InvalidInput(format!("Unknown agent: {id}")))?;
+            response.agent = Some(agent);
+            response.task = Some(state.sessions.load_task(&id)?);
+            response.knowledge = Some(state.sessions.load_knowledge(&id)?);
+        }
+        "save" => {
+            let payload = request
+                .agent
+                .ok_or_else(|| AppError::InvalidInput("Agent payload is required".to_string()))?;
+            if payload.name.trim().is_empty() {
+                return Err(AppError::InvalidInput("Agent name is required".to_string()).into());
+            }
+            let id = match payload.id.as_deref().and_then(blank_str_to_none) {
+                Some(id) => id.to_string(),
+                None => uuid::Uuid::new_v4().to_string(),
+            };
+            let created_at_unix = state
+                .sessions
+                .load_agent(&id)?
+                .map(|existing| existing.created_at_unix)
+                .filter(|value| *value > 0)
+                .unwrap_or_else(crate::chat::unix_now);
+            let saved = SavedAgent {
+                id: id.clone(),
+                name: payload.name.trim().to_string(),
+                provider: payload.provider.trim().to_string(),
+                base_url: payload.base_url.unwrap_or_default().trim().to_string(),
+                model: payload.model.trim().to_string(),
+                system_prompt: payload.system_prompt.unwrap_or_default(),
+                memory: saved_memory_from_web(payload.memory.unwrap_or_default()),
+                created_at_unix,
+                updated_at_unix: crate::chat::unix_now(),
+            };
+            state.sessions.save_agent(&saved)?;
+            response.agent = Some(saved);
+        }
+        "delete" => {
+            let id = require_agent_id(request.id.as_deref())?;
+            state.sessions.delete_agent(&id)?;
+            response.agents = state.sessions.list_agents()?;
+        }
+        "save-task" => {
+            let id = require_agent_id(request.id.as_deref())?;
+            let task = request.task.unwrap_or_default().into_task();
+            state.sessions.save_task(&id, &task)?;
+            response.task = Some(task);
+        }
+        "save-knowledge" => {
+            let id = require_agent_id(request.id.as_deref())?;
+            let doc = KnowledgeDoc {
+                content: request.knowledge.unwrap_or_default(),
+                updated_at_unix: crate::chat::unix_now(),
+            };
+            state.sessions.save_knowledge(&id, &doc)?;
+            response.knowledge = Some(doc);
+        }
+        other => {
+            return Err(AppError::InvalidInput(format!("Unknown agent action: {other}")).into());
+        }
+    }
+    Ok(Json(response))
+}
+
+fn require_agent_id(id: Option<&str>) -> Result<String, AppError> {
+    id.and_then(blank_str_to_none)
+        .map(|value| value.to_string())
+        .ok_or_else(|| AppError::InvalidInput("Agent id is required".to_string()))
+}
+
+fn saved_memory_from_web(memory: WebMemoryConfig) -> SavedMemoryConfig {
+    let defaults = MemoryConfig::default();
+    SavedMemoryConfig {
+        strategy: blank_to_none(memory.strategy).unwrap_or_else(|| defaults.strategy.to_string()),
+        recent_messages: memory.recent_messages.unwrap_or(defaults.recent_messages),
+        summarize_after_messages: memory
+            .summarize_after_messages
+            .unwrap_or(defaults.summarize_after_messages),
+        summary_chunk_messages: memory
+            .summary_chunk_messages
+            .unwrap_or(defaults.summary_chunk_messages),
+        summarize_at_context_percent: memory
+            .summarize_at_context_percent
+            .unwrap_or(defaults.summarize_at_context_percent),
+        summary_prompt: blank_to_none(memory.summary_prompt).unwrap_or(defaults.summary_prompt),
+        facts_extraction_prompt: blank_to_none(memory.facts_extraction_prompt)
+            .unwrap_or(defaults.facts_extraction_prompt),
+        facts_prompt: blank_to_none(memory.facts_prompt).unwrap_or(defaults.facts_prompt),
+        active_branch: blank_to_none(memory.active_branch).unwrap_or(defaults.active_branch),
+        scoped_auto_route: memory
+            .scoped_auto_route
+            .unwrap_or(defaults.scoped_auto_route),
+        topic_file_routing: memory
+            .topic_file_routing
+            .unwrap_or(defaults.topic_file_routing),
+        topic_drift_guard: memory
+            .topic_drift_guard
+            .unwrap_or(defaults.topic_drift_guard),
+        topic_auto_create: memory
+            .topic_auto_create
+            .unwrap_or(defaults.topic_auto_create),
+        topic_classifier_prompt: blank_to_none(memory.topic_classifier_prompt)
+            .unwrap_or(defaults.topic_classifier_prompt),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentsManageRequest {
+    action: String,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    agent: Option<AgentPayload>,
+    #[serde(default)]
+    task: Option<TaskPayload>,
+    #[serde(default)]
+    knowledge: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentPayload {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    provider: String,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    system_prompt: Option<String>,
+    #[serde(default)]
+    memory: Option<WebMemoryConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TaskPayload {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    goal: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    steps: Vec<String>,
+    #[serde(default)]
+    notes: String,
+}
+
+impl TaskPayload {
+    fn into_task(self) -> TaskContext {
+        TaskContext {
+            title: self.title,
+            goal: self.goal,
+            status: self.status,
+            steps: self
+                .steps
+                .into_iter()
+                .map(|step| step.trim().to_string())
+                .filter(|step| !step.is_empty())
+                .collect(),
+            notes: self.notes,
+        }
+    }
+}
+
+#[derive(Debug, Default, Serialize)]
+struct AgentsManageResponse {
+    agents: Vec<AgentSummary>,
+    agent: Option<SavedAgent>,
+    task: Option<TaskContext>,
+    knowledge: Option<KnowledgeDoc>,
+}
+
+async fn memory_update(
+    State(state): State<AppState>,
+    Json(request): Json<MemoryUpdateRequest>,
+) -> Result<Json<MemoryUpdateResponse>, WebError> {
+    let agent = selected_agent(request.agent_id.as_deref())?;
+    let provider = parse_provider(&request.provider)?;
+    let model = blank_to_none(Some(request.model.clone()))
+        .ok_or_else(|| AppError::InvalidInput("Model is required".to_string()))?;
+    let session_key = web_session_key(agent.id, &provider.to_string(), &model);
+    let session = match request.session_id.as_deref().and_then(blank_str_to_none) {
+        Some(session_id) => state.sessions.load_session(session_id)?,
+        None => state.sessions.load_or_create_latest(&session_key)?,
+    };
+    let mut memory = state.sessions.load_memory(&session.id)?;
+    state.sessions.seed_long_term(&session_key, &mut memory)?;
+    let memory_config = request
+        .memory
+        .clone()
+        .unwrap_or_default()
+        .into_memory_config();
+
+    match request.action.as_str() {
+        "set" => {
+            let key = request.key.clone().unwrap_or_default().trim().to_string();
+            let value = request.value.clone().unwrap_or_default().trim().to_string();
+            if key.is_empty() || value.is_empty() {
+                return Err(
+                    AppError::InvalidInput("Key and value are required".to_string()).into(),
+                );
+            }
+            let layer = request
+                .layer
+                .as_deref()
+                .unwrap_or("long-term")
+                .parse::<MemoryLayer>()
+                .map_err(|_| AppError::InvalidInput("Unknown memory layer".to_string()))?;
+            if layer == MemoryLayer::ShortTerm {
+                return Err(AppError::InvalidInput(
+                    "Short-term layer holds the dialog window, not KV facts".to_string(),
+                )
+                .into());
+            }
+            if layer == MemoryLayer::LongTerm
+                && (crate::chat::memory::looks_sensitive(&key)
+                    || crate::chat::memory::looks_sensitive(&value))
+            {
+                return Err(AppError::InvalidInput(
+                    "Sensitive values must not be stored in long-term memory".to_string(),
+                )
+                .into());
+            }
+            memory.set_fact_in_layer(key, value, layer);
+        }
+        "delete" => {
+            let key = request.key.clone().unwrap_or_default();
+            memory.remove_fact(key.trim());
+        }
+        "clear-layer" => {
+            let layer = request
+                .layer
+                .as_deref()
+                .unwrap_or_default()
+                .parse::<MemoryLayer>()
+                .map_err(|_| AppError::InvalidInput("Unknown memory layer".to_string()))?;
+            memory.clear_layer(layer);
+        }
+        other => {
+            return Err(AppError::InvalidInput(format!("Unknown memory action: {other}")).into());
+        }
+    }
+
+    state.sessions.save_memory(&session.id, &memory)?;
+    state.sessions.save_long_term(&session_key, &memory)?;
+
+    let context_debug = build_context_debug(&memory, &memory_config, &session.messages);
+    Ok(Json(MemoryUpdateResponse {
+        session_id: session.id,
+        context_debug,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryUpdateRequest {
+    agent_id: Option<String>,
+    provider: String,
+    model: String,
+    session_id: Option<String>,
+    action: String,
+    key: Option<String>,
+    value: Option<String>,
+    layer: Option<String>,
+    memory: Option<WebMemoryConfig>,
+}
+
+#[derive(Debug, Serialize)]
+struct MemoryUpdateResponse {
+    session_id: String,
+    context_debug: ContextDebugView,
 }
 
 #[derive(Debug, Serialize)]
@@ -626,6 +966,8 @@ struct ChatWebRequest {
     memory: Option<WebMemoryConfig>,
     pricing: Option<WebPricing>,
     billing: Option<WebBilling>,
+    #[serde(default)]
+    saved_agent_id: Option<String>,
 }
 
 impl ChatWebRequest {
@@ -899,9 +1241,33 @@ struct ChatWebResponse {
 struct ContextDebugView {
     strategy: String,
     facts: FactsDebugView,
+    layers: MemoryLayersDebugView,
     active_topic: String,
     scoped_auto_route: bool,
     scoped_topics: Vec<ScopedTopicDebugView>,
+}
+
+/// Explicit 3-layer memory model for UI debug + control.
+#[derive(Debug, Clone, Serialize)]
+struct MemoryLayersDebugView {
+    short_term: ShortTermLayerView,
+    working: LayerFactsView,
+    long_term: LayerFactsView,
+}
+
+/// Краткосрочная: текущий диалог (окно сообщений + session summary). Эфемерно.
+#[derive(Debug, Clone, Serialize)]
+struct ShortTermLayerView {
+    session_summary: Option<String>,
+    summarized_message_count: usize,
+    recent_window: usize,
+    recent_messages_sent: usize,
+}
+
+/// Рабочая / Долговременная: набор KV-фактов слоя.
+#[derive(Debug, Clone, Serialize)]
+struct LayerFactsView {
+    facts: Vec<FactDebugView>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -916,6 +1282,7 @@ struct FactsDebugView {
 struct FactDebugView {
     key: String,
     value: String,
+    layer: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -955,6 +1322,7 @@ fn build_context_debug(
         .facts
         .iter()
         .map(|(key, value)| FactDebugView {
+            layer: memory.fact_layer(key).to_string(),
             key: key.clone(),
             value: value.clone(),
         })
@@ -968,8 +1336,34 @@ fn build_context_debug(
     } else {
         0
     };
+    let layer_facts = |layer: crate::chat::memory::MemoryLayer| LayerFactsView {
+        facts: memory
+            .facts_in_layer(layer)
+            .into_iter()
+            .map(|(key, value)| FactDebugView {
+                layer: layer.to_string(),
+                key: key.to_string(),
+                value: value.to_string(),
+            })
+            .collect(),
+    };
+    let non_system_count = history
+        .iter()
+        .filter(|message| message.role != Role::System)
+        .count();
+    let layers = MemoryLayersDebugView {
+        short_term: ShortTermLayerView {
+            session_summary: memory.session_summary.clone(),
+            summarized_message_count: memory.summarized_message_count,
+            recent_window: config.recent_messages,
+            recent_messages_sent: non_system_count.min(config.recent_messages),
+        },
+        working: layer_facts(crate::chat::memory::MemoryLayer::Working),
+        long_term: layer_facts(crate::chat::memory::MemoryLayer::LongTerm),
+    };
     ContextDebugView {
         strategy: config.strategy.to_string(),
+        layers,
         facts: FactsDebugView {
             persisted,
             extraction_prompt: if config.strategy == MemoryStrategy::StickyFacts {

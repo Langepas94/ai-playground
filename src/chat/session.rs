@@ -11,7 +11,7 @@ use super::{
     format_request_metrics,
     goal::{ConversationGoal, ConversationStopMode, GoalState},
     history::save_history,
-    memory::MemoryStrategy,
+    memory::{AgentMemory, MemoryStrategy},
     session_key,
 };
 
@@ -28,6 +28,7 @@ pub async fn interactive_chat(
     let session_key = session_key(profile.name, &profile.config.model);
     let mut session = store.load_or_create_latest(&session_key)?;
     let mut memory = store.load_memory(&session.id)?;
+    store.seed_long_term(&session_key, &mut memory)?;
     let mut agent = ChatAgent::new(
         profile.config.clone(),
         token,
@@ -81,6 +82,9 @@ pub async fn interactive_chat(
                 agent.clear_history();
                 session = store.create_session()?;
                 agent.set_topic_store(Some(store.topic_file_storage(&session.id)?));
+                let mut fresh = AgentMemory::default();
+                store.seed_long_term(&session_key, &mut fresh)?;
+                agent.set_memory(fresh);
                 memory = agent.memory().clone();
                 store.save_session(&session_key, &session.id, agent.history())?;
                 store.save_memory(&session.id, &memory)?;
@@ -436,6 +440,7 @@ pub async fn interactive_chat(
         memory = agent.memory().clone();
         store.save_session(&session_key, &session.id, agent.history())?;
         store.save_memory(&session.id, &memory)?;
+        store.save_long_term(&session_key, &memory)?;
         println!("{}", response.text);
         eprintln!("{}", format_request_metrics(&response.metrics));
 
@@ -529,7 +534,7 @@ pub fn describe_memory(config: &MemoryConfig, memory: &super::AgentMemory) -> St
     let facts = memory
         .facts
         .iter()
-        .map(|(key, value)| format!("{key}={value}"))
+        .map(|(key, value)| format!("{key}[{}]={value}", memory.fact_layer(key)))
         .collect::<Vec<_>>()
         .join("; ");
     format!(
@@ -705,6 +710,6 @@ mod tests {
         assert!(description.contains("scoped_auto_route=true"));
         assert!(description.contains("facts_extraction_prompt=Collect only constraints."));
         assert!(description.contains("facts_prompt=Custom facts prompt"));
-        assert!(description.contains("goal=test context strategies"));
+        assert!(description.contains("goal[working]=test context strategies"));
     }
 }

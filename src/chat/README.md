@@ -9,7 +9,7 @@
 - `agent_tests.rs` - unit-тесты `ChatAgent`.
 - `session.rs` - интерактивный `ai chat`, slash-команды и terminal I/O.
 - `goal.rs` - `ConversationGoal`, `GoalState`, stop modes и сравнение goal режимов.
-- `memory.rs` - `AgentMemory`, `MemoryConfig`, summary, sticky facts и выбор сообщений для context strategies.
+- `memory.rs` - `AgentMemory`, `MemoryConfig`, `MemoryLayer`, summary, sticky facts, слои памяти и выбор сообщений для context strategies.
 - `memory_tests.rs` - unit-тесты `AgentMemory`.
 - `token_accounting.rs` - локальная оценка токенов запроса, истории, ответа, стоимости и overflow по context limit.
 - `store.rs` - `LocalSessionStore`: TOON-сессии, context sidecar, индекс последней сессии.
@@ -68,6 +68,69 @@ Scoped Branches
   -> в provider request попадает только автоматически выбранная тема + system/facts
 ```
 
+## Слои памяти (memory layers)
+
+`MemoryLayer` задаёт явную модель памяти поверх существующих типов. Минимум 3 слоя:
+
+```text
+short-term
+  -> recent message window + AgentMemory.session_summary (Summary/SlidingWindow)
+  -> lifetime: текущий диалог; эфемерно, в новую сессию НЕ переносится
+  -> в контексте помечается блоком "[memory:short-term] ..."
+
+working
+  -> данные текущей задачи: goal, constraints (+ ConversationGoal/GoalState в goal.rs)
+  -> lifetime: текущая сессия; хранится в per-session memory sidecar
+  -> в новой сессии пусто
+
+long-term
+  -> устойчивые знания: preferences, decisions, профиль (location/age/interests/...)
+  -> lifetime: между сессиями; дублируется в profile-shared store
+     (`longterm-<profile>.memory.toon`) и seed-ится в каждую новую сессию
+```
+
+- Явный выбор слоя — это работа агента: при Sticky Facts экстрактор
+  (`facts_extraction_prompt`) возвращает для каждого факта `layer`
+  (`{"facts":[{"key","value","layer"}]}`), и `merge_extracted_facts_with_layers`
+  пишет факт в выбранный слой. `ShortTerm` от модели демотируется в `Working`
+  (short-term не хранит KV). Это и есть "агент сам решает, что и куда сохранять".
+- Fallback-роутинг, когда слой не задан (legacy/flat JSON или keyword-путь без
+  LLM): `default_fact_layer(key)` -> `goal`/`constraints` = `working`, всё
+  остальное = `long-term`. `short-term` не хранит KV-факты.
+- Ручное переопределение слоя при записи:
+  `AgentMemory::set_fact_in_layer(key, value, layer)`.
+  Слой каждого ключа -> `AgentMemory::fact_layer(key)`; факты слоя ->
+  `facts_in_layer(layer)`. Ручное управление: `remove_fact(key)`,
+  `clear_layer(layer)` (для `short-term` также чистит summary). `looks_sensitive()`
+  — публичный guard, чтобы не писать секреты в `long-term` (web `/api/memory/update`).
+- `facts_block` группирует KV по слоям с метками `[working]` / `[long-term]`, так
+  что в provider request видно, из какого слоя пришёл факт.
+- trace: установите env `AI_MEMORY_TRACE=1`, чтобы в stderr печаталось
+  `[memory] fact <key> → layer <layer>` при каждой записи.
+- Персист: `LocalSessionStore::save_long_term` / `load_long_term` /
+  `seed_long_term` (профильный файл). `save_memory` хранит per-session sidecar
+  как раньше. Сценарий «новая сессия»: long-term остаётся, short-term пуст
+  (тест `long_term_survives_new_session_short_term_does_not` в `store.rs`).
+
+## Именованные агенты (SavedAgent)
+
+Персистентная сущность агента поверх трёх слоёв памяти (`store.rs`):
+
+- `SavedAgent` — настройки агента (provider/base_url/model/system_prompt +
+  `SavedMemoryConfig`). Токен НЕ хранится (keyring).
+- `TaskContext` — **рабочая** память: title/goal/status/steps/notes.
+- `KnowledgeDoc` — **долговременная** память: текст знаний (TOON-поле, не `.md`).
+- **краткосрочная** память — обычная сессия чата, `session_key = "agent:<id>"`.
+
+Хранение через `LocalSessionStore`: `agent-<id>.agent.toon`, `*.task.toon`,
+`*.knowledge.toon`, индекс `agents-index.toon` (методы `list_agents`,
+`load_agent`, `save_agent`, `delete_agent`, `load_task`/`save_task`,
+`load_knowledge`/`save_knowledge`; общий atomic-io через `write_toon`/`read_toon`).
+
+`ChatAgent::set_working_context()` / `set_knowledge()` инъектят TaskContext и
+KnowledgeDoc в каждый provider request блоками `[memory:working]` /
+`[memory:long-term]` (метод `inject_memory_layers`, не пишется в history/sidecar).
+
 ## Что важно не ломать
 
 - Provider API не знает про `agent_id`; это локальная сущность.
@@ -79,7 +142,12 @@ Scoped Branches
 - Для branching каждая ветка имеет свою историю/session; сообщения разных веток не смешиваются.
 - Для scoped branches история хранится в одной session, а агент автоматически выбирает тему для каждого нового user message. Web debug должен показывать выбранную тему и счетчики сообщений по темам.
 - Slash-команды должны менять локальное состояние предсказуемо и не отправлять служебный текст провайдеру.
-- History, facts и memory не должны содержать токены.
+- History, facts и memory не должны содержать токены. Чувствительные строки
+  отсекаются `is_sensitive_text()` ДО роутинга, поэтому в `long-term` (и в
+  profile-shared store) секреты не попадают.
+- `long-term` факты переживают новую сессию, `working`/`short-term` — нет. Не
+  сохраняйте working-данные в `save_long_term` и не seed-ите short-term в новую
+  сессию.
 - Новый чатовый сценарий должен идти через `ChatAgent`, если только это не узкий unit test.
 
 ## Где искать баг
@@ -89,6 +157,7 @@ Scoped Branches
 - Сессия не восстанавливается: `store.rs`.
 - Summary не обновляется или prompt не применяется: `ChatAgent::precompact_before_request()`, `summary_prompt` и `AgentMemory::next_summary_range()`.
 - Facts не обновились, не видны или неверно ушли в запрос: `ChatAgent::update_sticky_facts()`, `facts_extraction_prompt`, fallback `AgentMemory::update_facts_from_user_message()`, `facts_block`, `ContextDebugView.facts` и `AgentMemory::build_context()`.
+- Факт ушёл не в тот слой или long-term не переносится в новую сессию: `MemoryLayer`, `default_fact_layer()`, `AgentMemory::fact_layer()`/`facts_in_layer()` и `LocalSessionStore::{save_long_term, seed_long_term}`.
 - Branching в UI смешал ветки: `ui.html` branch state и `ChatWebRequest::initial_history()`.
 - Scoped topics смешали context или не видны в debug: `AgentMemory.branch_assignments`, `active_branch`, `AgentMemory::build_context()` и `ContextDebugView` в web.
 - Goal завершается рано/поздно: `goal.rs`.

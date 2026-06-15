@@ -1,6 +1,25 @@
 use super::*;
 use async_trait::async_trait;
 
+#[test]
+fn parse_extracted_facts_reads_agent_chosen_layer() {
+    // Preferred shape: explicit per-fact layer.
+    let facts = parse_extracted_facts(
+        r#"{"facts":[{"key":"goal","value":"ship","layer":"working"},{"key":"prefs","value":"concise","layer":"long-term"}]}"#,
+    )
+    .expect("parsed");
+    assert_eq!(facts.len(), 2);
+    assert_eq!(facts[0].key, "goal");
+    assert_eq!(facts[0].layer, Some(MemoryLayer::Working));
+    assert_eq!(facts[1].layer, Some(MemoryLayer::LongTerm));
+
+    // Legacy flat object still parses with no layer (→ default routing later).
+    let legacy = parse_extracted_facts(r#"{"favorite_color":"green","interests":"dogs"}"#)
+        .expect("legacy parsed");
+    assert_eq!(legacy.len(), 2);
+    assert!(legacy.iter().all(|fact| fact.layer.is_none()));
+}
+
 #[derive(Debug, Default)]
 struct FakeClient {
     replies: std::sync::Mutex<Vec<String>>,
@@ -81,6 +100,54 @@ fn test_profile() -> ProfileConfig {
         base_url: "https://example.test/v1".to_string(),
         token_ref: "openai-compatible".to_string(),
     }
+}
+
+#[tokio::test]
+async fn agent_injects_working_and_long_term_blocks() {
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec!["ok".to_string()]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_memory_config(MemoryConfig {
+        strategy: MemoryStrategy::SlidingWindow,
+        recent_messages: 4,
+        ..MemoryConfig::default()
+    });
+    agent.set_working_context(Some(crate::chat::store::TaskContext {
+        title: "ship agents".to_string(),
+        goal: "persist settings".to_string(),
+        ..crate::chat::store::TaskContext::default()
+    }));
+    agent.set_knowledge(Some("user prefers Rust".to_string()));
+
+    agent
+        .respond(&client, "hi".to_string())
+        .await
+        .expect("respond");
+
+    let seen = client.seen_messages.lock().unwrap();
+    let joined = seen[0]
+        .iter()
+        .map(|message| message.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("[memory:working]"), "working block missing");
+    assert!(joined.contains("ship agents"));
+    assert!(
+        joined.contains("[memory:long-term]"),
+        "long-term block missing"
+    );
+    assert!(joined.contains("user prefers Rust"));
 }
 
 #[tokio::test]

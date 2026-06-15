@@ -8,7 +8,8 @@ use crate::{
 };
 
 use super::memory::{
-    AgentMemory, MemoryConfig, MemoryStrategy, TopicRouteDecision, format_messages_for_summary,
+    AgentMemory, MemoryConfig, MemoryLayer, MemoryStrategy, TopicRouteDecision,
+    format_messages_for_summary,
 };
 use super::store::TopicFileStorage;
 use super::token_accounting::{TokenEstimate, estimate_exchange, estimate_messages_tokens};
@@ -88,6 +89,8 @@ pub struct ChatAgent {
     billing: Option<BillingLookup>,
     context_limit: Option<u32>,
     topic_store: Option<TopicFileStorage>,
+    working_context: Option<super::store::TaskContext>,
+    knowledge: Option<String>,
 }
 
 impl ChatAgent {
@@ -111,6 +114,8 @@ impl ChatAgent {
             billing,
             context_limit: None,
             topic_store: None,
+            working_context: None,
+            knowledge: None,
         }
     }
 
@@ -120,6 +125,10 @@ impl ChatAgent {
 
     pub fn memory(&self) -> &AgentMemory {
         &self.memory
+    }
+
+    pub fn set_memory(&mut self, memory: AgentMemory) {
+        self.memory = memory;
     }
 
     pub fn memory_config(&self) -> MemoryConfig {
@@ -136,6 +145,20 @@ impl ChatAgent {
 
     pub fn set_topic_store(&mut self, topic_store: Option<TopicFileStorage>) {
         self.topic_store = topic_store;
+    }
+
+    /// Working-memory layer for the current task. Injected into each request as
+    /// a tagged system block; not written into history/sidecar.
+    pub fn set_working_context(&mut self, task: Option<super::store::TaskContext>) {
+        self.working_context = task.filter(|task| !task.is_empty());
+    }
+
+    /// Long-term knowledge document. Injected into each request as a tagged
+    /// system block; not written into history/sidecar.
+    pub fn set_knowledge(&mut self, knowledge: Option<String>) {
+        self.knowledge = knowledge
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
     }
 
     pub fn context_limit(&self) -> Option<u32> {
@@ -306,6 +329,34 @@ impl ChatAgent {
         )
     }
 
+    /// Insert the explicit working/long-term memory blocks after the leading
+    /// system messages, so the provider sees task + knowledge context up front.
+    fn inject_memory_layers(&self, messages: &mut Vec<ChatMessage>) {
+        let mut blocks = Vec::new();
+        if let Some(task) = self.working_context.as_ref() {
+            blocks.push(ChatMessage {
+                role: Role::System,
+                content: format!("[memory:working] Task context:\n{}", render_task(task)),
+            });
+        }
+        if let Some(knowledge) = self.knowledge.as_deref() {
+            blocks.push(ChatMessage {
+                role: Role::System,
+                content: format!("[memory:long-term] Knowledge:\n{knowledge}"),
+            });
+        }
+        if blocks.is_empty() {
+            return;
+        }
+        let insert_at = messages
+            .iter()
+            .position(|message| message.role != Role::System)
+            .unwrap_or(messages.len());
+        for (offset, block) in blocks.into_iter().enumerate() {
+            messages.insert(insert_at + offset, block);
+        }
+    }
+
     fn request_with_user_prompt(&self, prompt: String) -> ChatRequest {
         let mut memory_config = self.memory_config.clone();
         if memory_config.strategy == MemoryStrategy::StickyFacts {
@@ -314,6 +365,7 @@ impl ChatAgent {
             memory_config.recent_messages = memory_config.recent_messages.saturating_sub(1);
         }
         let mut messages = self.memory.build_context(&self.history, &memory_config);
+        self.inject_memory_layers(&mut messages);
         messages.push(ChatMessage {
             role: Role::User,
             content: prompt,
@@ -541,7 +593,11 @@ impl ChatAgent {
             if facts.is_empty() {
                 return Some(response.metrics);
             }
-            self.memory.merge_extracted_facts(facts);
+            self.memory.merge_extracted_facts_with_layers(
+                facts
+                    .into_iter()
+                    .map(|fact| (fact.key, fact.value, fact.layer)),
+            );
         } else {
             self.memory.update_facts_from_user_message(prompt);
         }
@@ -781,20 +837,124 @@ fn local_provider_debug() -> ProviderExchangeDebug {
     }
 }
 
-fn parse_extracted_facts(text: &str) -> Option<std::collections::BTreeMap<String, String>> {
+/// One extracted fact plus the layer the agent explicitly chose for it.
+/// `layer` is `None` when the model gave no layer (legacy/flat output); the
+/// caller then falls back to the default routing rule.
+pub(crate) struct ExtractedFact {
+    pub key: String,
+    pub value: String,
+    pub layer: Option<MemoryLayer>,
+}
+
+/// Parse the fact-extraction response. The agent is asked to classify each
+/// durable fact into a memory layer, so several shapes are accepted:
+///
+/// * `{"facts":[{"key","value","layer"}]}` — preferred, explicit layer.
+/// * `[{"key","value","layer"}]` — bare array.
+/// * `{"key":{"value":"...","layer":"..."}}` — object of rich entries.
+/// * `{"key":"value"}` — legacy flat object (no layer → default routing).
+fn parse_extracted_facts(text: &str) -> Option<Vec<ExtractedFact>> {
     let value: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
-    let object = value.as_object()?;
-    let mut facts = std::collections::BTreeMap::new();
-    for (key, value) in object {
-        let Some(value) = fact_value_to_string(value) else {
+    let entries = match &value {
+        serde_json::Value::Array(items) => return Some(facts_from_entry_array(items)),
+        serde_json::Value::Object(object) => {
+            if let Some(serde_json::Value::Array(items)) = object.get("facts") {
+                return Some(facts_from_entry_array(items));
+            }
+            object
+        }
+        _ => return None,
+    };
+    let mut facts = Vec::new();
+    for (key, raw) in entries {
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let (value, layer) = match raw {
+            serde_json::Value::Object(entry) => {
+                let Some(value) = entry.get("value").and_then(fact_value_to_string) else {
+                    continue;
+                };
+                (value, entry.get("layer").and_then(parse_fact_layer))
+            }
+            other => {
+                let Some(value) = fact_value_to_string(other) else {
+                    continue;
+                };
+                (value, None)
+            }
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        facts.push(ExtractedFact {
+            key: key.to_string(),
+            value: value.to_string(),
+            layer,
+        });
+    }
+    Some(facts)
+}
+
+fn facts_from_entry_array(items: &[serde_json::Value]) -> Vec<ExtractedFact> {
+    let mut facts = Vec::new();
+    for item in items {
+        let Some(entry) = item.as_object() else {
+            continue;
+        };
+        let Some(key) = entry.get("key").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let key = key.trim();
+        let Some(value) = entry.get("value").and_then(fact_value_to_string) else {
             continue;
         };
         let value = value.trim();
-        if !key.trim().is_empty() && !value.is_empty() {
-            facts.insert(key.clone(), value.to_string());
+        if key.is_empty() || value.is_empty() {
+            continue;
+        }
+        facts.push(ExtractedFact {
+            key: key.to_string(),
+            value: value.to_string(),
+            layer: entry.get("layer").and_then(parse_fact_layer),
+        });
+    }
+    facts
+}
+
+fn parse_fact_layer(value: &serde_json::Value) -> Option<MemoryLayer> {
+    value.as_str()?.parse::<MemoryLayer>().ok()
+}
+
+/// Render a `TaskContext` into a compact, readable block for the provider.
+fn render_task(task: &super::store::TaskContext) -> String {
+    let mut lines = Vec::new();
+    for (label, value) in [
+        ("Title", task.title.as_str()),
+        ("Goal", task.goal.as_str()),
+        ("Status", task.status.as_str()),
+    ] {
+        let value = value.trim();
+        if !value.is_empty() {
+            lines.push(format!("{label}: {value}"));
         }
     }
-    Some(facts)
+    let steps: Vec<&str> = task
+        .steps
+        .iter()
+        .map(|step| step.trim())
+        .filter(|step| !step.is_empty())
+        .collect();
+    if !steps.is_empty() {
+        lines.push(format!("Steps:\n- {}", steps.join("\n- ")));
+    }
+    let notes = task.notes.trim();
+    if !notes.is_empty() {
+        lines.push(format!("Notes: {notes}"));
+    }
+    lines.join("\n")
 }
 
 fn fact_value_to_string(value: &serde_json::Value) -> Option<String> {
