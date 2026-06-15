@@ -25,7 +25,7 @@
 | `POST` | `/api/chat/session` | Открыть или создать web chat session |
 | `POST` | `/api/chat` | Отправить prompt через `ChatAgent` |
 | `POST` | `/api/memory/update` | Ручное управление слоями памяти (set/delete/clear-layer), без provider-запроса |
-| `POST` | `/api/agents/manage` | Stateful-агенты (list/load/save/delete/build-schema) |
+| `POST` | `/api/agents/manage` | Stateful-агенты + диалоги (list/load/save/delete/build-schema/dialogs/dialog-rename/dialog-delete) |
 
 `/api/agent/*` сохранены как совместимые aliases для chat session/chat.
 
@@ -37,6 +37,15 @@
 (`#workspace`) скрыты. Войдя — слева сверху всегда виден активный агент + стадия
 (`#activeAgentBar`) и кнопка «Сменить агента». Активный id — в localStorage
 (`ai_active_agent`); при загрузке агент авто-восстанавливается, иначе показывается gate.
+
+У агента **несколько диалогов** (чатов). Панель «Чаты» в шапке диалога (`#dialogsBar`,
+видна только в workspace) — чипы со всеми чатами агента (title из первого сообщения,
+активный подсвечен), «+ чат», ✕ для удаления. Все чаты делят рабочую+долговременную
+память агента, но у каждого своя история (краткосрочная). `session_key = "agent:<id>"`
+для всех (`chat_session`/`chat`/`chat_stream` консистентны), индекс диалогов —
+`agent-<id>.dialogs.toon`, авто-регистрация в `save_session` (`agent_id_from_key`).
+Actions: `dialogs` / `dialog-rename` / `dialog-delete`. JS: `refreshDialogs` /
+`switchDialog` / `newDialog` / `deleteDialog`.
 
 Память агента заполняется **самим агентом**, не вручную:
 - **долговременная** — `AgentProfile` (схема интервью + значения). Агент сам

@@ -541,7 +541,12 @@ async fn chat_session(
     let provider = parse_provider(&request.provider)?;
     let model = blank_to_none(Some(request.model))
         .ok_or_else(|| AppError::InvalidInput("Model is required".to_string()))?;
-    let session_key = web_session_key(agent.id, &provider.to_string(), &model);
+    // For a saved agent, key sessions on `agent:<id>` so chat_session, chat, and
+    // the dialog index all share one key (consistent dialog list per agent).
+    let session_key = effective_session_key(
+        request.saved_agent_id.as_deref(),
+        &web_session_key(agent.id, &provider.to_string(), &model),
+    );
     let session = if request.new_session {
         let session = state.sessions.create_session()?;
         state
@@ -745,6 +750,34 @@ async fn agents_manage(
                 updated_at_unix: crate::chat::unix_now(),
             });
         }
+        "dialogs" => {
+            let id = require_agent_id(request.id.as_deref())?;
+            response.dialogs = state.sessions.list_dialogs(&id)?;
+        }
+        "dialog-rename" => {
+            let id = require_agent_id(request.id.as_deref())?;
+            let session_id = request
+                .session_id
+                .as_deref()
+                .and_then(blank_str_to_none)
+                .ok_or_else(|| AppError::InvalidInput("session_id is required".to_string()))?;
+            state.sessions.rename_dialog(
+                &id,
+                session_id,
+                request.title.as_deref().unwrap_or_default(),
+            )?;
+            response.dialogs = state.sessions.list_dialogs(&id)?;
+        }
+        "dialog-delete" => {
+            let id = require_agent_id(request.id.as_deref())?;
+            let session_id = request
+                .session_id
+                .as_deref()
+                .and_then(blank_str_to_none)
+                .ok_or_else(|| AppError::InvalidInput("session_id is required".to_string()))?;
+            state.sessions.delete_dialog(&id, session_id)?;
+            response.dialogs = state.sessions.list_dialogs(&id)?;
+        }
         other => {
             return Err(AppError::InvalidInput(format!("Unknown agent action: {other}")).into());
         }
@@ -855,6 +888,11 @@ struct AgentsManageRequest {
     token: Option<String>,
     #[serde(default)]
     token_provider: Option<String>,
+    /// Dialog target, used by `dialog-rename` / `dialog-delete`.
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -903,6 +941,8 @@ struct AgentsManageResponse {
     agent: Option<SavedAgent>,
     task: Option<TaskContext>,
     profile: Option<AgentProfile>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    dialogs: Vec<crate::chat::DialogMeta>,
 }
 
 async fn memory_update(
@@ -1178,6 +1218,8 @@ struct ChatSessionRequest {
     model: String,
     session_id: Option<String>,
     new_session: bool,
+    #[serde(default)]
+    saved_agent_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
