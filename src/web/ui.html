@@ -948,7 +948,6 @@
         <div id="tab-profile" class="inspector-pane active">
           <div class="group">
             <h2>Провайдер</h2>
-            <label>agent<select id="agentMode"></select></label>
             <label>Provider<select id="provider"></select></label>
             <label>Model<select id="model"></select></label>
             <div class="model-meta-row">
@@ -1523,17 +1522,21 @@
     }
 
     function sessionCacheKey() {
-      const scope = activeAgentId ? `agent:${activeAgentId}` : `${$('agentMode').value}:${currentProvider()}:${selectedModel()}`;
+      const scope = activeAgentId ? `agent:${activeAgentId}` : `${backendAgentId() || 'agent'}:${currentProvider()}:${selectedModel()}`;
       return `ai_chat_session:${scope}`;
     }
 
     function branchCacheKey() {
-      const scope = activeAgentId ? `agent:${activeAgentId}` : `${$('agentMode').value}:${currentProvider()}:${selectedModel()}`;
+      const scope = activeAgentId ? `agent:${activeAgentId}` : `${backendAgentId() || 'agent'}:${currentProvider()}:${selectedModel()}`;
       return `ai_chat_branches:${scope}`;
     }
 
     function selectedAgent() {
-      return agents.find((agent) => agent.id === $('agentMode').value) || agents[0] || null;
+      return agents[0] || null;
+    }
+
+    function backendAgentId() {
+      return selectedAgent()?.id || null;
     }
 
     function isBranchingMode() {
@@ -1547,7 +1550,7 @@
 
     function chatPayload() {
       return {
-        agent_id: $('agentMode').value,
+        agent_id: backendAgentId(),
         ...providerPayload(),
         model: selectedModel(),
         context_limit: modelContextById.get(selectedModel()) ?? null,
@@ -1719,7 +1722,7 @@
 
     function sessionPayload(newSession = false) {
       return {
-        agent_id: $('agentMode').value,
+        agent_id: backendAgentId(),
         provider: currentProvider(),
         model: selectedModel(),
         session_id: newSession ? null : localStorage.getItem(sessionCacheKey()),
@@ -1821,7 +1824,7 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            agent_id: $('agentMode').value,
+            agent_id: backendAgentId(),
             provider: currentProvider(),
             model,
             session_id: chatSessionId,
@@ -2151,7 +2154,7 @@
       resetBranches();
       try {
         const data = await requestJson('/api/agent/session', {
-          agent_id: $('agentMode').value,
+          agent_id: backendAgentId(),
           provider: currentProvider(),
           model: selectedModel(),
           session_id: sessionId,
@@ -2703,9 +2706,7 @@
       $('rubRate').addEventListener('input', () => localStorage.setItem('rubRate', $('rubRate').value));
       const agentData = await requestJson('/api/agents');
       agents = agentData.agents || [];
-      $('agentMode').innerHTML = agents.map((agent) => `<option value="${escapeHtml(agent.id)}">${escapeHtml(agent.name)}</option>`).join('');
       if (!agents.length) throw new Error('Нет доступных агентов');
-      $('agentMode').value = agents[0].id;
       const data = await requestJson('/api/providers');
       providers = data.providers;
       providerSelect.innerHTML = providers.map((item) => `<option value="${item.id}">${item.name}</option>`).join('');
@@ -2716,15 +2717,10 @@
       populateGateProviders();
       await refreshTokenStatus();
       await loadModels().catch(() => {}); // автозагрузка; ошибка не критична
-      // Agent-centric entry: enter the last agent, else show the gate.
-      if (activeAgentId) {
-        await refreshGateList();
-        const exists = Array.from($('gateAgentList').options).some((o) => o.value === activeAgentId);
-        if (exists) { await enterAgent(activeAgentId); }
-        else { activeAgentId = null; localStorage.removeItem('ai_active_agent'); showGate(); }
-      } else {
-        showGate();
-      }
+      // Agent-centric entry: always show the chooser/create gate on load.
+      // The last agent is selected in the list, but chat opens only after
+      // an explicit "Войти" or "Создать и войти" action.
+      showGate();
       setStatus('Готово');
     }
 
@@ -3110,7 +3106,6 @@
     });
     $('token').addEventListener('input', markTokenOverrideProvider);
     $('saveToken').addEventListener('click', saveTokenOverride);
-    $('agentMode').addEventListener('change', () => { chatSessionId = null; chatHistory = []; branchState = { checkpoint: null, branches: [], activeId: null }; renderChatHistory(); loadChatSession(); });
     $('model').addEventListener('change', () => { resolveSelectedModelPricing(); updateContextBadge(); persistSelectedModel(); loadChatSession(); });
     $('customModel').addEventListener('input', () => { resolveSelectedModelPricing(); updateContextBadge(); persistSelectedModel(); loadChatSession(); });
     $('memoryStrategy').addEventListener('change', () => {
