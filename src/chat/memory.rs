@@ -239,28 +239,27 @@ impl AgentMemory {
         config: &MemoryConfig,
     ) -> Vec<ChatMessage> {
         let mut context = system_messages(history);
-        if config.strategy == MemoryStrategy::Summary {
-            if let Some(summary) = self
+        if config.strategy == MemoryStrategy::Summary
+            && let Some(summary) = self
                 .session_summary
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-            {
-                context.push(ChatMessage {
-                    role: Role::System,
-                    content: format!(
-                        "[memory:short-term] Summary of the earlier part of this local agent session:\n{summary}"
-                    ),
-                });
-            }
+        {
+            context.push(ChatMessage {
+                role: Role::System,
+                content: format!(
+                    "[memory:short-term] Summary of the earlier part of this local agent session:\n{summary}"
+                ),
+            });
         }
-        if config.strategy == MemoryStrategy::StickyFacts {
-            if let Some(facts_block) = self.facts_block(config.facts_prompt.as_str()) {
-                context.push(ChatMessage {
-                    role: Role::System,
-                    content: facts_block,
-                });
-            }
+        if config.strategy == MemoryStrategy::StickyFacts
+            && let Some(facts_block) = self.facts_block(config.facts_prompt.as_str())
+        {
+            context.push(ChatMessage {
+                role: Role::System,
+                content: facts_block,
+            });
         }
         if config.strategy == MemoryStrategy::ScopedBranches
             && config.topic_file_routing
@@ -1040,10 +1039,7 @@ fn extract_goal(line: &str) -> Option<String> {
 }
 
 fn trim_sentence_tail(value: &str) -> String {
-    let first_part = value
-        .split(|ch: char| ch == '.' || ch == '!' || ch == '?' || ch == '\n')
-        .next()
-        .unwrap_or(value);
+    let first_part = value.split(['.', '!', '?', '\n']).next().unwrap_or(value);
     compact_fact_value(first_part.trim_matches(|ch: char| ch == ',' || ch == ';' || ch == ':'))
 }
 

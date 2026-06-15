@@ -730,15 +730,15 @@ fn apply_estimated_usage_and_cost(
             ..TokenUsage::default()
         });
     }
-    if metrics.cost.is_none() {
-        if let (Some(usage), Some(pricing)) = (metrics.usage.as_ref(), pricing) {
-            let cost = estimate_cost(usage.input_tokens, usage.output_tokens, pricing);
-            metrics.cost = Some(RequestCost {
-                amount: cost.amount,
-                currency: cost.currency,
-                source: CostSource::ConfiguredPricing,
-            });
-        }
+    if metrics.cost.is_none()
+        && let (Some(usage), Some(pricing)) = (metrics.usage.as_ref(), pricing)
+    {
+        let cost = estimate_cost(usage.input_tokens, usage.output_tokens, pricing);
+        metrics.cost = Some(RequestCost {
+            amount: cost.amount,
+            currency: cost.currency,
+            source: CostSource::ConfiguredPricing,
+        });
     }
 }
 

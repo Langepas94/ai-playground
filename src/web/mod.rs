@@ -521,10 +521,10 @@ fn sse_event_stream(
     stream::unfold(rx, |mut rx| async move {
         let msg = rx.recv().await?;
         if let Some(payload) = msg.strip_prefix("\x00DONE\x00") {
-            let event = Event::default().event("done").data(payload.to_string());
+            let event = Event::default().event("done").data(payload);
             Some((Ok(event), rx))
         } else if let Some(payload) = msg.strip_prefix("\x00ERR\x00") {
-            let event = Event::default().event("error").data(payload.to_string());
+            let event = Event::default().event("error").data(payload);
             Some((Ok(event), rx))
         } else {
             let event = Event::default().event("token").data(msg);

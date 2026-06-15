@@ -363,9 +363,8 @@ impl ChatAgent {
         )
     }
 
-    /// Insert the stateful memory blocks (domain, long-term profile, working task
-    /// + stage, invariants, prior-violation feedback) after the leading system
-    /// messages, so the provider sees the agent's state up front.
+    /// Insert the stateful memory blocks after the leading system messages, so
+    /// the provider sees the agent's state up front.
     fn inject_memory_layers(&self, messages: &mut Vec<ChatMessage>) {
         let mut blocks = Vec::new();
 
@@ -376,13 +375,13 @@ impl ChatAgent {
             });
         }
 
-        if let Some(profile) = self.agent_profile.as_ref() {
-            if let Some(block) = render_profile_block(profile) {
-                blocks.push(ChatMessage {
-                    role: Role::System,
-                    content: block,
-                });
-            }
+        if let Some(profile) = self.agent_profile.as_ref()
+            && let Some(block) = render_profile_block(profile)
+        {
+            blocks.push(ChatMessage {
+                role: Role::System,
+                content: block,
+            });
         }
 
         if let Some(task) = self.task_state.as_ref() {
@@ -684,10 +683,10 @@ impl ChatAgent {
     ) -> StatefulReport {
         let mut report = StatefulReport::default();
 
-        if self.agent_profile.is_some() {
-            if let Some(metrics) = self.fill_profile_from_message(client, user_prompt).await {
-                report.metrics = Some(metrics);
-            }
+        if self.agent_profile.is_some()
+            && let Some(metrics) = self.fill_profile_from_message(client, user_prompt).await
+        {
+            report.metrics = Some(metrics);
         }
         if let Some(profile) = self.agent_profile.as_ref() {
             report.pending_questions = profile
@@ -841,10 +840,8 @@ impl ChatAgent {
             return (None, Some(response.metrics));
         }
         let accepted = current.can_transition(proposed);
-        if accepted {
-            if let Some(task) = self.task_state.as_mut() {
-                task.stage = proposed;
-            }
+        if accepted && let Some(task) = self.task_state.as_mut() {
+            task.stage = proposed;
         }
         (
             Some(StageTransition {
@@ -1399,13 +1396,10 @@ fn extract_json_value(text: &str) -> Option<serde_json::Value> {
         if let (Some(start), Some(end)) = (
             bytes.iter().position(|&b| b == open),
             bytes.iter().rposition(|&b| b == close),
-        ) {
-            if end > start {
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&trimmed[start..=end])
-                {
-                    return Some(value);
-                }
-            }
+        ) && end > start
+            && let Ok(value) = serde_json::from_str::<serde_json::Value>(&trimmed[start..=end])
+        {
+            return Some(value);
         }
     }
     None

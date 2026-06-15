@@ -423,9 +423,7 @@ fn provider_matches(provider: ProviderKind, entry: &LiteLlmModelEntry) -> bool {
     {
         return true;
     }
-    provider_prefixes(provider)
-        .iter()
-        .any(|candidate| *candidate == entry_provider)
+    provider_prefixes(provider).contains(&entry_provider)
         || (provider == ProviderKind::OpenAiCompatible && entry_provider == "openai")
 }
 
