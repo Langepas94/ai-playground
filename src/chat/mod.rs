@@ -7,7 +7,8 @@ pub mod store;
 pub mod token_accounting;
 
 pub use agent::{
-    AgentDescriptor, ChatAgent, LOCAL_SESSION_AGENT_ID, available_agents, selected_agent,
+    AgentDescriptor, ChatAgent, LOCAL_SESSION_AGENT_ID, StageTransition, StatefulReport,
+    available_agents, build_profile_schema, selected_agent,
 };
 pub use goal::{
     ConversationGoal, ConversationStopMode, GoalComparison, GoalRun, GoalState, run_goal_once,
@@ -16,9 +17,9 @@ pub use history::save_history;
 pub use memory::{AgentMemory, MemoryConfig};
 pub use session::{describe_control, describe_goal, interactive_chat, read_terminal_line};
 pub use store::{
-    AgentSummary, ConversationSession, KnowledgeDoc, LocalSessionStore, SavedAgent,
-    SavedMemoryConfig, TaskContext, TopicFileStorage, add_request_metrics, session_key, unix_now,
-    web_session_key,
+    AgentProfile, AgentSummary, ConversationSession, LocalSessionStore, ProfileField, SavedAgent,
+    SavedMemoryConfig, TaskContext, TaskStage, TopicFileStorage, add_request_metrics, session_key,
+    unix_now, web_session_key,
 };
 pub use token_accounting::{
     ContextStatus, TokenCostEstimate, TokenEstimate, TokenGrowthReport, TokenGrowthRow,

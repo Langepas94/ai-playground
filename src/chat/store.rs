@@ -24,10 +24,12 @@ pub struct LongTermMemory {
     pub facts: std::collections::BTreeMap<String, String>,
 }
 
-/// A user-created, persistent named agent. Owns its settings plus the explicit
-/// working (`TaskContext`) and long-term (`KnowledgeDoc`) memory layers. The
-/// short-term layer is the agent's chat session (`session_key = "agent:<id>"`).
-/// The provider token is NOT stored here — it stays in the keyring.
+/// A user-created, persistent stateful agent. Owns its settings, its domain, its
+/// invariants, plus two auto-populated memory layers: working (`TaskContext` with
+/// a task-stage FSM) and long-term (`AgentProfile`, filled by the agent's own
+/// interview). The short-term layer is the agent's chat session
+/// (`session_key = "agent:<id>"`). The provider token is NOT stored here — it
+/// stays in the keyring.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SavedAgent {
     #[serde(default)]
@@ -42,6 +44,14 @@ pub struct SavedAgent {
     pub model: String,
     #[serde(default)]
     pub system_prompt: String,
+    /// Free-text domain description the user provides at creation. Seeds the
+    /// interview-schema generation and is injected so the agent stays on-domain.
+    #[serde(default)]
+    pub domain: String,
+    /// Hard constraints (stack, architecture, bans) that must not change between
+    /// requests. Injected into the prompt and checked against each response.
+    #[serde(default)]
+    pub invariants: Vec<String>,
     #[serde(default)]
     pub memory: SavedMemoryConfig,
     #[serde(default)]
@@ -84,40 +94,171 @@ pub struct SavedMemoryConfig {
     pub topic_classifier_prompt: String,
 }
 
-/// Working memory: structured data of the agent's current task.
+/// Stage of the task state machine. Auto-detected by the agent from the dialog,
+/// but transitions are validated in code (see [`TaskStage::can_transition`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TaskStage {
+    /// Gathering / clarifying the task. Entry stage.
+    #[default]
+    Clarify,
+    /// Designing an approved plan.
+    Planning,
+    /// Executing the plan.
+    Execution,
+    /// Validating the result (tests / review).
+    Validation,
+    /// Finished. Terminal stage.
+    Done,
+}
+
+// Serialized as its Display string (not a serde enum) so the TOON codec can store
+// it as a plain map value, mirroring `MemoryLayer`.
+impl Serialize for TaskStage {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for TaskStage {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Ok(raw.parse().unwrap_or_default())
+    }
+}
+
+impl TaskStage {
+    /// Stages in canonical order, for stable rendering / UI.
+    pub const ORDERED: [TaskStage; 5] = [
+        TaskStage::Clarify,
+        TaskStage::Planning,
+        TaskStage::Execution,
+        TaskStage::Validation,
+        TaskStage::Done,
+    ];
+
+    /// Stages reachable from `self`. Empty for the terminal stage.
+    pub fn allowed_next(self) -> &'static [TaskStage] {
+        match self {
+            TaskStage::Clarify => &[TaskStage::Planning],
+            TaskStage::Planning => &[TaskStage::Execution],
+            TaskStage::Execution => &[TaskStage::Validation, TaskStage::Planning],
+            TaskStage::Validation => &[TaskStage::Done, TaskStage::Execution],
+            TaskStage::Done => &[],
+        }
+    }
+
+    /// Whether moving from `self` to `to` is allowed. Staying put is always allowed.
+    pub fn can_transition(self, to: TaskStage) -> bool {
+        self == to || self.allowed_next().contains(&to)
+    }
+}
+
+impl std::fmt::Display for TaskStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            TaskStage::Clarify => "clarify",
+            TaskStage::Planning => "planning",
+            TaskStage::Execution => "execution",
+            TaskStage::Validation => "validation",
+            TaskStage::Done => "done",
+        };
+        f.write_str(label)
+    }
+}
+
+impl std::str::FromStr for TaskStage {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "clarify" | "clarification" | "clarifying" => Ok(TaskStage::Clarify),
+            "planning" | "plan" => Ok(TaskStage::Planning),
+            "execution" | "execute" | "executing" | "exec" => Ok(TaskStage::Execution),
+            "validation" | "validate" | "validating" | "review" => Ok(TaskStage::Validation),
+            "done" | "finished" | "complete" | "completed" => Ok(TaskStage::Done),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Working memory: the agent's current task, shared across all of its sessions.
+/// Auto-populated by the agent; `stage` is driven by the task state machine.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TaskContext {
+    #[serde(default)]
+    pub stage: TaskStage,
     #[serde(default)]
     pub title: String,
     #[serde(default)]
     pub goal: String,
+    /// The approved plan (one entry per step).
     #[serde(default)]
-    pub status: String,
+    pub plan: Vec<String>,
+    /// Results / outputs accumulated as stages complete.
     #[serde(default)]
-    pub steps: Vec<String>,
+    pub results: Vec<String>,
     #[serde(default)]
     pub notes: String,
+    /// Invariant violations found in the agent's last response. Surfaced in debug
+    /// and injected on the next turn as corrective feedback (the code-validation
+    /// loop). Cleared once a clean response passes.
+    #[serde(default)]
+    pub violations: Vec<String>,
 }
 
 impl TaskContext {
-    /// Whether the task context has any content worth injecting.
+    /// Whether the task context has any content worth injecting beyond the
+    /// default entry stage.
     pub fn is_empty(&self) -> bool {
-        self.title.trim().is_empty()
+        self.stage == TaskStage::Clarify
+            && self.title.trim().is_empty()
             && self.goal.trim().is_empty()
-            && self.status.trim().is_empty()
             && self.notes.trim().is_empty()
-            && self.steps.iter().all(|step| step.trim().is_empty())
+            && self.plan.iter().all(|step| step.trim().is_empty())
+            && self.results.iter().all(|item| item.trim().is_empty())
     }
 }
 
-/// Long-term memory: an editable knowledge document (profile / decisions /
-/// knowledge). Stored as a TOON field, not as a `.md` file on disk.
+/// One field of the agent's interview schema. `value` empty means the agent has
+/// not yet elicited it from the user.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct KnowledgeDoc {
+pub struct ProfileField {
     #[serde(default)]
-    pub content: String,
+    pub key: String,
+    /// The question the agent asks the user to fill this field.
+    #[serde(default)]
+    pub question: String,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub value: String,
+}
+
+impl ProfileField {
+    pub fn is_filled(&self) -> bool {
+        !self.value.trim().is_empty()
+    }
+}
+
+/// Long-term memory: the agent's profile — a schema of fields (stack, audience,
+/// constraints, …) the agent interviews the user to fill. Stored per-agent and
+/// shared across sessions. Replaces the old free-text `KnowledgeDoc`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentProfile {
+    #[serde(default)]
+    pub fields: Vec<ProfileField>,
     #[serde(default)]
     pub updated_at_unix: u64,
+}
+
+impl AgentProfile {
+    /// Required fields the agent has not yet filled — what it still needs to ask.
+    pub fn pending_required(&self) -> Vec<&ProfileField> {
+        self.fields
+            .iter()
+            .filter(|field| field.required && !field.is_filled())
+            .collect()
+    }
 }
 
 /// Lightweight entry for the agents index / picker.
@@ -131,6 +272,9 @@ pub struct AgentSummary {
     pub provider: String,
     #[serde(default)]
     pub model: String,
+    /// Current task stage, surfaced in the agent picker.
+    #[serde(default)]
+    pub stage: TaskStage,
     #[serde(default)]
     pub updated_at_unix: u64,
 }
@@ -461,6 +605,7 @@ impl LocalSessionStore {
             name: agent.name.clone(),
             provider: agent.provider.clone(),
             model: agent.model.clone(),
+            stage: self.load_task(&agent.id)?.stage,
             updated_at_unix: agent.updated_at_unix,
         };
         if let Some(existing) = index.agents.iter_mut().find(|entry| entry.id == agent.id) {
@@ -475,7 +620,7 @@ impl LocalSessionStore {
         for path in [
             self.agent_path(id),
             self.agent_task_path(id),
-            self.agent_knowledge_path(id),
+            self.agent_profile_path(id),
         ] {
             if path.exists() {
                 fs::remove_file(&path)
@@ -495,18 +640,27 @@ impl LocalSessionStore {
             .unwrap_or_default())
     }
 
+    /// Persist the working-memory task and keep the picker index's stage in sync.
     pub fn save_task(&self, id: &str, task: &TaskContext) -> Result<(), AppError> {
-        self.write_toon(&self.agent_task_path(id), task)
+        self.write_toon(&self.agent_task_path(id), task)?;
+        let mut index: AgentsIndex = self
+            .read_toon(&self.agents_index_path())?
+            .unwrap_or_default();
+        if let Some(entry) = index.agents.iter_mut().find(|entry| entry.id == id) {
+            entry.stage = task.stage;
+            self.write_toon(&self.agents_index_path(), &index)?;
+        }
+        Ok(())
     }
 
-    pub fn load_knowledge(&self, id: &str) -> Result<KnowledgeDoc, AppError> {
+    pub fn load_profile(&self, id: &str) -> Result<AgentProfile, AppError> {
         Ok(self
-            .read_toon(&self.agent_knowledge_path(id))?
+            .read_toon(&self.agent_profile_path(id))?
             .unwrap_or_default())
     }
 
-    pub fn save_knowledge(&self, id: &str, knowledge: &KnowledgeDoc) -> Result<(), AppError> {
-        self.write_toon(&self.agent_knowledge_path(id), knowledge)
+    pub fn save_profile(&self, id: &str, profile: &AgentProfile) -> Result<(), AppError> {
+        self.write_toon(&self.agent_profile_path(id), profile)
     }
 
     fn agent_path(&self, id: &str) -> PathBuf {
@@ -519,9 +673,9 @@ impl LocalSessionStore {
             .join(format!("agent-{}.task.toon", safe_key(id)))
     }
 
-    fn agent_knowledge_path(&self, id: &str) -> PathBuf {
+    fn agent_profile_path(&self, id: &str) -> PathBuf {
         self.sessions_dir()
-            .join(format!("agent-{}.knowledge.toon", safe_key(id)))
+            .join(format!("agent-{}.profile.toon", safe_key(id)))
     }
 
     fn agents_index_path(&self) -> PathBuf {
@@ -1016,40 +1170,70 @@ mod tests {
         };
         store.save_agent(&agent).expect("save agent");
 
-        // Working + long-term layers.
+        // Working (task + stage) + long-term (profile) layers.
         let task = TaskContext {
+            stage: TaskStage::Planning,
             title: "ship agents".to_string(),
             goal: "persist settings".to_string(),
-            steps: vec!["design".to_string(), "build".to_string()],
+            plan: vec!["design".to_string(), "build".to_string()],
             ..TaskContext::default()
         };
         store.save_task("a1", &task).expect("save task");
         store
-            .save_knowledge(
+            .save_profile(
                 "a1",
-                &KnowledgeDoc {
-                    content: "user prefers Rust".to_string(),
+                &AgentProfile {
+                    fields: vec![ProfileField {
+                        key: "stack".to_string(),
+                        question: "Which stack?".to_string(),
+                        required: true,
+                        value: "Rust".to_string(),
+                    }],
                     updated_at_unix: 100,
                 },
             )
-            .expect("save knowledge");
+            .expect("save profile");
 
         let loaded = store.load_agent("a1").expect("load").expect("present");
         assert_eq!(loaded.name, "Rust reviewer");
         assert_eq!(loaded.system_prompt, "be terse");
-        assert_eq!(store.load_task("a1").expect("task").title, "ship agents");
-        assert_eq!(
-            store.load_knowledge("a1").expect("knowledge").content,
-            "user prefers Rust"
-        );
+        let loaded_task = store.load_task("a1").expect("task");
+        assert_eq!(loaded_task.title, "ship agents");
+        assert_eq!(loaded_task.stage, TaskStage::Planning);
+        let loaded_profile = store.load_profile("a1").expect("profile");
+        assert_eq!(loaded_profile.fields[0].value, "Rust");
+        assert!(loaded_profile.pending_required().is_empty());
 
         let listed = store.list_agents().expect("list");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, "a1");
+        // Index stage stays in sync with the saved task.
+        assert_eq!(listed[0].stage, TaskStage::Planning);
 
         store.delete_agent("a1").expect("delete");
         assert!(store.load_agent("a1").expect("load after delete").is_none());
         assert!(store.list_agents().expect("list after delete").is_empty());
+    }
+
+    #[test]
+    fn task_stage_transitions_enforced() {
+        // Legal forward transitions.
+        assert!(TaskStage::Clarify.can_transition(TaskStage::Planning));
+        assert!(TaskStage::Planning.can_transition(TaskStage::Execution));
+        assert!(TaskStage::Execution.can_transition(TaskStage::Validation));
+        assert!(TaskStage::Validation.can_transition(TaskStage::Done));
+        // Legal back-transitions.
+        assert!(TaskStage::Execution.can_transition(TaskStage::Planning));
+        assert!(TaskStage::Validation.can_transition(TaskStage::Execution));
+        // Staying put is allowed.
+        assert!(TaskStage::Planning.can_transition(TaskStage::Planning));
+        // Illegal jumps are rejected.
+        assert!(!TaskStage::Clarify.can_transition(TaskStage::Execution));
+        assert!(!TaskStage::Planning.can_transition(TaskStage::Done));
+        assert!(!TaskStage::Done.can_transition(TaskStage::Planning));
+        // Round-trips through its string form.
+        assert_eq!("execution".parse(), Ok(TaskStage::Execution));
+        assert_eq!(TaskStage::Validation.to_string(), "validation");
     }
 
     #[test]

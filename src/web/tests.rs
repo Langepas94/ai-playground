@@ -833,14 +833,22 @@ fn web_ui_facts_preview_detects_custom_prompt_facts_block() {
 }
 
 #[test]
-fn web_ui_renders_named_agent_tab() {
-    // Separate-agent tab with the 3 layers and persistence wiring.
-    assert!(INDEX_HTML.contains("data-tab=\"agent\""));
-    assert!(INDEX_HTML.contains("id=\"tab-agent\""));
-    assert!(INDEX_HTML.contains("Рабочая память — TaskContext"));
-    assert!(INDEX_HTML.contains("Долговременная память — знания"));
+fn web_ui_is_agent_centric() {
+    // Agent gate is the entry screen; workspace is gated behind an active agent.
+    assert!(INDEX_HTML.contains("id=\"agentGate\""));
+    assert!(INDEX_HTML.contains("id=\"workspace\""));
+    assert!(INDEX_HTML.contains("id=\"activeAgentBar\""));
+    assert!(INDEX_HTML.contains("Создать агента"));
+    assert!(INDEX_HTML.contains("Сгенерировать интервью"));
+    // Stateful panes: profile (interview), task (stage FSM), invariants.
+    assert!(INDEX_HTML.contains("data-tab=\"aprofile\""));
+    assert!(INDEX_HTML.contains("data-tab=\"task\""));
+    assert!(INDEX_HTML.contains("data-tab=\"invariants\""));
+    // Wiring: build-schema action, gate↔workspace, agent_state rendering.
     assert!(INDEX_HTML.contains("/api/agents/manage"));
-    assert!(INDEX_HTML.contains("function enterAgent(id)"));
+    assert!(INDEX_HTML.contains("'build-schema'"));
+    assert!(INDEX_HTML.contains("function showGate()"));
+    assert!(INDEX_HTML.contains("function renderAgentState(state)"));
     assert!(INDEX_HTML.contains("saved_agent_id: activeAgentId"));
 }
 

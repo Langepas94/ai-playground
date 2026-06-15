@@ -112,24 +112,41 @@ long-term
   как раньше. Сценарий «новая сессия»: long-term остаётся, short-term пуст
   (тест `long_term_survives_new_session_short_term_does_not` в `store.rs`).
 
-## Именованные агенты (SavedAgent)
+## Stateful-агенты (SavedAgent)
 
-Персистентная сущность агента поверх трёх слоёв памяти (`store.rs`):
+Персистентная сущность агента поверх трёх слоёв памяти (`store.rs`). Память
+**заполняется самим агентом**, не вручную: юзер задаёт только домен + инварианты.
 
-- `SavedAgent` — настройки агента (provider/base_url/model/system_prompt +
-  `SavedMemoryConfig`). Токен НЕ хранится (keyring).
-- `TaskContext` — **рабочая** память: title/goal/status/steps/notes.
-- `KnowledgeDoc` — **долговременная** память: текст знаний (TOON-поле, не `.md`).
+- `SavedAgent` — настройки (provider/base_url/model/system_prompt + `domain` +
+  `invariants` + `SavedMemoryConfig`). Токен НЕ хранится (keyring).
+- `TaskContext` — **рабочая** память: `stage` (FSM) + title/goal/plan/results/notes
+  + `violations`. Стадия ведётся автоматически и общая для всех сессий агента.
+- `AgentProfile` (`Vec<ProfileField>`) — **долговременная** память: схема интервью
+  (key/question/required) + заполненные агентом значения.
 - **краткосрочная** память — обычная сессия чата, `session_key = "agent:<id>"`.
 
-Хранение через `LocalSessionStore`: `agent-<id>.agent.toon`, `*.task.toon`,
-`*.knowledge.toon`, индекс `agents-index.toon` (методы `list_agents`,
-`load_agent`, `save_agent`, `delete_agent`, `load_task`/`save_task`,
-`load_knowledge`/`save_knowledge`; общий atomic-io через `write_toon`/`read_toon`).
+`TaskStage` (`clarify→planning→execution→validation→done`) — переходы валидируются
+кодом (`can_transition`/`allowed_next`), нелегальные отклоняются. Сериализуется как
+строка (как `MemoryLayer`), чтобы TOON хранил её как plain-значение.
 
-`ChatAgent::set_working_context()` / `set_knowledge()` инъектят TaskContext и
-KnowledgeDoc в каждый provider request блоками `[memory:working]` /
-`[memory:long-term]` (метод `inject_memory_layers`, не пишется в history/sidecar).
+Хранение через `LocalSessionStore`: `agent-<id>.agent.toon`, `*.task.toon`,
+`*.profile.toon`, индекс `agents-index.toon` (со стадией). Методы `list_agents`,
+`load_agent`, `save_agent`, `delete_agent`, `load_task`/`save_task` (синхронит
+стадию в индекс), `load_profile`/`save_profile`; общий atomic-io
+`write_toon`/`read_toon`.
+
+`ChatAgent` инъектит память в каждый provider request (`inject_memory_layers`):
+`[agent:domain]`, `[memory:long-term]` (профиль + что ещё спросить),
+`[memory:working]` (стадия + allowed-next + план + «не перепрыгивать стадии»),
+`[invariants]` (+ прошлые нарушения как фидбэк).
+
+`ChatAgent::stateful_postprocess()` после хода (LLM-driven, реюз паттернов
+`update_sticky_facts`/классификатора): заполняет профиль из сообщения юзера
+(фильтр `looks_sensitive`), предлагает стадию → валидирует FSM → применяет,
+проверяет ответ против инвариантов. Возвращает `StatefulReport` (pending-вопросы,
+стадия, `StageTransition`, нарушения, метрики). `build_profile_schema()` —
+LLM-генерация схемы интервью из домена. Каждый шаг gated на наличии данных:
+ad-hoc чат без агента не платит ничего.
 
 ## Что важно не ломать
 
