@@ -1,294 +1,102 @@
 # Продуктовая документация
 
-## Web UI элементы и поведение
+## Web UI: текущее поведение
 
-### Левая колонка — Диалог
+### Основной layout
 
-#### История сообщений (conversation)
-- Все сообщения пользователя (голубые, справа) и модели (белые, слева)
-- Сообщения отрендерены из `session.messages` (из LocalSessionStore или от сервера)
-- При переполнении контекста — не обрезаются на фронте, обрезаются на бэке в AgentMemory
+- Слева находится диалог: история, composer, `📎`, `Отправить`, `Стоп`, `Новая сессия` и переключатель `Стримить по чанкам`.
+- Справа находится inspector с вкладками `Профиль`, `Параметры`, `Метрики`, `Debug`.
+- `Профиль` показывает agent mode, provider, model, badge контекстного окна, token status, `Base URL`, `Custom model id`.
+- `Параметры` содержит `system_prompt`, memory strategy, response controls, pricing overrides, Billing API и extra API parameters.
 
-**Поведение при стриминге:**
-- Сообщение юзера добавлено оптимистично (сразу после отправки)
-- Пузыр ассистента создан пустой, слова появляются по одному
-- После `event: done` → финальный рендер с метаданными
+### Сессии
 
-#### Форма ввода (composer)
-- Textarea для промпта
-- 📎 кнопка для прикрепления файлов (в textarea-wrap, абсолютное позиционирование)
-- Чипсы прикреплённых файлов (если `pendingAttachments.length > 0`)
-- Метабар выше textarea:
-  - Контекстное окно модели (если `modelContextById[selectedModel()]`)
-  - Статус прикреплённых файлов
+- На старте и при смене provider/model UI запрашивает `/api/agent/session` или alias `/api/chat/session`.
+- `session_id` кешируется в `localStorage`; серверная часть хранит сообщения, memory state и накопленные metrics в `LocalSessionStore`.
+- `Новая сессия` сбрасывает текущую session, но не трогает сохраненный токен.
 
-#### Кнопки
-- "Отправить" (`id="send"`) — POST /api/agent/chat/stream
-- "Новая сессия" — очистить историю, создать новый session_id
+### Вложения
 
-### Правая колонка — Управление
+- Web UI читает текстовые файлы на фронте через `FileReader` и держит их в `pendingAttachments`.
+- При отправке они уходят в JSON как `{name, content}` и на бэке склеиваются в prompt через `build_web_prompt()`.
+- Body limit для web routes: 50 MB.
 
-#### Профиль (profile-panel)
-- Выбор провайдера (OpenAI, Deepseek, Kimi и т.д.)
-- Выбор модели (загружается при смене провайдера)
-- URL API (default или custom)
-- Ввод токена (сохраняется в keyring через POST /api/token/save)
-- Показывает "Контекст: 128k" если model.context_length загружен
+### Стриминг и полный ответ
 
-#### Debug tab (4 таба)
-1. **Provider Request** — JSON payload отправленный на /v1/chat/completions
-2. **Provider Response** — сырой JSON ответ от провайдера (или error при ошибке)
-3. Служат для диагностики (в т.ч. при ошибке "Failed to buffer the request body")
-4. В debug показывается ссылка на документацию провайдера (PROVIDER_DOCS map)
+- Если `Стримить по чанкам` включен, UI использует `POST /api/agent/chat/stream` и допечатывает ответ по SSE `event: token`.
+- Если тумблер выключен, UI использует `POST /api/agent/chat` и показывает временный bubble с анимацией ожидания.
+- В обоих режимах после завершения UI обновляет `messages`, `metrics`, `context_metrics`, `session_metrics`, `debug` и `context_debug`.
+- `Стоп` отменяет активный запрос через `AbortController`.
 
-**Бизнес-правило:** debug должен показывать payload и ответ **даже при ошибке**, в т.ч. "Failed to buffer the request body: length limit exceeded"
+## Контекст и память
 
-#### Metrics
-- `Запрос: 1234 токен (input), 567 токен (output)`
-- `Диалог: 5678 токен всего`
-- Вычисляется по usage из response
+### Доступные стратегии
 
-**Бизнес-правило:** при запросе к **любому** провайдеру (OpenAI-compatible, OpenRouter, DeepSeek, GigaChat, Kimi) в метриках обязаны быть: время, количество токенов (input/output/total) и стоимость. Покрыто тестами `every_provider_reports_tokens_and_cost_on_*`.
+- `Summary` - summary + последние N raw сообщений, с preflight-сжатием при давлении на context window.
+- `Sliding Window` - только последние N raw сообщений.
+- `Sticky Facts` - локальные KV-факты, извлекаемые из пользовательских сообщений и отправляемые как read-only facts block.
+- `Branching` - ручной checkpoint с двумя ветками `A/B`.
+- `Scoped Branches` - темы внутри одной session; маршрутизация может быть auto или manual.
 
-#### Визуальная индикация summary
-- Когда на ходу срабатывает суммаризация (поле `summary_metrics` в ответе не пусто):
-  - В потоке диалога появляется разделитель "🗜 Старая история сжата в краткую память (summary)" перед текущим обменом.
-  - Статус показывает "🗜 Контекст сжат в summary · Готово".
-  - В панели метрик заполняется блок Summary (токены/стоимость сжатия).
+### Правила UI
 
-**Бизнес-правило:** факт суммаризации **обязан** быть виден пользователю в потоке диалога, а не только в метриках. Маркеры (`summaryMarkers`) — runtime сессии, сбрасываются при новой/смене сессии.
+- UI показывает только controls, относящиеся к выбранной strategy.
+- Блок `Debug -> Context topics` всегда доступен, но заполняется детально только для `Scoped Branches`.
+- Для `Sticky Facts` UI показывает persisted facts и точный provider facts block из последнего debug.
 
----
+## Метрики и цена
 
-## Сессии
+### Что показывает UI
 
-### Создание сессии
-1. На загрузке UI → `POST /api/agent/session` → новый session_id (UUID)
-2. Сохраняется в localStorage под ключом `{provider}_{model}` (session cache)
+- `Время запроса`, `Токены запроса`, `Стоимость запроса` - только основной последний ответ.
+- `Контекст` - отдельный служебный context step, если он выполнялся; иначе человекочитаемый status стратегии.
+- `Токены диалога` - накопление за всю локальную session.
 
-### Загрузка сессии
-1. При смене провайдера/модели → проверить localStorage есть ли session_id
-2. Если есть → загрузить историю и метрики из server store
-3. Если нет → новая сессия
+### Breakdown usage
 
-### Сохранение сессии
-1. После успешного ответа → server сохраняет в LocalSessionStore (JSON файл)
-2. При перезагрузке страницы → загружается из server по session_id из localStorage
+Если provider прислал детализированный usage, UI выводит:
 
----
+- `prompt`
+- `completion`
+- `total`
+- `prompt cached`
+- `prompt uncached`
+- `prompt audio`
+- `visible output`
+- `reasoning`
+- `output audio`
+- `accepted prediction`
+- `rejected prediction`
 
-## Прикрепление файлов
+### Источники цены
 
-### CLI (`ai ask --file path/to/file.txt`)
-- Содержимое файла → в prompt как `--- filename ---\n{content}\n\n`
+- Стоимость берется из provider response и локального pricing catalog/override.
+- Для USD UI умеет показать приблизительный пересчет в RUB по локально сохраненному `rubRate`.
+- Session cost считается как сумма через `add_request_metrics()`.
 
-### Web UI (📎 кнопка)
-1. Юзер выбирает файл(ы) → прочитать через FileReader API (на фронте, не отправляем сразу)
-2. Сохранить в `pendingAttachments: Array<{name, content}>`
-3. Отрендеритьься чипсы (можно удалить по клику на ×)
-4. При отправке → добавить в JSON payload: `{attachments: [{name, content}]}`
-5. На бэке → merge attachments в prompt (функция `build_web_prompt()`)
+## Debug и диагностика
 
-**Бизнес-правило:** файлы читаются на фронте (не отправляются отдельно), максимальный размер тела = 50MB
+- `Debug` показывает raw provider request и raw provider response.
+- Authorization должен оставаться отредактированным.
+- Вкладка также содержит ссылку на документацию выбранного provider и debug по facts/topics.
+- При HTTP-ошибке или ошибке стрима debug всё равно должен сохранить полезный контекст для расследования.
 
----
+## API и хранение
 
-## Контекстное окно (context_length)
+### Основные web routes
 
-### Загрузка
-1. При смене модели → `POST /api/models { provider, model }`
-2. Ответ содержит `models[].context_length` (из /v1/models/{id} OpenAI API)
-3. Сохранить в `modelContextById` Map
+- `GET /api/agents`
+- `GET /api/providers`
+- `POST /api/token/status`
+- `POST /api/token/save`
+- `POST /api/models`
+- `POST /api/agent/session` и alias `POST /api/chat/session`
+- `POST /api/agent/chat`
+- `POST /api/agent/chat/stream`
 
-### Отображение
-- В профиль-панели: "Контекст: {context_length}" (или "—" если не загружен)
-- В метабаре composer: тоже самое или "— загрузите модели"
+### Local persistence
 
-**Бизнес-правило:** модели загружаются автоматически при старте и при смене провайдера
-
----
-
-## Стриминг ответов
-
-### Режим доставки (тоггл "Стримить по чанкам")
-- **Вкл (по умолчанию)** → POST `/api/agent/chat/stream`, слова появляются в реальном времени.
-- **Выкл** → POST `/api/agent/chat`, ждём готовый ответ целиком, в пузыре анимация "печатает" (3 точки).
-- Выбор сохраняется в localStorage (`ai_stream_mode`).
-
-**Бизнес-правило:** оба режима возвращают одинаковый набор данных (text, metrics, summary_metrics, session_metrics, messages, debug) — UI обрабатывает их единообразно.
-
-### Индикация загрузки
-- Статус в шапке получает класс `busy` (крутящийся спиннер + акцентный цвет) пока идёт запрос.
-- В режиме "одним ответом" — пузырь с анимацией из 3 точек до прихода текста.
-
-### Основное поведение (стриминг)
-1. Юзер отправляет prompt
-2. Оптимистично добавить сообщение юзера в историю (сразу покажется)
-3. POST /api/agent/chat/stream + fetch ReadableStream
-4. Парсить SSE события:
-   - `event: token` → добавить текст к пузыру ассистента (обновить DOM)
-   - `event: done` → получить session_id, messages, session_metrics
-5. Финальный рендер истории с метаданными
-
-### Откат при ошибке
-1. Если до получения первого токена произошла ошибка
-2. Откатить оптимистичное сообщение юзера (удалить из истории, вернуть в textarea)
-3. Показать error сообщение в conversation
-
-**Бизнес-правило:** стриминг показывает токены в реальном времени, не ждёт полный ответ. Это решает проблему "18 секунд черный экран" (GPT-4 медленный, но начинает отвечать сразу).
-
-**Бизнес-правило:** клиент **обязан** завершить стрим сразу после получения `[DONE]` сигнала, не ожидая закрытия TCP-соединения провайдером. Нарушение приводит к бесконечному зависанию: история не сохраняется, следующий успешный ответ перезаписывает чат историей с сервера без пропавшего ответа.
-
-**Бизнес-правило:** компакция памяти (`compact_memory`, отдельный LLM-вызов) выполняется **после** отправки `done` события, не блокируя его. Иначе пользователь ждёт суммаризацию (секунды) прежде чем увидит финал — стрим выглядит зависшим, debug пустой.
-
----
-
-## Метрики и затраты
-
-### Request metrics
-- `elapsed_ms: u128` — сколько миллисекунд заняла обработка
-- `usage: Option<{input_tokens, output_tokens}>`
-- `cost: Option<{amount, currency}}`
-
-Вычисляются на основе response usage + pricing информации.
-
-### Session metrics
-- Накопление всех metrics за сессию
-- Вычисляются функцией `add_request_metrics()` (в chat::mod.rs)
-- Показываются в "Диалог: X токен всего"
-
-**Бизнес-правило:** при загрузке существующей сессии → metrics не обнуляются, продолжают считаться только новые запросы
-
----
-
-## Ошибки и исключительные ситуации
-
-### Переполнение контекста
-- Эндпоинт возвращает 400 Bad Request: "Failed to buffer the request body: length limit exceeded"
-- На фронте → показать в debug, не обнулять историю
-- На бэке → AgentMemory автоматически создаст summarization старых сообщений на следующий запрос
-
-### Контекст переполнен + нет summarization
-- Если history + новый запрос > context_limit и нет суммари
-- На бэке → AgentMemory.build_context() применит Sliding window (только последние N сообщений)
-- Поведение: модель забудет старый контекст, но запрос пройдёт
-
-**Бизнес-правило:** переполнение лучше, чем падение с ошибкой. Graceful degradation.
-
-**Бизнес-правило (без потери данных):** `build_context` **никогда** не выбрасывает сообщение, которое ещё не вошло в summary. Окно `recent_messages` — это нижняя граница, сколько свежих сообщений слать сырыми; всё несуммаризированное старьё всё равно идёт в запрос. Иначе первое сообщение молча исчезает из запроса, не попав ни в summary, ни в контекст. Покрыто тестом `build_context_never_drops_unsummarized_messages`.
-
-### Preflight-суммаризация по давлению контекста
-- Перед отправкой запроса агент оценивает токены контекста (summary + recent_messages + новый prompt).
-- Если оценка ≥ `summarize_at_context_percent` (по умолч. 80%) от `context_limit` модели → агент сжимает старую историю в summary **до** отправки.
-- Это полноценный LLM-вызов (секунды). Он блокирует запрос, но срабатывает **только** при реальном превышении порога.
-
-**Бизнес-правило:** таймаут preflight-суммаризации **обязан** быть достаточным для завершения LLM-вызова сжатия (≥ десятков секунд). Слишком короткий таймаут молча срывает сжатие → история не уменьшается → запрос переполняет окно модели. Требует установленного `context_limit` (из загруженных моделей или каталога цен).
-
----
-
-## Команды CLI
-
-### `ai ask <prompt>`
-- Одноразовый запрос, нет истории
-- Поддерживает `--file` флаг (можно повторять)
-
-### `ai chat`
-- Интерактивный REPL с историей
-- Поддерживает команды:
-  - `/attach <file>` — прикрепить файл
-  - `/clear` — новая сессия
-  - `/models` — список моделей
-  - и т.д.
-
-### `ai compare <prompt>`
-- Запросить ответ от разных моделей (ConversationGoal)
-- Вывести side-by-side для сравнения
-
-### `ai profile`
-- Управление профилями: `use`, `remove`, интерактивный выбор
-
-### `ai token`
-- Сохранить токен в keyring: `ai token --provider openai --value sk-...`
-
----
-
-## Система сохранения и загрузки
-
-### Что сохраняется в LocalSessionStore
-- session_id (UUID)
-- messages: Vec<ChatMessage> (вся история)
-- session_summary (из AgentMemory)
-- session_metrics (накопленные затраты)
-- control (параметры ответа: temperature и т.д.)
-
-### Что сохраняется в localStorage (браузер)
-- `{provider}_{model}` → session_id (для быстрого восстановления при перезагрузке)
-
-### Что НЕ сохраняется
-- API токены (только в keyring)
-- Pending attachments (теряются при перезагрузке)
-- Unsent prompt (теряется при перезагрузке)
-
----
-
-## API контракты
-
-### POST /api/agent/chat/stream
-**Request:**
-```json
-{
-  "profile": {"provider": "openai_compatible", "model": "gpt-4", "base_url": "...", "token_ref": "..."},
-  "prompt": "user message",
-  "attachments": [{"name": "file.txt", "content": "..."}]
-}
-```
-
-**Response (SSE):**
-```
-event: token
-data: "hello "
-
-event: token
-data: "world"
-
-event: done
-data: {"session_id": "...", "messages": [...], "session_metrics": {...}}
-
-event: error
-data: "error message"
-```
-
-### POST /api/models
-**Request:**
-```json
-{
-  "profile": {...}
-}
-```
-
-**Response:**
-```json
-{
-  "models": [
-    {"id": "gpt-4", "context_length": 8192, "pricing": {...}}
-  ]
-}
-```
-
----
-
-## Заимствования и ограничения
-
-### Ограничения контекста
-- Web UI: максимум 50MB body (для файлов)
-- Model: зависит от провайдера (gpt-4 = 8192 токенов, gpt-4-turbo = 128k и т.д.)
-- Graceful degradation: если переполнение → AgentMemory сжимает старые сообщения
-
-### Ограничения скорости
-- Стриминг SSE → нет timeout на отправку ответа (может быть долго)
-- Timeout на memory summarization: 250ms (не тормозит основной запрос)
-
-### Безопасность
-- Токены в keyring (OS-level security)
-- Config файлы в `~/.ai/` (user-readable)
-- Sessions в `~/.ai/sessions/` (user-readable, но session_id = UUID = нужно угадать)
+- Session messages и memory sidecars живут в `LocalSessionStore`.
+- Metrics пишутся в `.metrics.toon`.
+- Legacy `.metrics.json` читается как fallback, но новые записи делаются в TOON.
+- API токены не пишутся в config, history, memory или debug output.
