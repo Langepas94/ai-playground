@@ -298,49 +298,86 @@ fn saved_agent_uses_agent_scoped_session_key_for_chat_and_manual_memory() {
 }
 
 #[test]
-fn saved_agent_loads_task_from_active_dialog_not_global_agent_task() {
+fn saved_agent_loads_shared_feature_task_across_dialogs_by_default() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = LocalSessionStore::from_root(dir.path().join("sessions"));
     store
         .save_agent(&web_test_agent("menu-agent"))
         .expect("save agent");
     store
-        .save_task(
-            "menu-agent",
-            &TaskContext {
-                title: "global stale menu task".to_string(),
-                goal: "create pizza menu".to_string(),
-                ..TaskContext::default()
-            },
-        )
-        .expect("save legacy task");
-    store
         .save_dialog_task(
             "menu-agent",
-            "slogan-dialog",
+            "naming-dialog",
             &TaskContext {
-                title: "slogan".to_string(),
-                goal: "invent slogan".to_string(),
+                title: "name pizzeria".to_string(),
+                goal: "invent pizzeria name".to_string(),
+                results: vec!["Approved decision: ВолгаПицца".to_string()],
                 ..TaskContext::default()
             },
         )
-        .expect("save dialog task");
+        .expect("save shared task");
 
     let mut agent = web_test_chat_agent();
     apply_saved_agent_memory(&store, Some("menu-agent"), "slogan-dialog", &mut agent)
         .expect("apply saved agent memory");
 
     let task = agent.task_state().expect("task state");
-    assert_eq!(task.title, "slogan");
-    assert_eq!(task.goal, "invent slogan");
-    assert_ne!(
-        task.goal, "create pizza menu",
-        "dialog B must not inherit dialog A/global working task"
+    assert_eq!(task.title, "name pizzeria");
+    assert!(
+        task.results.iter().any(|item| item.contains("ВолгаПицца")),
+        "dialog B should see approved decision from dialog A when both use the same feature task"
+    );
+}
+
+#[test]
+fn saved_agent_can_load_different_task_when_dialog_is_assigned_elsewhere() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalSessionStore::from_root(dir.path().join("sessions"));
+    store
+        .save_agent(&web_test_agent("menu-agent"))
+        .expect("save agent");
+    store
+        .save_dialog_task(
+            "menu-agent",
+            "naming-dialog",
+            &TaskContext {
+                title: "name pizzeria".to_string(),
+                goal: "invent pizzeria name".to_string(),
+                results: vec!["Approved decision: ВолгаПицца".to_string()],
+                ..TaskContext::default()
+            },
+        )
+        .expect("save default task");
+    store
+        .assign_dialog_task("menu-agent", "menu-dialog", "menu")
+        .expect("assign menu task");
+    store
+        .save_dialog_task(
+            "menu-agent",
+            "menu-dialog",
+            &TaskContext {
+                title: "product menu".to_string(),
+                goal: "invent pizza menu".to_string(),
+                ..TaskContext::default()
+            },
+        )
+        .expect("save menu task");
+
+    let mut agent = web_test_chat_agent();
+    apply_saved_agent_memory(&store, Some("menu-agent"), "menu-dialog", &mut agent)
+        .expect("apply saved agent memory");
+
+    let task = agent.task_state().expect("task state");
+    assert_eq!(task.title, "product menu");
+    assert_eq!(task.goal, "invent pizza menu");
+    assert!(
+        task.results.iter().all(|item| !item.contains("ВолгаПицца")),
+        "dialogs assigned to another task id should not receive unrelated task results"
     );
 }
 
 #[tokio::test]
-async fn stateful_postprocess_persists_task_only_to_current_dialog() {
+async fn stateful_postprocess_persists_task_to_shared_feature_scope() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = LocalSessionStore::from_root(dir.path().join("sessions"));
     store
@@ -372,11 +409,18 @@ async fn stateful_postprocess_persists_task_only_to_current_dialog() {
         "Помоги придумать слоган для пиццерии"
     );
     assert!(
-        store
+        !store
             .load_dialog_task("menu-agent", "menu-dialog")
             .expect("other dialog task")
             .is_empty(),
-        "stateful postprocess must not write into another dialog"
+        "default task should be visible to another dialog in the same feature"
+    );
+    assert_eq!(
+        store
+            .load_dialog_task("menu-agent", "menu-dialog")
+            .unwrap()
+            .goal,
+        "Помоги придумать слоган для пиццерии"
     );
     assert!(
         store
@@ -1096,6 +1140,10 @@ fn web_ui_is_agent_centric() {
     assert!(INDEX_HTML.contains("id=\"workspace\""));
     assert!(INDEX_HTML.contains("id=\"activeAgentBar\""));
     assert!(INDEX_HTML.contains("Создать агента"));
+    assert!(INDEX_HTML.contains("id=\"newAgent\""));
+    assert!(INDEX_HTML.contains("function showCreateAgentGate()"));
+    assert!(INDEX_HTML.contains("$('newAgent').addEventListener('click', showCreateAgentGate);"));
+    assert!(INDEX_HTML.contains("function resetGateCreateForm()"));
     assert!(INDEX_HTML.contains("Сгенерировать интервью"));
     assert!(INDEX_HTML.contains("id=\"gateModel\""));
     assert!(INDEX_HTML.contains("id=\"gateLoadModels\""));
@@ -1106,7 +1154,7 @@ fn web_ui_is_agent_centric() {
     assert!(INDEX_HTML.contains("data-tab=\"aprofile\""));
     assert!(INDEX_HTML.contains("data-tab=\"task\""));
     assert!(INDEX_HTML.contains("data-tab=\"invariants\""));
-    assert!(INDEX_HTML.contains("отдельная для текущего диалога"));
+    assert!(INDEX_HTML.contains("несколько чатов могут использовать одну задачу"));
     assert!(!INDEX_HTML.contains("общая для всех диалогов агента"));
     // Wiring: build-schema action, gate↔workspace, agent_state rendering.
     assert!(INDEX_HTML.contains("/api/agents/manage"));

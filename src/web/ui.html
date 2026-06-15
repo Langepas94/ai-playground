@@ -853,7 +853,8 @@
         <h1>ai playground</h1>
         <div id="activeAgentBar" class="active-agent-bar" style="display:none">
           <span class="active-agent-chip">🤖 <strong id="activeAgentName">—</strong> <span id="activeAgentStage" class="topic-chip">clarify</span></span>
-          <button id="switchAgent" class="secondary icon-btn" type="button" title="Сменить агента">Сменить агента</button>
+          <button id="switchAgent" class="secondary" type="button" title="Сменить агента">Сменить агента</button>
+          <button id="newAgent" class="secondary" type="button" title="Создать нового агента">Новый агент</button>
         </div>
       </div>
       <div id="status" class="status">Готово</div>
@@ -994,7 +995,7 @@
           <div class="group">
             <h2>🔵 Задача (рабочая память)</h2>
             <div class="field-help">
-              Стадия задачи ведётся автоматически (state machine) и отдельная для текущего диалога. Идёт в каждый запрос блоком <code>[memory:working]</code>.
+              Стадия задачи ведётся автоматически (state machine) для рабочей фичи; несколько чатов могут использовать одну задачу. Идёт в каждый запрос блоком <code>[memory:working]</code>.
             </div>
             <div class="model-meta-row">
               <span class="model-meta-label">Стадия:</span>
@@ -1882,6 +1883,27 @@
       $('activeAgentBar').style.display = 'none';
       $('dialogsBar').style.display = 'none';
       refreshGateList();
+    }
+
+    function resetGateCreateForm() {
+      $('gateName').value = '';
+      $('gateDomain').value = '';
+      $('gateSeed').value = '';
+      $('gateInvariants').value = '';
+      $('gateCustomModel').value = '';
+      $('gateSchema').innerHTML = '';
+      $('gateSchemaWrap').style.display = 'none';
+      $('gateCreateStatus').textContent = '';
+      applyGateProviderDefaults();
+    }
+
+    function showCreateAgentGate() {
+      showGate();
+      resetGateCreateForm();
+      setTimeout(() => {
+        $('gateName').focus();
+        $('gateName').scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }, 0);
     }
 
     function showWorkspace() {
@@ -3113,6 +3135,7 @@
 
     $('attachBtn').addEventListener('click', () => $('fileInput').click());
     $('switchAgent').addEventListener('click', showGate);
+    $('newAgent').addEventListener('click', showCreateAgentGate);
     $('gateEnter').addEventListener('click', () => enterAgent($('gateAgentList').value));
     $('gateDelete').addEventListener('click', deleteFromGate);
     $('gateAgentList').addEventListener('dblclick', () => enterAgent($('gateAgentList').value));

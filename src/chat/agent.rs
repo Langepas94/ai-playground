@@ -707,7 +707,7 @@ impl ChatAgent {
         }
 
         if self.task_state.is_some() {
-            self.capture_task_seed(user_prompt);
+            self.capture_task_progress(user_prompt, answer);
             let (transition, metrics) = self.advance_task_stage(client, user_prompt, answer).await;
             report.stage = self.task_state.as_ref().map(|task| task.stage);
             report.stage_transition = transition;
@@ -857,7 +857,7 @@ impl ChatAgent {
         )
     }
 
-    fn capture_task_seed(&mut self, user_prompt: &str) {
+    fn capture_task_progress(&mut self, user_prompt: &str, answer: &str) {
         let Some(task) = self.task_state.as_mut() else {
             return;
         };
@@ -870,6 +870,11 @@ impl ChatAgent {
         }
         if task.title.trim().is_empty() {
             task.title = task_title_from_prompt(prompt);
+        }
+        if let Some(decision) = task_decision_from_exchange(prompt, answer)
+            && !task.results.iter().any(|item| item == &decision)
+        {
+            task.results.push(decision);
         }
     }
 
@@ -1261,6 +1266,32 @@ fn task_title_from_prompt(prompt: &str) -> String {
         title.push('…');
     }
     title
+}
+
+fn task_decision_from_exchange(user_prompt: &str, answer: &str) -> Option<String> {
+    let user_lower = user_prompt.to_lowercase();
+    let answer_lower = answer.to_lowercase();
+    let is_approval = ["утверждаем", "самое то", "выбор сделан", "останавливаемся"]
+        .iter()
+        .any(|marker| user_lower.contains(marker) || answer_lower.contains(marker));
+    if !is_approval {
+        return None;
+    }
+    let candidate = user_prompt
+        .split(['\n', '.', '!', '?'])
+        .map(str::trim)
+        .find(|part| {
+            !part.is_empty()
+                && !part.to_lowercase().contains("утверждаем")
+                && !part.to_lowercase().contains("самое то")
+        })
+        .or_else(|| {
+            answer
+                .split(['\n', '.', '!', '?'])
+                .map(str::trim)
+                .find(|part| !part.is_empty())
+        })?;
+    Some(format!("Approved decision: {candidate}"))
 }
 
 /// A proposed task-stage transition and whether the FSM accepted it.

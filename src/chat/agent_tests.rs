@@ -207,6 +207,44 @@ async fn stateful_postprocess_seeds_task_goal_from_first_prompt() {
 }
 
 #[tokio::test]
+async fn stateful_postprocess_captures_approved_task_decision() {
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec![
+            r#"{"stage":"clarify","reason":"decision captured"}"#.to_string(),
+        ]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_task_state(Some(crate::chat::store::TaskContext {
+        goal: "Придумать название пиццерии".to_string(),
+        ..crate::chat::store::TaskContext::default()
+    }));
+
+    agent
+        .stateful_postprocess(
+            &client,
+            "ВолгаПицца самое то, утверждаем",
+            "Отлично, «ВолгаПицца» — выбор сделан!",
+        )
+        .await;
+
+    let task = agent.task_state().expect("task state");
+    assert!(
+        task.results.iter().any(|item| item.contains("ВолгаПицца")),
+        "approved brand name should become shared working-task result"
+    );
+}
+
+#[tokio::test]
 async fn sliding_window_sends_only_recent_messages_and_keeps_history() {
     let client = FakeClient {
         replies: std::sync::Mutex::new(vec!["answer".to_string()]),

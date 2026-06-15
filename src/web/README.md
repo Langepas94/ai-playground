@@ -41,19 +41,21 @@
 У агента **несколько диалогов** (чатов). Панель «Чаты» в шапке диалога (`#dialogsBar`,
 видна только в workspace) — чипы со всеми чатами агента (title из первого сообщения,
 активный подсвечен), «+ чат», ✕ для удаления. Все чаты делят долговременный профиль
-и инварианты агента, но рабочая задача и история у каждого свои. `session_key =
-"agent:<id>"` для всех (`chat_session`/`chat`/`chat_stream` консистентны), конкретная
-задача хранится по `session_id`, индекс диалогов — `agent-<id>.dialogs.toon`,
-авто-регистрация в `save_session` (`agent_id_from_key`). Actions: `dialogs` /
-`dialog-rename` / `dialog-delete`. JS: `refreshDialogs` / `switchDialog` /
-`newDialog` / `deleteDialog`.
+и инварианты агента; рабочая задача хранится как task-scope и может объединять
+несколько чатов одной фичи (`DialogMeta.task_id`, по умолчанию `default`).
+`session_key = "agent:<id>"` для всех (`chat_session`/`chat`/`chat_stream`
+консистентны), индекс диалогов — `agent-<id>.dialogs.toon`, авто-регистрация в
+`save_session` (`agent_id_from_key`). Actions: `dialogs` / `dialog-rename` /
+`dialog-delete`. JS: `refreshDialogs` / `switchDialog` / `newDialog` /
+`deleteDialog`.
 
 Память агента заполняется **самим агентом**, не вручную:
 - **долговременная** — `AgentProfile` (схема интервью + значения). Агент сам
   спрашивает недостающие поля и заполняет их из диалога. Вкладка `Профиль`.
 - **рабочая** — `TaskContext` со стадией FSM (`clarify→planning→execution→
-  validation→done`), ведётся автоматически, отдельная для каждого диалога. Вкладка
-  `Задача` (бейдж стадии + флоу + план, read-only).
+  validation→done`), ведётся автоматически для рабочей задачи/фичи и может быть
+  общей для нескольких диалогов. Вкладка `Задача` (бейдж стадии + флоу + план,
+  read-only).
 - **инварианты** — редактируемый список (вкладка `Инварианты`), проверяются по ответу.
 - **краткосрочная** — диалог чата, `session_key = "agent:<id>"`.
 
@@ -61,15 +63,14 @@
 (agent+task+profile) / `save` (upsert + домен/инварианты + схема профиля с переносом
 значений) / `delete` / `build-schema` (LLM-генерация интервью из домена; нужен
 provider+token). Хранение — `LocalSessionStore`: `agent-<id>.agent.toon`,
-`agent-<id>.dialog-<session>.task.toon`, `*.profile.toon`, индекс
-`agents-index.toon`. Токен НЕ хранится в агенте (keyring — инвариант config/secrets
-раздельно).
+`agent-<id>.task-<task>.toon`, `*.profile.toon`, индекс `agents-index.toon`. Токен
+НЕ хранится в агенте (keyring — инвариант config/secrets раздельно).
 
 Чат с активным агентом несёт `saved_agent_id`; сервер биндит сессию к `agent:<id>`,
-грузит profile/dialog-task/invariants/domain и инъектит блоками `[agent:domain]` /
+грузит profile/task-scope/invariants/domain и инъектит блоками `[agent:domain]` /
 `[memory:long-term]` / `[memory:working]` / `[invariants]`. После ответа —
 `ChatAgent::stateful_postprocess` (заполнить профиль, продвинуть стадию по FSM,
-проверить инварианты), persist dialog-task+profile, и `agent_state` в ответе
+проверить инварианты), persist task-scope+profile, и `agent_state` в ответе
 (`StatefulDebugView`: стадия, pending-вопросы, переход, нарушения) рендерится в UI
 (стадия в хедере, нарушения во вкладке Инварианты).
 

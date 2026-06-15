@@ -286,11 +286,15 @@ struct AgentsIndex {
 }
 
 /// One chat (dialog) belonging to an agent. An agent can have many; they all
-/// share the agent's working + long-term memory but keep separate chat history.
+/// can share a working task while keeping separate chat history.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DialogMeta {
     #[serde(default)]
     pub id: String,
+    /// Working task / feature this dialog belongs to. Multiple dialogs may point
+    /// at the same task id.
+    #[serde(default = "default_task_id")]
+    pub task_id: String,
     /// Short label, derived from the first user message (or renamed by the user).
     #[serde(default)]
     pub title: String,
@@ -304,6 +308,10 @@ pub struct DialogMeta {
 struct DialogsIndex {
     #[serde(default)]
     dialogs: Vec<DialogMeta>,
+}
+
+fn default_task_id() -> String {
+    "default".to_string()
 }
 
 /// Extract the agent id from a session key of the form `agent:<id>`.
@@ -703,9 +711,8 @@ impl LocalSessionStore {
         agent_id: &str,
         session_id: &str,
     ) -> Result<TaskContext, AppError> {
-        Ok(self
-            .read_toon(&self.agent_dialog_task_path(agent_id, session_id))?
-            .unwrap_or_default())
+        let task_id = self.dialog_task_id(agent_id, session_id)?;
+        self.load_scoped_task(agent_id, &task_id)
     }
 
     /// Persist the working-memory task and keep the picker index's stage in sync.
@@ -727,7 +734,67 @@ impl LocalSessionStore {
         session_id: &str,
         task: &TaskContext,
     ) -> Result<(), AppError> {
-        self.write_toon(&self.agent_dialog_task_path(agent_id, session_id), task)
+        let task_id = self.dialog_task_id(agent_id, session_id)?;
+        self.save_scoped_task(agent_id, &task_id, task)
+    }
+
+    pub fn load_scoped_task(&self, agent_id: &str, task_id: &str) -> Result<TaskContext, AppError> {
+        Ok(self
+            .read_toon(&self.agent_scoped_task_path(agent_id, task_id))?
+            .unwrap_or_default())
+    }
+
+    pub fn save_scoped_task(
+        &self,
+        agent_id: &str,
+        task_id: &str,
+        task: &TaskContext,
+    ) -> Result<(), AppError> {
+        self.write_toon(&self.agent_scoped_task_path(agent_id, task_id), task)
+    }
+
+    pub fn dialog_task_id(&self, agent_id: &str, session_id: &str) -> Result<String, AppError> {
+        let index: DialogsIndex = self
+            .read_toon(&self.agent_dialogs_path(agent_id))?
+            .unwrap_or_default();
+        Ok(index
+            .dialogs
+            .iter()
+            .find(|dialog| dialog.id == session_id)
+            .map(|dialog| dialog.task_id.trim())
+            .filter(|task_id| !task_id.is_empty())
+            .unwrap_or("default")
+            .to_string())
+    }
+
+    pub fn assign_dialog_task(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        task_id: &str,
+    ) -> Result<(), AppError> {
+        let path = self.agent_dialogs_path(agent_id);
+        let mut index: DialogsIndex = self.read_toon(&path)?.unwrap_or_default();
+        let task_id = task_id.trim();
+        let task_id = if task_id.is_empty() {
+            "default"
+        } else {
+            task_id
+        };
+        let now = unix_now();
+        if let Some(entry) = index.dialogs.iter_mut().find(|d| d.id == session_id) {
+            entry.task_id = task_id.to_string();
+            entry.updated_at_unix = now;
+        } else {
+            index.dialogs.push(DialogMeta {
+                id: session_id.to_string(),
+                task_id: task_id.to_string(),
+                title: String::new(),
+                created_at_unix: now,
+                updated_at_unix: now,
+            });
+        }
+        self.write_toon(&path, &index)
     }
 
     pub fn load_profile(&self, id: &str) -> Result<AgentProfile, AppError> {
@@ -770,6 +837,7 @@ impl LocalSessionStore {
         } else {
             index.dialogs.push(DialogMeta {
                 id: session_id.to_string(),
+                task_id: default_task_id(),
                 title: title.to_string(),
                 created_at_unix: now,
                 updated_at_unix: now,
@@ -799,7 +867,6 @@ impl LocalSessionStore {
             self.session_path(session_id),
             self.metrics_path(session_id),
             self.memory_path(session_id),
-            self.agent_dialog_task_path(agent_id, session_id),
         ] {
             if path.exists() {
                 fs::remove_file(&path)
@@ -827,11 +894,11 @@ impl LocalSessionStore {
             .join(format!("agent-{}.task.toon", safe_key(id)))
     }
 
-    fn agent_dialog_task_path(&self, agent_id: &str, session_id: &str) -> PathBuf {
+    fn agent_scoped_task_path(&self, agent_id: &str, task_id: &str) -> PathBuf {
         self.sessions_dir().join(format!(
-            "agent-{}.dialog-{}.task.toon",
+            "agent-{}.task-{}.toon",
             safe_key(agent_id),
-            safe_key(session_id)
+            safe_key(task_id)
         ))
     }
 
@@ -1480,10 +1547,7 @@ mod tests {
         };
         store
             .save_dialog_task("a1", "sess-1", &task_1)
-            .expect("save dialog task 1");
-        store
-            .save_dialog_task("a1", "sess-2", &task_2)
-            .expect("save dialog task 2");
+            .expect("save shared default task");
         assert_eq!(
             store
                 .load_dialog_task("a1", "sess-1")
@@ -1494,8 +1558,24 @@ mod tests {
         assert_eq!(
             store
                 .load_dialog_task("a1", "sess-2")
-                .expect("load dialog task 2")
+                .expect("load shared task from dialog 2")
                 .goal,
+            "invent dishes"
+        );
+        store
+            .assign_dialog_task("a1", "sess-2", "slogan")
+            .expect("assign dialog 2 to another task");
+        store
+            .save_dialog_task("a1", "sess-2", &task_2)
+            .expect("save dialog task 2");
+        assert_eq!(store.dialog_task_id("a1", "sess-1").unwrap(), "default");
+        assert_eq!(store.dialog_task_id("a1", "sess-2").unwrap(), "slogan");
+        assert_eq!(
+            store.load_dialog_task("a1", "sess-1").unwrap().goal,
+            "invent dishes"
+        );
+        assert_eq!(
+            store.load_dialog_task("a1", "sess-2").unwrap().goal,
             "invent slogan"
         );
 
@@ -1522,12 +1602,10 @@ mod tests {
         let after = store.list_dialogs("a1").expect("list after delete");
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].id, "sess-1");
-        assert!(
-            store
-                .load_dialog_task("a1", "sess-2")
-                .expect("deleted task")
-                .is_empty(),
-            "dialog task should be deleted with the dialog"
+        assert_eq!(
+            store.load_scoped_task("a1", "slogan").unwrap().goal,
+            "invent slogan",
+            "deleting one dialog must not delete its task scope"
         );
         // Ad-hoc (non-agent) sessions are not registered as dialogs.
         store
