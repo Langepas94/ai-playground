@@ -132,6 +132,17 @@ provider-запрос: system message = этот extraction prompt, user message
 KV updates. Если prompt пустой или extractor вернул невалидный JSON, используется
 локальный fallback `AgentMemory::update_facts_from_user_message()`.
 
+Слой каждого факта выбирает сам агент: экстрактор возвращает `layer` рядом с
+`key`/`value` (`{"facts":[{"key","value","layer"}]}`), и
+`merge_extracted_facts_with_layers()` кладёт факт в выбранный слой. Если слой не
+задан (legacy flat JSON или keyword-fallback без LLM), применяется
+`default_fact_layer()`: `goal`/`constraints` -> `working`, остальное ->
+`long-term`. `long-term` факты
+дополнительно пишутся в profile-shared store и seed-ятся в новую сессию
+(`save_long_term`/`seed_long_term`), `working`/`short-term` — нет. Facts block
+группируется по слоям, чтобы было видно источник факта в provider request.
+Полная модель слоёв — в `src/chat/README.md`.
+
 Это не summary и не raw history. Sticky facts не режет сохраненную историю: вся
 session history остается локальным source of truth, а N применяется только при
 сборке provider request. В основной provider request отправляется отдельный

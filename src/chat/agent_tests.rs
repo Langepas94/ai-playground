@@ -1,6 +1,24 @@
-
 use super::*;
 use async_trait::async_trait;
+
+#[test]
+fn parse_extracted_facts_reads_agent_chosen_layer() {
+    // Preferred shape: explicit per-fact layer.
+    let facts = parse_extracted_facts(
+        r#"{"facts":[{"key":"goal","value":"ship","layer":"working"},{"key":"prefs","value":"concise","layer":"long-term"}]}"#,
+    )
+    .expect("parsed");
+    assert_eq!(facts.len(), 2);
+    assert_eq!(facts[0].key, "goal");
+    assert_eq!(facts[0].layer, Some(MemoryLayer::Working));
+    assert_eq!(facts[1].layer, Some(MemoryLayer::LongTerm));
+
+    // Legacy flat object still parses with no layer (→ default routing later).
+    let legacy = parse_extracted_facts(r#"{"favorite_color":"green","interests":"dogs"}"#)
+        .expect("legacy parsed");
+    assert_eq!(legacy.len(), 2);
+    assert!(legacy.iter().all(|fact| fact.layer.is_none()));
+}
 
 #[derive(Debug, Default)]
 struct FakeClient {
@@ -82,6 +100,54 @@ fn test_profile() -> ProfileConfig {
         base_url: "https://example.test/v1".to_string(),
         token_ref: "openai-compatible".to_string(),
     }
+}
+
+#[tokio::test]
+async fn agent_injects_working_and_long_term_blocks() {
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec!["ok".to_string()]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_memory_config(MemoryConfig {
+        strategy: MemoryStrategy::SlidingWindow,
+        recent_messages: 4,
+        ..MemoryConfig::default()
+    });
+    agent.set_working_context(Some(crate::chat::store::TaskContext {
+        title: "ship agents".to_string(),
+        goal: "persist settings".to_string(),
+        ..crate::chat::store::TaskContext::default()
+    }));
+    agent.set_knowledge(Some("user prefers Rust".to_string()));
+
+    agent
+        .respond(&client, "hi".to_string())
+        .await
+        .expect("respond");
+
+    let seen = client.seen_messages.lock().unwrap();
+    let joined = seen[0]
+        .iter()
+        .map(|message| message.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("[memory:working]"), "working block missing");
+    assert!(joined.contains("ship agents"));
+    assert!(
+        joined.contains("[memory:long-term]"),
+        "long-term block missing"
+    );
+    assert!(joined.contains("user prefers Rust"));
 }
 
 #[tokio::test]
@@ -931,6 +997,292 @@ async fn scoped_branches_auto_route_back_to_existing_topic() {
             .iter()
             .all(|message| !message.content.contains("Vacation budget"))
     );
+}
+
+#[tokio::test]
+async fn topic_file_routing_classifies_with_metadata_and_loads_only_selected_topic() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = crate::chat::LocalSessionStore::from_root(dir.path().join("sessions"));
+    let session = store.create_session().expect("session");
+    let topic_store = store.topic_file_storage(&session.id).expect("topic store");
+    let rust_topic = crate::chat::memory::TopicFile {
+        metadata: crate::chat::memory::TopicMetadata {
+            id: "rust".to_string(),
+            title: "Rust".to_string(),
+            short_description: "Rust async ownership work.".to_string(),
+            tags: vec!["rust".to_string(), "async".to_string()],
+            message_count: 2,
+            updated_at_unix: 1,
+        },
+        context: "RUST TOPIC CONTEXT".to_string(),
+    };
+    let travel_topic = crate::chat::memory::TopicFile {
+        metadata: crate::chat::memory::TopicMetadata {
+            id: "travel".to_string(),
+            title: "Travel".to_string(),
+            short_description: "Vacation planning.".to_string(),
+            tags: vec!["hotel".to_string(), "budget".to_string()],
+            message_count: 2,
+            updated_at_unix: 1,
+        },
+        context: "TRAVEL TOPIC CONTEXT".to_string(),
+    };
+    topic_store
+        .save_topic_file(&rust_topic)
+        .expect("save rust topic");
+    topic_store
+        .save_topic_file(&travel_topic)
+        .expect("save travel topic");
+    let mut memory = AgentMemory::default();
+    memory
+        .topic_catalog
+        .insert("rust".to_string(), rust_topic.metadata.clone());
+    memory
+        .topic_catalog
+        .insert("travel".to_string(), travel_topic.metadata.clone());
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec![
+            "main answer".to_string(),
+            r#"{"found":true,"topic_id":"rust","confidence":0.94,"reason":"matches rust async"}"#
+                .to_string(),
+        ]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        memory,
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_topic_store(Some(topic_store.clone()));
+    agent.set_memory_config(MemoryConfig {
+        strategy: MemoryStrategy::ScopedBranches,
+        topic_file_routing: true,
+        topic_auto_create: false,
+        ..MemoryConfig::default()
+    });
+
+    agent
+        .respond(&client, "Rust async followup".to_string())
+        .await
+        .expect("response");
+
+    let seen = client.seen_messages.lock().expect("seen messages");
+    assert_eq!(seen.len(), 2);
+    let classifier_payload = seen[0]
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(classifier_payload.contains("Rust async ownership work."));
+    assert!(classifier_payload.contains("Vacation planning."));
+    assert!(!classifier_payload.contains("RUST TOPIC CONTEXT"));
+    assert!(!classifier_payload.contains("TRAVEL TOPIC CONTEXT"));
+    let provider_payload = seen[1]
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(provider_payload.contains("RUST TOPIC CONTEXT"));
+    assert!(!provider_payload.contains("TRAVEL TOPIC CONTEXT"));
+    assert_eq!(agent.memory_config().active_branch, "rust");
+    let updated_rust = topic_store
+        .load_topic_file("rust")
+        .expect("load rust topic")
+        .expect("rust topic");
+    let unchanged_travel = topic_store
+        .load_topic_file("travel")
+        .expect("load travel topic")
+        .expect("travel topic");
+    assert!(updated_rust.context.contains("Rust async followup"));
+    assert_eq!(unchanged_travel.context, "TRAVEL TOPIC CONTEXT");
+}
+
+#[tokio::test]
+async fn topic_file_routing_not_found_skips_main_provider_request() {
+    let mut memory = AgentMemory::default();
+    memory.topic_catalog.insert(
+        "rust".to_string(),
+        crate::chat::memory::TopicMetadata {
+            id: "rust".to_string(),
+            title: "Rust".to_string(),
+            short_description: "Rust async ownership work.".to_string(),
+            tags: vec!["rust".to_string()],
+            message_count: 2,
+            updated_at_unix: 1,
+        },
+    );
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec![
+            r#"{"found":false,"topic_id":null,"confidence":0.12,"reason":"no matching topic"}"#
+                .to_string(),
+        ]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        memory,
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_memory_config(MemoryConfig {
+        strategy: MemoryStrategy::ScopedBranches,
+        topic_file_routing: true,
+        topic_auto_create: false,
+        ..MemoryConfig::default()
+    });
+
+    let response = agent
+        .respond(&client, "Plan a vacation".to_string())
+        .await
+        .expect("response");
+
+    assert_eq!(response.finish_reason.as_deref(), Some("topic_not_found"));
+    assert!(response.text.contains("Не нашёл подходящий topic-файл"));
+    let seen = client.seen_messages.lock().expect("seen messages");
+    assert_eq!(seen.len(), 1, "only classifier request should be sent");
+}
+
+#[tokio::test]
+async fn topic_file_routing_switches_topic_on_classifier_drift() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = crate::chat::LocalSessionStore::from_root(dir.path().join("sessions"));
+    let session = store.create_session().expect("session");
+    let topic_store = store.topic_file_storage(&session.id).expect("topic store");
+    for (id, context) in [("rust", "RUST CONTEXT"), ("travel", "TRAVEL CONTEXT")] {
+        let topic = crate::chat::memory::TopicFile {
+            metadata: crate::chat::memory::TopicMetadata {
+                id: id.to_string(),
+                title: id.to_string(),
+                short_description: format!("{id} topic"),
+                tags: vec![id.to_string()],
+                message_count: 2,
+                updated_at_unix: 1,
+            },
+            context: context.to_string(),
+        };
+        topic_store.save_topic_file(&topic).expect("save topic");
+    }
+    let mut memory = AgentMemory::default();
+    for id in ["rust", "travel"] {
+        memory.topic_catalog.insert(
+            id.to_string(),
+            crate::chat::memory::TopicMetadata {
+                id: id.to_string(),
+                title: id.to_string(),
+                short_description: format!("{id} topic"),
+                tags: vec![id.to_string()],
+                message_count: 2,
+                updated_at_unix: 1,
+            },
+        );
+    }
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec![
+            "travel answer".to_string(),
+            r#"{"found":true,"topic_id":"travel","confidence":0.91,"reason":"travel drift"}"#
+                .to_string(),
+        ]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        memory,
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_topic_store(Some(topic_store));
+    agent.set_memory_config(MemoryConfig {
+        strategy: MemoryStrategy::ScopedBranches,
+        active_branch: "rust".to_string(),
+        topic_file_routing: true,
+        ..MemoryConfig::default()
+    });
+
+    agent
+        .respond(&client, "Hotel budget followup".to_string())
+        .await
+        .expect("response");
+
+    assert_eq!(agent.memory_config().active_branch, "travel");
+    let seen = client.seen_messages.lock().expect("seen messages");
+    let provider_payload = seen[1]
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(provider_payload.contains("TRAVEL CONTEXT"));
+    assert!(!provider_payload.contains("RUST CONTEXT"));
+}
+
+#[tokio::test]
+async fn topic_file_routing_does_not_persist_sensitive_turns() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = crate::chat::LocalSessionStore::from_root(dir.path().join("sessions"));
+    let session = store.create_session().expect("session");
+    let topic_store = store.topic_file_storage(&session.id).expect("topic store");
+    let topic = crate::chat::memory::TopicFile {
+        metadata: crate::chat::memory::TopicMetadata {
+            id: "rust".to_string(),
+            title: "Rust".to_string(),
+            short_description: "Rust work.".to_string(),
+            tags: vec!["rust".to_string()],
+            message_count: 2,
+            updated_at_unix: 1,
+        },
+        context: "SAFE CONTEXT".to_string(),
+    };
+    topic_store.save_topic_file(&topic).expect("save topic");
+    let mut memory = AgentMemory::default();
+    memory
+        .topic_catalog
+        .insert("rust".to_string(), topic.metadata.clone());
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec![
+            "main answer".to_string(),
+            r#"{"found":true,"topic_id":"rust","confidence":0.94,"reason":"rust"}"#.to_string(),
+        ]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        memory,
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_topic_store(Some(topic_store.clone()));
+    agent.set_memory_config(MemoryConfig {
+        strategy: MemoryStrategy::ScopedBranches,
+        topic_file_routing: true,
+        ..MemoryConfig::default()
+    });
+
+    agent
+        .respond(&client, "my token is sk-secret".to_string())
+        .await
+        .expect("response");
+
+    let loaded = topic_store
+        .load_topic_file("rust")
+        .expect("load topic")
+        .expect("topic");
+    assert_eq!(loaded.context, "SAFE CONTEXT");
 }
 
 #[tokio::test]

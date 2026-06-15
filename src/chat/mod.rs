@@ -16,7 +16,9 @@ pub use history::save_history;
 pub use memory::{AgentMemory, MemoryConfig};
 pub use session::{describe_control, describe_goal, interactive_chat, read_terminal_line};
 pub use store::{
-    ConversationSession, LocalSessionStore, add_request_metrics, session_key, web_session_key,
+    AgentSummary, ConversationSession, KnowledgeDoc, LocalSessionStore, SavedAgent,
+    SavedMemoryConfig, TaskContext, TopicFileStorage, add_request_metrics, session_key, unix_now,
+    web_session_key,
 };
 pub use token_accounting::{
     ContextStatus, TokenCostEstimate, TokenEstimate, TokenGrowthReport, TokenGrowthRow,

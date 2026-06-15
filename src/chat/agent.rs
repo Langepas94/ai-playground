@@ -7,13 +7,18 @@ use crate::{
     },
 };
 
-use super::memory::{AgentMemory, MemoryConfig, MemoryStrategy, format_messages_for_summary};
+use super::memory::{
+    AgentMemory, MemoryConfig, MemoryLayer, MemoryStrategy, TopicRouteDecision,
+    format_messages_for_summary,
+};
+use super::store::TopicFileStorage;
 use super::token_accounting::{TokenEstimate, estimate_exchange, estimate_messages_tokens};
 use tokio::time::{Duration, timeout};
 
 pub const LOCAL_SESSION_AGENT_ID: &str = "local-session-agent";
 const MEMORY_COMPACT_TIMEOUT: Duration = Duration::from_secs(30);
 const MEMORY_FACTS_EXTRACT_TIMEOUT: Duration = Duration::from_secs(20);
+const TOPIC_CLASSIFIER_TIMEOUT: Duration = Duration::from_secs(20);
 const PREFLIGHT_COMPACT_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_PREFLIGHT_SUMMARY_PASSES: usize = 3;
 
@@ -47,6 +52,31 @@ pub fn selected_agent(agent_id: Option<&str>) -> Result<&'static AgentDescriptor
         .ok_or_else(|| AppError::InvalidInput(format!("Unsupported agent: {id}")))
 }
 
+#[derive(Debug)]
+enum PromptIngest {
+    Continue(Option<RequestMetrics>),
+    TopicNotFound {
+        metrics: Option<RequestMetrics>,
+        message: String,
+    },
+}
+
+impl PromptIngest {
+    fn into_parts(self) -> (Option<RequestMetrics>, Option<String>) {
+        match self {
+            Self::Continue(metrics) => (metrics, None),
+            Self::TopicNotFound { metrics, message } => (metrics, Some(message)),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct PreparedStreamRequest {
+    pub request: Option<ChatRequest>,
+    pub context_metrics: Option<RequestMetrics>,
+    pub local_response: Option<ChatResponse>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatAgent {
     profile: ProfileConfig,
@@ -58,6 +88,9 @@ pub struct ChatAgent {
     pricing: Option<ModelPricing>,
     billing: Option<BillingLookup>,
     context_limit: Option<u32>,
+    topic_store: Option<TopicFileStorage>,
+    working_context: Option<super::store::TaskContext>,
+    knowledge: Option<String>,
 }
 
 impl ChatAgent {
@@ -80,6 +113,9 @@ impl ChatAgent {
             pricing,
             billing,
             context_limit: None,
+            topic_store: None,
+            working_context: None,
+            knowledge: None,
         }
     }
 
@@ -89,6 +125,10 @@ impl ChatAgent {
 
     pub fn memory(&self) -> &AgentMemory {
         &self.memory
+    }
+
+    pub fn set_memory(&mut self, memory: AgentMemory) {
+        self.memory = memory;
     }
 
     pub fn memory_config(&self) -> MemoryConfig {
@@ -101,6 +141,24 @@ impl ChatAgent {
 
     pub fn set_context_limit(&mut self, context_limit: Option<u32>) {
         self.context_limit = context_limit.filter(|limit| *limit > 0);
+    }
+
+    pub fn set_topic_store(&mut self, topic_store: Option<TopicFileStorage>) {
+        self.topic_store = topic_store;
+    }
+
+    /// Working-memory layer for the current task. Injected into each request as
+    /// a tagged system block; not written into history/sidecar.
+    pub fn set_working_context(&mut self, task: Option<super::store::TaskContext>) {
+        self.working_context = task.filter(|task| !task.is_empty());
+    }
+
+    /// Long-term knowledge document. Injected into each request as a tagged
+    /// system block; not written into history/sidecar.
+    pub fn set_knowledge(&mut self, knowledge: Option<String>) {
+        self.knowledge = knowledge
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
     }
 
     pub fn context_limit(&self) -> Option<u32> {
@@ -118,8 +176,9 @@ impl ChatAgent {
 
     /// Record user prompt + assistant response into history after streaming completes.
     pub fn record_stream_response(&mut self, prompt: String, answer: String) {
-        self.commit_turn(prompt, answer);
+        self.commit_turn(prompt.clone(), answer.clone());
         self.apply_context_storage_policy();
+        let _ = self.update_active_topic_file(&prompt, &answer);
     }
 
     pub async fn compact_memory(
@@ -134,7 +193,12 @@ impl ChatAgent {
         client: &dyn ProviderClient,
         prompt: String,
     ) -> Result<ChatResponse, AppError> {
-        let mut context_metrics = self.ingest_user_prompt(client, &prompt).await;
+        let (mut context_metrics, topic_not_found) =
+            self.ingest_user_prompt(client, &prompt).await?.into_parts();
+        if let Some(message) = topic_not_found {
+            self.commit_turn(prompt, message.clone());
+            return Ok(local_chat_response(message, context_metrics));
+        }
         context_metrics = merge_optional_metrics(
             context_metrics,
             self.precompact_before_request(client, &prompt).await,
@@ -146,8 +210,9 @@ impl ChatAgent {
                 self.request_with_user_prompt(prompt.clone()),
             )
             .await?;
-        self.commit_turn(prompt, response.text.clone());
+        self.commit_turn(prompt.clone(), response.text.clone());
         self.apply_context_storage_policy();
+        self.update_active_topic_file(prompt.as_str(), response.text.as_str())?;
         let mut response = response;
         if let Some(metrics) = context_metrics {
             response.metrics = crate::chat::add_request_metrics(&response.metrics, &metrics);
@@ -181,7 +246,13 @@ impl ChatAgent {
         ),
         AppError,
     > {
-        let mut context_metrics = self.ingest_user_prompt(client, &prompt).await;
+        let (mut context_metrics, topic_not_found) =
+            self.ingest_user_prompt(client, &prompt).await?.into_parts();
+        if let Some(message) = topic_not_found {
+            self.commit_turn(prompt, message.clone());
+            let response = local_chat_response(message, context_metrics.clone());
+            return Ok((response, local_provider_debug(), context_metrics));
+        }
         context_metrics = merge_optional_metrics(
             context_metrics,
             self.precompact_before_request(client, &prompt).await,
@@ -193,8 +264,9 @@ impl ChatAgent {
                 self.request_with_user_prompt(prompt.clone()),
             )
             .await?;
-        self.commit_turn(prompt, response.text.clone());
+        self.commit_turn(prompt.clone(), response.text.clone());
         self.apply_context_storage_policy();
+        self.update_active_topic_file(prompt.as_str(), response.text.as_str())?;
         let mut response = response;
         if let Some(metrics) = &context_metrics {
             response.metrics = crate::chat::add_request_metrics(&response.metrics, metrics);
@@ -213,19 +285,28 @@ impl ChatAgent {
         &mut self,
         client: &dyn ProviderClient,
         prompt: &str,
-    ) -> (
-        crate::providers::ChatRequest,
-        Option<crate::providers::RequestMetrics>,
-    ) {
-        let mut context_metrics = self.ingest_user_prompt(client, prompt).await;
+    ) -> Result<PreparedStreamRequest, AppError> {
+        let (mut context_metrics, topic_not_found) = self
+            .ingest_user_prompt(client, prompt)
+            .await
+            .map(PromptIngest::into_parts)?;
+        if let Some(message) = topic_not_found {
+            self.commit_turn(prompt.to_string(), message.clone());
+            return Ok(PreparedStreamRequest {
+                request: None,
+                context_metrics: context_metrics.clone(),
+                local_response: Some(local_chat_response(message, context_metrics)),
+            });
+        }
         context_metrics = merge_optional_metrics(
             context_metrics,
             self.precompact_before_request(client, prompt).await,
         );
-        (
-            self.request_with_user_prompt(prompt.to_string()),
+        Ok(PreparedStreamRequest {
+            request: Some(self.request_with_user_prompt(prompt.to_string())),
             context_metrics,
-        )
+            local_response: None,
+        })
     }
 
     pub fn control(&self) -> &ResponseControl {
@@ -248,6 +329,34 @@ impl ChatAgent {
         )
     }
 
+    /// Insert the explicit working/long-term memory blocks after the leading
+    /// system messages, so the provider sees task + knowledge context up front.
+    fn inject_memory_layers(&self, messages: &mut Vec<ChatMessage>) {
+        let mut blocks = Vec::new();
+        if let Some(task) = self.working_context.as_ref() {
+            blocks.push(ChatMessage {
+                role: Role::System,
+                content: format!("[memory:working] Task context:\n{}", render_task(task)),
+            });
+        }
+        if let Some(knowledge) = self.knowledge.as_deref() {
+            blocks.push(ChatMessage {
+                role: Role::System,
+                content: format!("[memory:long-term] Knowledge:\n{knowledge}"),
+            });
+        }
+        if blocks.is_empty() {
+            return;
+        }
+        let insert_at = messages
+            .iter()
+            .position(|message| message.role != Role::System)
+            .unwrap_or(messages.len());
+        for (offset, block) in blocks.into_iter().enumerate() {
+            messages.insert(insert_at + offset, block);
+        }
+    }
+
     fn request_with_user_prompt(&self, prompt: String) -> ChatRequest {
         let mut memory_config = self.memory_config.clone();
         if memory_config.strategy == MemoryStrategy::StickyFacts {
@@ -256,6 +365,7 @@ impl ChatAgent {
             memory_config.recent_messages = memory_config.recent_messages.saturating_sub(1);
         }
         let mut messages = self.memory.build_context(&self.history, &memory_config);
+        self.inject_memory_layers(&mut messages);
         messages.push(ChatMessage {
             role: Role::User,
             content: prompt,
@@ -288,10 +398,15 @@ impl ChatAgent {
         &mut self,
         client: &dyn ProviderClient,
         prompt: &str,
-    ) -> Option<RequestMetrics> {
+    ) -> Result<PromptIngest, AppError> {
         match self.memory_config.strategy {
             MemoryStrategy::StickyFacts => {
-                return self.update_sticky_facts(client, prompt).await;
+                return Ok(PromptIngest::Continue(
+                    self.update_sticky_facts(client, prompt).await,
+                ));
+            }
+            MemoryStrategy::ScopedBranches if self.memory_config.topic_file_routing => {
+                return self.route_topic_file(client, prompt).await;
             }
             MemoryStrategy::ScopedBranches if self.memory_config.scoped_auto_route => {
                 let branch = self.memory.select_scoped_topic(
@@ -303,7 +418,136 @@ impl ChatAgent {
             }
             _ => {}
         }
-        None
+        Ok(PromptIngest::Continue(None))
+    }
+
+    async fn route_topic_file(
+        &mut self,
+        client: &dyn ProviderClient,
+        prompt: &str,
+    ) -> Result<PromptIngest, AppError> {
+        self.memory
+            .ensure_topic_catalog_from_branches(&self.history, &self.memory_config.active_branch);
+        if self.memory.topic_catalog.is_empty() {
+            if self.memory_config.topic_auto_create {
+                let topic_id = self.memory.select_scoped_topic(
+                    prompt,
+                    &self.history,
+                    &self.memory_config.active_branch,
+                );
+                self.activate_topic_file(topic_id.as_str(), prompt)?;
+                return Ok(PromptIngest::Continue(None));
+            }
+            return Ok(PromptIngest::TopicNotFound {
+                metrics: None,
+                message: topic_not_found_message("topic catalog is empty"),
+            });
+        }
+
+        let classifier_prompt = self.memory_config.topic_classifier_prompt.trim();
+        let classifier_prompt = if classifier_prompt.is_empty() {
+            super::memory::DEFAULT_TOPIC_CLASSIFIER_PROMPT
+        } else {
+            classifier_prompt
+        };
+        let request = ChatRequest {
+            model: self.profile.model.clone(),
+            messages: vec![
+                ChatMessage {
+                    role: Role::System,
+                    content: classifier_prompt.to_string(),
+                },
+                ChatMessage {
+                    role: Role::User,
+                    content: format!(
+                        "{}\n\nLatest user message:\n{prompt}\n\nReturn the JSON route decision only.",
+                        self.memory.compact_topic_catalog()
+                    ),
+                },
+            ],
+            control: topic_classifier_control(),
+            pricing: self.pricing.clone(),
+            billing: self.billing.clone(),
+        };
+        let result = timeout(
+            TOPIC_CLASSIFIER_TIMEOUT,
+            client.chat_completion(&self.profile, &self.token, request),
+        )
+        .await;
+        let Ok(Ok(response)) = result else {
+            return Ok(PromptIngest::TopicNotFound {
+                metrics: None,
+                message: topic_not_found_message("classifier did not return a route"),
+            });
+        };
+        let metrics = Some(response.metrics);
+        let decision =
+            parse_topic_route_decision(response.text.as_str()).unwrap_or(TopicRouteDecision {
+                found: false,
+                topic_id: None,
+                confidence: 0.0,
+                reason: "classifier response was not valid JSON".to_string(),
+            });
+        self.memory.last_topic_route = Some(decision.clone());
+        if decision.found
+            && let Some(topic_id) = decision.topic_id.as_deref()
+            && self.memory.topic_catalog.contains_key(topic_id)
+        {
+            self.activate_topic_file(topic_id, prompt)?;
+            return Ok(PromptIngest::Continue(metrics));
+        }
+
+        if self.memory_config.topic_auto_create {
+            let topic_id = self.memory.select_scoped_topic(
+                prompt,
+                &self.history,
+                &self.memory_config.active_branch,
+            );
+            self.activate_topic_file(topic_id.as_str(), prompt)?;
+            return Ok(PromptIngest::Continue(metrics));
+        }
+
+        Ok(PromptIngest::TopicNotFound {
+            metrics,
+            message: topic_not_found_message(&decision.reason),
+        })
+    }
+
+    fn activate_topic_file(&mut self, topic_id: &str, prompt: &str) -> Result<(), AppError> {
+        let topic_id = topic_id.trim();
+        if topic_id.is_empty() {
+            return Ok(());
+        }
+        self.memory_config.active_branch = topic_id.to_string();
+        let loaded = self
+            .topic_store
+            .as_ref()
+            .map(|store| store.load_topic_file(topic_id))
+            .transpose()?
+            .flatten();
+        let topic_file = loaded.unwrap_or_else(|| {
+            let config = self.memory_config.clone();
+            self.memory
+                .topic_file_from_branch_history(topic_id, prompt, &self.history, &config)
+        });
+        self.memory.active_topic_file = Some(topic_file);
+        Ok(())
+    }
+
+    fn update_active_topic_file(&mut self, prompt: &str, answer: &str) -> Result<(), AppError> {
+        if self.memory_config.strategy != MemoryStrategy::ScopedBranches
+            || !self.memory_config.topic_file_routing
+        {
+            return Ok(());
+        }
+        self.memory.update_active_topic_file(prompt, answer);
+        if let (Some(store), Some(topic_file)) = (
+            self.topic_store.as_ref(),
+            self.memory.active_topic_file.as_ref(),
+        ) {
+            store.save_topic_file(topic_file)?;
+        }
+        Ok(())
     }
 
     async fn update_sticky_facts(
@@ -349,7 +593,11 @@ impl ChatAgent {
             if facts.is_empty() {
                 return Some(response.metrics);
             }
-            self.memory.merge_extracted_facts(facts);
+            self.memory.merge_extracted_facts_with_layers(
+                facts
+                    .into_iter()
+                    .map(|fact| (fact.key, fact.value, fact.layer)),
+            );
         } else {
             self.memory.update_facts_from_user_message(prompt);
         }
@@ -518,20 +766,195 @@ fn memory_facts_extraction_control() -> ResponseControl {
     control
 }
 
-fn parse_extracted_facts(text: &str) -> Option<std::collections::BTreeMap<String, String>> {
+fn topic_classifier_control() -> ResponseControl {
+    let mut control = ResponseControl::uncontrolled();
+    control.temperature = Some(0.0);
+    control.max_tokens = Some(250);
+    control
+}
+
+fn parse_topic_route_decision(text: &str) -> Option<TopicRouteDecision> {
     let value: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
     let object = value.as_object()?;
-    let mut facts = std::collections::BTreeMap::new();
-    for (key, value) in object {
-        let Some(value) = fact_value_to_string(value) else {
+    let found = object.get("found")?.as_bool()?;
+    let topic_id = object
+        .get("topic_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let confidence = object
+        .get("confidence")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0) as f32;
+    let reason = object
+        .get("reason")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Some(TopicRouteDecision {
+        found,
+        topic_id,
+        confidence,
+        reason,
+    })
+}
+
+fn topic_not_found_message(reason: &str) -> String {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        "Не нашёл подходящий topic-файл для этого сообщения. Контекст другой темы не подгружал."
+            .to_string()
+    } else {
+        format!(
+            "Не нашёл подходящий topic-файл для этого сообщения. Контекст другой темы не подгружал. Причина: {reason}"
+        )
+    }
+}
+
+fn local_chat_response(text: String, metrics: Option<RequestMetrics>) -> ChatResponse {
+    ChatResponse {
+        text,
+        finish_reason: Some("topic_not_found".to_string()),
+        metrics: metrics.unwrap_or_default(),
+    }
+}
+
+fn local_provider_debug() -> ProviderExchangeDebug {
+    ProviderExchangeDebug {
+        request: crate::providers::HttpDebugRequest {
+            method: "LOCAL".to_string(),
+            url: "local://topic-file-routing/not-found".to_string(),
+            headers: Default::default(),
+            body: serde_json::json!({}),
+        },
+        response: crate::providers::HttpDebugResponse {
+            status: 200,
+            headers: Default::default(),
+            body: serde_json::json!({ "finish_reason": "topic_not_found" }),
+        },
+    }
+}
+
+/// One extracted fact plus the layer the agent explicitly chose for it.
+/// `layer` is `None` when the model gave no layer (legacy/flat output); the
+/// caller then falls back to the default routing rule.
+pub(crate) struct ExtractedFact {
+    pub key: String,
+    pub value: String,
+    pub layer: Option<MemoryLayer>,
+}
+
+/// Parse the fact-extraction response. The agent is asked to classify each
+/// durable fact into a memory layer, so several shapes are accepted:
+///
+/// * `{"facts":[{"key","value","layer"}]}` — preferred, explicit layer.
+/// * `[{"key","value","layer"}]` — bare array.
+/// * `{"key":{"value":"...","layer":"..."}}` — object of rich entries.
+/// * `{"key":"value"}` — legacy flat object (no layer → default routing).
+fn parse_extracted_facts(text: &str) -> Option<Vec<ExtractedFact>> {
+    let value: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
+    let entries = match &value {
+        serde_json::Value::Array(items) => return Some(facts_from_entry_array(items)),
+        serde_json::Value::Object(object) => {
+            if let Some(serde_json::Value::Array(items)) = object.get("facts") {
+                return Some(facts_from_entry_array(items));
+            }
+            object
+        }
+        _ => return None,
+    };
+    let mut facts = Vec::new();
+    for (key, raw) in entries {
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let (value, layer) = match raw {
+            serde_json::Value::Object(entry) => {
+                let Some(value) = entry.get("value").and_then(fact_value_to_string) else {
+                    continue;
+                };
+                (value, entry.get("layer").and_then(parse_fact_layer))
+            }
+            other => {
+                let Some(value) = fact_value_to_string(other) else {
+                    continue;
+                };
+                (value, None)
+            }
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        facts.push(ExtractedFact {
+            key: key.to_string(),
+            value: value.to_string(),
+            layer,
+        });
+    }
+    Some(facts)
+}
+
+fn facts_from_entry_array(items: &[serde_json::Value]) -> Vec<ExtractedFact> {
+    let mut facts = Vec::new();
+    for item in items {
+        let Some(entry) = item.as_object() else {
+            continue;
+        };
+        let Some(key) = entry.get("key").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let key = key.trim();
+        let Some(value) = entry.get("value").and_then(fact_value_to_string) else {
             continue;
         };
         let value = value.trim();
-        if !key.trim().is_empty() && !value.is_empty() {
-            facts.insert(key.clone(), value.to_string());
+        if key.is_empty() || value.is_empty() {
+            continue;
+        }
+        facts.push(ExtractedFact {
+            key: key.to_string(),
+            value: value.to_string(),
+            layer: entry.get("layer").and_then(parse_fact_layer),
+        });
+    }
+    facts
+}
+
+fn parse_fact_layer(value: &serde_json::Value) -> Option<MemoryLayer> {
+    value.as_str()?.parse::<MemoryLayer>().ok()
+}
+
+/// Render a `TaskContext` into a compact, readable block for the provider.
+fn render_task(task: &super::store::TaskContext) -> String {
+    let mut lines = Vec::new();
+    for (label, value) in [
+        ("Title", task.title.as_str()),
+        ("Goal", task.goal.as_str()),
+        ("Status", task.status.as_str()),
+    ] {
+        let value = value.trim();
+        if !value.is_empty() {
+            lines.push(format!("{label}: {value}"));
         }
     }
-    Some(facts)
+    let steps: Vec<&str> = task
+        .steps
+        .iter()
+        .map(|step| step.trim())
+        .filter(|step| !step.is_empty())
+        .collect();
+    if !steps.is_empty() {
+        lines.push(format!("Steps:\n- {}", steps.join("\n- ")));
+    }
+    let notes = task.notes.trim();
+    if !notes.is_empty() {
+        lines.push(format!("Notes: {notes}"));
+    }
+    lines.join("\n")
 }
 
 fn fact_value_to_string(value: &serde_json::Value) -> Option<String> {

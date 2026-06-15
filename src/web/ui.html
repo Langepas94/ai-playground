@@ -442,6 +442,44 @@
       font-size: 12px;
       line-height: 1.45;
     }
+    .memory-layer {
+      padding: 7px 9px;
+      margin-bottom: 6px;
+      border: 1px solid #d4e2e4;
+      border-radius: 8px;
+      background: #fbfdfc;
+    }
+    .memory-layer-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 4px;
+    }
+    .memory-layer-control {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+    .memory-layer-control input,
+    .memory-layer-control select {
+      flex: 1 1 140px;
+      min-width: 120px;
+    }
+    .mem-del,
+    .mem-clear {
+      padding: 1px 7px;
+      font-size: 11px;
+      border-radius: 6px;
+      border: 1px solid #cbd5e1;
+      background: #fff;
+      color: #475569;
+      cursor: pointer;
+    }
+    .mem-clear {
+      margin-left: auto;
+    }
     .facts-preview {
       min-height: 42px;
       max-height: 120px;
@@ -799,6 +837,7 @@
       <section class="controls">
         <div class="inspector-tabs" role="tablist" aria-label="Inspector">
           <button class="tab-button active" type="button" data-tab="profile">Профиль</button>
+          <button class="tab-button" type="button" data-tab="agent">Агент</button>
           <button class="tab-button" type="button" data-tab="params">Параметры</button>
           <button class="tab-button" type="button" data-tab="metrics">Метрики</button>
           <button class="tab-button" type="button" data-tab="debug">Debug</button>
@@ -827,6 +866,48 @@
                 <label>Custom model id<input id="customModel" spellcheck="false" placeholder="Если нужной модели нет в списке"></label>
               </div>
             </details>
+          </div>
+        </div>
+
+        <div id="tab-agent" class="inspector-pane">
+          <div class="group">
+            <h2>Агент <span id="activeAgentBadge" class="context-badge">не выбран</span></h2>
+            <div class="field-help">
+              Отдельный именованный агент: создаёшь, заходишь — он помнит provider/model/system prompt/memory и две явные памяти:
+              рабочую (TaskContext — данные текущей задачи) и долговременную (знания/профиль/решения). Краткосрочная — это сам диалог чата.
+            </div>
+            <label>Сохранённые агенты<select id="agentList"><option value="">— нет —</option></select></label>
+            <div class="actions">
+              <button id="agentEnter" class="secondary" type="button">Войти</button>
+              <button id="agentDelete" class="secondary" type="button">Удалить</button>
+            </div>
+            <label>Имя нового/текущего агента<input id="agentName" spellcheck="false" placeholder="напр. Rust-ревьюер"></label>
+            <div class="actions">
+              <button id="agentSave" type="button">Сохранить агента (текущие настройки)</button>
+            </div>
+            <div id="agentStatus" class="field-help"></div>
+          </div>
+          <div class="group">
+            <h2>🔵 Рабочая память — TaskContext</h2>
+            <div class="field-help">Данные текущей задачи. Идут в каждый запрос блоком <code>[memory:working]</code>.</div>
+            <label>Задача (title)<input id="taskTitle" spellcheck="false"></label>
+            <label>Цель (goal)<input id="taskGoal" spellcheck="false"></label>
+            <label>Статус<input id="taskStatus" spellcheck="false" placeholder="напр. active / blocked / done"></label>
+            <label>Шаги (по одному на строку)<textarea id="taskSteps" rows="3"></textarea></label>
+            <label>Заметки<textarea id="taskNotes" rows="2"></textarea></label>
+            <div class="actions">
+              <button id="taskSave" class="secondary" type="button">Сохранить TaskContext</button>
+            </div>
+            <div id="taskStatusLine" class="field-help"></div>
+          </div>
+          <div class="group">
+            <h2>🟢 Долговременная память — знания</h2>
+            <div class="field-help">Профиль / решения / знания. Хранится в проектном store (TOON). Идёт в каждый запрос блоком <code>[memory:long-term]</code>.</div>
+            <label>Документ знаний<textarea id="knowledgeDoc" rows="8" placeholder="Профиль пользователя, принятые решения, устойчивые факты…"></textarea></label>
+            <div class="actions">
+              <button id="knowledgeSave" class="secondary" type="button">Сохранить знания</button>
+            </div>
+            <div id="knowledgeStatusLine" class="field-help"></div>
           </div>
         </div>
 
@@ -886,8 +967,8 @@
                 <div id="factsPreviewWrap" style="display:none">
                   <label>
                     <span class="field-title">Facts extraction prompt</span>
-                    <textarea id="memoryFactsExtractionPrompt">You update local Sticky Facts memory for a chat agent. Extract only durable facts requested by this prompt as key-value pairs. Default categories: goals, constraints, preferences, decisions, agreements, person profile, interests, favorite colors, pets. Return ONLY a JSON object with snake_case keys and short string values. Use {} if there is nothing durable. Do not include secrets, tokens, passwords, or API keys. Do not store the whole user message.</textarea>
-                    <span class="field-help">Это prompt сборщика памяти: какие KV-факты сохранять после каждого сообщения пользователя. Например: “collect only constraints” или “collect person profile and favorite colors”.</span>
+                    <textarea id="memoryFactsExtractionPrompt">You maintain the layered local memory of a chat agent. After each user message, extract only durable facts AND explicitly choose a memory layer for each. Layers: "working" = data of the CURRENT task (active goals, constraints, todos, what we are doing right now); "long-term" = stable knowledge that should survive across sessions (user profile, preferences, decisions, agreements, person profile, interests, favorite colors, pets). Return ONLY JSON of the form {"facts":[{"key":"snake_case","value":"short string","layer":"working|long-term"}]}. Use {"facts":[]} if there is nothing durable. Never include secrets, tokens, passwords, or API keys. Do not store the whole user message.</textarea>
+                    <span class="field-help">Это prompt сборщика памяти: какие KV-факты сохранять после каждого сообщения и в какой слой (working/long-term). Агент сам классифицирует факт по слою. Можно сузить, напр. “collect only constraints”.</span>
                   </label>
                   <label>
                     <span class="field-title">Facts preamble</span>
@@ -895,8 +976,20 @@
                     <span class="field-help">Это только преамбула read-only facts block для основного provider request. Она не выбирает, какие facts собирать.</span>
                   </label>
                   <span class="field-title">Persisted KV facts</span>
+                  <div class="field-help">
+                    Память делится на 3 слоя, каждый факт помечен бейджем:
+                    <span class="topic-chip">short-term</span> окно диалога + summary, эфемерно;
+                    <span class="topic-chip">working</span> данные текущей задачи (<code>goal</code>, <code>constraints</code>), живут в рамках сессии;
+                    <span class="topic-chip">long-term</span> устойчивые знания (<code>preferences</code>, <code>decisions</code>, профиль), переносятся в новые сессии.
+                  </div>
+                  <div class="field-help">
+                    Слой выбирает сам агент при извлечении факта (Facts extraction prompt): задача → <b>working</b>,
+                    устойчивые знания → <b>long-term</b>. Ниже можно переопределить вручную или удалить.
+                    Начните новый чат (New session) — <b>long-term</b> факты останутся, <b>short-term</b> и <b>working</b> очистятся.
+                  </div>
                   <div id="factsKvPreview" class="facts-preview">Пока пусто. Напишите “цель: …”, “constraint: …”, “предпочтение: …”, “решили: …”.</div>
                   <span class="field-title">Provider facts block</span>
+                  <div class="field-help">Facts block сгруппирован по слоям (<code>[working]</code> / <code>[long-term]</code>) — видно, из какого слоя факт ушёл провайдеру.</div>
                   <div id="factsPreview" class="facts-preview">Будет показан точный facts block, который ушел в provider request.</div>
                 </div>
                 <div id="scopedBranchWrap" class="topic-panel" style="display:none">
@@ -1043,6 +1136,24 @@
               <h3>Context topics</h3>
               <div id="contextDebugPanel" class="topic-debug">Выберите Scoped Branches, чтобы увидеть авто-разделение тем.</div>
             </div>
+            <div class="debug-item">
+              <h3>Модель памяти — слои</h3>
+              <div class="field-help">
+                Память агента разделена минимум на 3 типа. Факт можно записать вручную в выбранный слой,
+                удалить (✕) или очистить весь слой. Краткосрочная хранит окно диалога + summary (KV-факты туда не пишутся).
+              </div>
+              <div id="memoryLayersPanel" class="topic-debug">Контекст еще не собран.</div>
+              <div class="memory-layer-control">
+                <select id="memoryLayerSelect" title="Слой памяти">
+                  <option value="working">рабочая (working) — данные текущей задачи</option>
+                  <option value="long-term" selected>долговременная (long-term) — профиль/решения/знания</option>
+                </select>
+                <input id="memoryLayerKey" spellcheck="false" placeholder="ключ, напр. preferences">
+                <input id="memoryLayerValue" spellcheck="false" placeholder="значение">
+                <button id="memoryFactAdd" type="button">Записать факт</button>
+              </div>
+              <div id="memoryLayerStatus" class="field-help"></div>
+            </div>
           </details>
         </div>
       </section>
@@ -1063,6 +1174,7 @@
     let chatHistory = [];
     let chatSessionId = null;
     let forceNewSession = false;
+    let activeAgentId = localStorage.getItem('ai_active_agent') || null;
     let pendingAttachments = []; // [{name, content}]
     let branchState = { checkpoint: null, branches: [], activeId: null };
 
@@ -1339,6 +1451,7 @@
         session_id: currentBranch()?.sessionId || chatSessionId,
         new_session: currentBranch() ? !currentBranch().sessionId : forceNewSession,
         messages: currentBranch()?.messages || chatHistory,
+        saved_agent_id: activeAgentId || null,
         memory: memoryPayload(),
         pricing: pricingPayload(),
         billing: billingPayload(),
@@ -1532,9 +1645,11 @@
         panel.textContent = 'Контекст еще не собран.';
         scopedPanel.textContent = 'Темы появятся после первого ответа в стратегии Scoped Branches.';
         renderFactsDebug(null);
+        renderMemoryLayers(null);
         return;
       }
       renderFactsDebug(contextDebug.facts);
+      renderMemoryLayers(contextDebug.layers);
       if (contextDebug.strategy !== 'scoped-branches') {
         panel.textContent = `strategy: ${contextDebug.strategy}`;
         scopedPanel.textContent = 'Auto topics активны только в стратегии Scoped Branches.';
@@ -1553,6 +1668,241 @@
       }
     }
 
+    function memoryLayerSection(title, hint, facts, layerKey) {
+      const items = facts.length
+        ? facts.map((fact) => `<span class="metric-line"><em>${escapeHtml(fact.key)}</em><b>${escapeHtml(fact.value)}</b> <button type="button" class="mem-del" data-key="${escapeHtml(fact.key)}" title="Удалить факт">✕</button></span>`).join('')
+        : '<span class="field-help">пусто</span>';
+      return `<div class="memory-layer"><div class="memory-layer-head"><strong>${title}</strong> <span class="field-help">${hint}</span> <button type="button" class="mem-clear" data-layer="${layerKey}">Очистить слой</button></div><div class="metric-lines">${items}</div></div>`;
+    }
+
+    function renderMemoryLayers(layers) {
+      const panel = $('memoryLayersPanel');
+      if (!panel) return;
+      if (!layers) {
+        panel.textContent = 'Контекст еще не собран.';
+        return;
+      }
+      const st = layers.short_term || {};
+      const summaryInfo = st.session_summary
+        ? `есть (@${st.summarized_message_count})`
+        : 'нет';
+      const shortBody = `<div class="field-help">summary: ${summaryInfo} · окно N=${st.recent_window ?? 0} · отправлено сообщений=${st.recent_messages_sent ?? 0}</div>`;
+      const shortHtml = `<div class="memory-layer"><div class="memory-layer-head"><strong>🟡 Краткосрочная</strong> <span class="field-help">текущий диалог; эфемерно</span> <button type="button" class="mem-clear" data-layer="short-term">Очистить</button></div>${shortBody}</div>`;
+      panel.innerHTML = [
+        shortHtml,
+        memoryLayerSection('🔵 Рабочая', 'данные текущей задачи (goal, constraints)', (layers.working && layers.working.facts) || [], 'working'),
+        memoryLayerSection('🟢 Долговременная', 'профиль, решения, знания', (layers.long_term && layers.long_term.facts) || [], 'long-term'),
+      ].join('');
+      panel.querySelectorAll('.mem-del').forEach((btn) => {
+        btn.onclick = () => memoryUpdate('delete', { key: btn.dataset.key });
+      });
+      panel.querySelectorAll('.mem-clear').forEach((btn) => {
+        btn.onclick = () => memoryUpdate('clear-layer', { layer: btn.dataset.layer });
+      });
+    }
+
+    async function memoryUpdate(action, opts) {
+      const status = $('memoryLayerStatus');
+      const model = selectedModel();
+      if (!model) {
+        status.textContent = 'Сначала выберите модель.';
+        return;
+      }
+      status.textContent = 'Сохраняю…';
+      try {
+        const response = await fetch('/api/memory/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            agent_id: $('agentMode').value,
+            provider: currentProvider(),
+            model,
+            session_id: chatSessionId,
+            action,
+            key: opts.key || null,
+            value: opts.value || null,
+            layer: opts.layer || null,
+            memory: memoryPayload(),
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          status.textContent = 'Ошибка: ' + (data.error || response.status);
+          return;
+        }
+        chatSessionId = data.session_id || chatSessionId;
+        if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
+        setContextDebug(data.context_debug);
+        status.textContent = 'Готово.';
+      } catch (error) {
+        status.textContent = 'Ошибка: ' + error.message;
+      }
+    }
+
+    async function agentsManage(body) {
+      const response = await fetch('/api/agents/manage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || ('HTTP ' + response.status));
+      }
+      return data;
+    }
+
+    function setActiveAgentBadge() {
+      const badge = $('activeAgentBadge');
+      const option = activeAgentId
+        ? Array.from($('agentList').options).find((o) => o.value === activeAgentId)
+        : null;
+      badge.textContent = activeAgentId ? (option ? option.textContent : activeAgentId.slice(0, 8)) : 'не выбран';
+    }
+
+    async function refreshAgentList() {
+      try {
+        const data = await agentsManage({ action: 'list' });
+        const select = $('agentList');
+        const agents = data.agents || [];
+        select.innerHTML = agents.length
+          ? agents.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)} · ${escapeHtml(a.provider)}/${escapeHtml(a.model)}</option>`).join('')
+          : '<option value="">— нет —</option>';
+        if (activeAgentId && agents.some((a) => a.id === activeAgentId)) {
+          select.value = activeAgentId;
+        }
+        setActiveAgentBadge();
+      } catch (error) {
+        $('agentStatus').textContent = 'Ошибка списка: ' + error.message;
+      }
+    }
+
+    function applyAgentMemoryToForm(memory) {
+      if (!memory) return;
+      const set = (id, value) => { if (value !== undefined && value !== null) $(id).value = value; };
+      set('memoryStrategy', memory.strategy);
+      set('memoryRecentMessages', memory.recent_messages);
+      set('memorySummarizeAfterMessages', memory.summarize_after_messages);
+      set('memorySummaryChunkMessages', memory.summary_chunk_messages);
+      set('memorySummarizeAtContextPercent', memory.summarize_at_context_percent);
+      set('memorySummaryPrompt', memory.summary_prompt);
+      set('memoryFactsExtractionPrompt', memory.facts_extraction_prompt);
+      set('memoryFactsPrompt', memory.facts_prompt);
+      set('memoryActiveBranch', memory.active_branch);
+      $('memoryScopedAutoRoute').checked = !!memory.scoped_auto_route;
+      $('memoryStrategy').dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    function fillTaskEditor(task) {
+      task = task || {};
+      $('taskTitle').value = task.title || '';
+      $('taskGoal').value = task.goal || '';
+      $('taskStatus').value = task.status || '';
+      $('taskSteps').value = (task.steps || []).join('\n');
+      $('taskNotes').value = task.notes || '';
+    }
+
+    function taskEditorPayload() {
+      return {
+        title: $('taskTitle').value,
+        goal: $('taskGoal').value,
+        status: $('taskStatus').value,
+        steps: $('taskSteps').value.split('\n').map((s) => s.trim()).filter(Boolean),
+        notes: $('taskNotes').value,
+      };
+    }
+
+    async function enterAgent(id) {
+      if (!id) return;
+      try {
+        const data = await agentsManage({ action: 'load', id });
+        const agent = data.agent || {};
+        activeAgentId = agent.id || id;
+        localStorage.setItem('ai_active_agent', activeAgentId);
+        $('agentName').value = agent.name || '';
+        if (agent.provider) { $('provider').value = agent.provider; $('provider').dispatchEvent(new Event('change', { bubbles: true })); }
+        if (agent.base_url) $('baseUrl').value = agent.base_url;
+        if (agent.model) {
+          $('model').value = agent.model;
+          if ($('model').value !== agent.model) $('customModel').value = agent.model;
+        }
+        applyAgentMemoryToForm(agent.memory);
+        fillTaskEditor(data.task);
+        $('knowledgeDoc').value = (data.knowledge && data.knowledge.content) || '';
+        setActiveAgentBadge();
+        // bind a fresh session bound to this agent (loadChatSession derives the
+        // system prompt from stored messages, so restore it AFTER the load)
+        chatSessionId = null;
+        chatHistory = [];
+        renderChatHistory();
+        await loadChatSession();
+        $('systemPrompt').value = agent.system_prompt || '';
+        $('agentStatus').textContent = 'Вошли в агента «' + (agent.name || activeAgentId) + '». Настройки восстановлены.';
+      } catch (error) {
+        $('agentStatus').textContent = 'Ошибка входа: ' + error.message;
+      }
+    }
+
+    async function saveCurrentAgent() {
+      const name = $('agentName').value.trim();
+      if (!name) { $('agentStatus').textContent = 'Укажите имя агента.'; return; }
+      try {
+        const data = await agentsManage({
+          action: 'save',
+          agent: {
+            id: activeAgentId,
+            name,
+            provider: currentProvider(),
+            base_url: $('baseUrl').value.trim(),
+            model: selectedModel(),
+            system_prompt: textValue('systemPrompt'),
+            memory: memoryPayload(),
+          },
+        });
+        activeAgentId = data.agent.id;
+        localStorage.setItem('ai_active_agent', activeAgentId);
+        await refreshAgentList();
+        $('agentList').value = activeAgentId;
+        setActiveAgentBadge();
+        $('agentStatus').textContent = 'Агент сохранён.';
+      } catch (error) {
+        $('agentStatus').textContent = 'Ошибка сохранения: ' + error.message;
+      }
+    }
+
+    async function deleteCurrentAgent() {
+      const id = $('agentList').value;
+      if (!id) return;
+      try {
+        await agentsManage({ action: 'delete', id });
+        if (activeAgentId === id) { activeAgentId = null; localStorage.removeItem('ai_active_agent'); }
+        await refreshAgentList();
+        $('agentStatus').textContent = 'Агент удалён.';
+      } catch (error) {
+        $('agentStatus').textContent = 'Ошибка удаления: ' + error.message;
+      }
+    }
+
+    async function saveTaskContext() {
+      if (!activeAgentId) { $('taskStatusLine').textContent = 'Сначала войдите в агента или сохраните его.'; return; }
+      try {
+        await agentsManage({ action: 'save-task', id: activeAgentId, task: taskEditorPayload() });
+        $('taskStatusLine').textContent = 'TaskContext сохранён.';
+      } catch (error) {
+        $('taskStatusLine').textContent = 'Ошибка: ' + error.message;
+      }
+    }
+
+    async function saveKnowledgeDoc() {
+      if (!activeAgentId) { $('knowledgeStatusLine').textContent = 'Сначала войдите в агента или сохраните его.'; return; }
+      try {
+        await agentsManage({ action: 'save-knowledge', id: activeAgentId, knowledge: $('knowledgeDoc').value });
+        $('knowledgeStatusLine').textContent = 'Знания сохранены.';
+      } catch (error) {
+        $('knowledgeStatusLine').textContent = 'Ошибка: ' + error.message;
+      }
+    }
+
     function renderFactsDebug(factsDebug) {
       const kvPanel = $('factsKvPreview');
       const blockPanel = $('factsPreview');
@@ -1560,7 +1910,7 @@
       if (!persisted.length) {
         kvPanel.textContent = 'Пока пусто. Facts обновляются после каждого user message.';
       } else {
-        kvPanel.innerHTML = `<div class="metric-lines">${persisted.map((fact) => `<span class="metric-line"><em>${escapeHtml(fact.key)}</em><b>${escapeHtml(fact.value)}</b></span>`).join('')}</div>`;
+        kvPanel.innerHTML = `<div class="metric-lines">${persisted.map((fact) => `<span class="metric-line"><em>${escapeHtml(fact.key)} <span class="topic-chip">${escapeHtml(fact.layer || 'long-term')}</span></em><b>${escapeHtml(fact.value)}</b></span>`).join('')}</div>`;
       }
       if (factsDebug?.request_block) {
         blockPanel.textContent = `EXTRACTION_PROMPT:\n${factsDebug.extraction_prompt || '(default)'}\n\nFACTS_BLOCK:\n${factsDebug.request_block}\n\nRECENT_MESSAGES_SENT: ${factsDebug.recent_messages_sent}`;
@@ -2039,6 +2389,7 @@
       await refreshTokenStatus();
       await loadChatSession();
       await loadModels().catch(() => {}); // автозагрузка; ошибка не критична
+      await refreshAgentList();
       setStatus('Готово');
     }
 
@@ -2369,6 +2720,25 @@
     }
 
     $('attachBtn').addEventListener('click', () => $('fileInput').click());
+    $('agentEnter').addEventListener('click', () => enterAgent($('agentList').value));
+    $('agentSave').addEventListener('click', saveCurrentAgent);
+    $('agentDelete').addEventListener('click', deleteCurrentAgent);
+    $('taskSave').addEventListener('click', saveTaskContext);
+    $('knowledgeSave').addEventListener('click', saveKnowledgeDoc);
+
+    $('memoryFactAdd').addEventListener('click', () => {
+      const key = $('memoryLayerKey').value.trim();
+      const value = $('memoryLayerValue').value.trim();
+      if (!key || !value) {
+        $('memoryLayerStatus').textContent = 'Укажите ключ и значение.';
+        return;
+      }
+      memoryUpdate('set', { layer: $('memoryLayerSelect').value, key, value }).then(() => {
+        $('memoryLayerKey').value = '';
+        $('memoryLayerValue').value = '';
+      });
+    });
+
     $('fileInput').addEventListener('change', async (e) => {
       const files = e.target.files;
       if (!files || files.length === 0) return;

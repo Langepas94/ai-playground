@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::secrets::MemorySecretStore;
 
@@ -77,6 +76,7 @@ fn web_chat_messages_put_system_prompt_before_user_prompt() {
         memory: None,
         pricing: None,
         billing: None,
+        saved_agent_id: None,
     };
 
     let messages = request.initial_history(Vec::new());
@@ -119,6 +119,7 @@ fn web_chat_history_keeps_prior_messages_and_does_not_duplicate_system_prompt() 
         memory: None,
         pricing: None,
         billing: None,
+        saved_agent_id: None,
     };
 
     let messages = request.initial_history(Vec::new());
@@ -156,6 +157,7 @@ fn web_chat_initial_history_prefers_local_store_over_client_messages() {
         memory: None,
         pricing: None,
         billing: None,
+        saved_agent_id: None,
     };
 
     let messages = request.initial_history(vec![ChatMessage {
@@ -189,6 +191,10 @@ fn web_memory_config_maps_strategy_and_limits() {
         facts_prompt: Some("Custom provider facts prompt".to_string()),
         active_branch: Some("alpha".to_string()),
         scoped_auto_route: Some(false),
+        topic_file_routing: None,
+        topic_drift_guard: None,
+        topic_auto_create: None,
+        topic_classifier_prompt: None,
     }
     .into_memory_config();
 
@@ -226,6 +232,10 @@ fn web_memory_config_supports_all_context_strategies() {
             facts_prompt: None,
             active_branch: None,
             scoped_auto_route: None,
+            topic_file_routing: None,
+            topic_drift_guard: None,
+            topic_auto_create: None,
+            topic_classifier_prompt: None,
         }
         .into_memory_config();
 
@@ -247,6 +257,10 @@ fn web_memory_config_blank_facts_prompt_uses_default() {
         facts_prompt: Some("   ".to_string()),
         active_branch: Some("   ".to_string()),
         scoped_auto_route: None,
+        topic_file_routing: None,
+        topic_drift_guard: None,
+        topic_auto_create: None,
+        topic_classifier_prompt: Some("   ".to_string()),
     }
     .into_memory_config();
 
@@ -278,6 +292,10 @@ fn web_memory_config_maps_summary_settings_and_prompt() {
         facts_prompt: None,
         active_branch: None,
         scoped_auto_route: None,
+        topic_file_routing: None,
+        topic_drift_guard: None,
+        topic_auto_create: None,
+        topic_classifier_prompt: None,
     }
     .into_memory_config();
 
@@ -435,6 +453,7 @@ fn web_request_pricing_uses_official_deepseek_pricing_before_stale_catalog() {
         memory: None,
         pricing: None,
         billing: None,
+        saved_agent_id: None,
     };
     let profile = request.profile().expect("profile");
 
@@ -525,6 +544,7 @@ fn web_request_context_limit_prefers_request_then_catalog() {
         memory: None,
         pricing: None,
         billing: None,
+        saved_agent_id: None,
     };
     let profile = request.profile().expect("profile");
 
@@ -810,6 +830,31 @@ fn web_ui_facts_preview_detects_custom_prompt_facts_block() {
         body.contains("includes('FACTS_KV:')"),
         "facts preview should detect the explicit provider facts block marker"
     );
+}
+
+#[test]
+fn web_ui_renders_named_agent_tab() {
+    // Separate-agent tab with the 3 layers and persistence wiring.
+    assert!(INDEX_HTML.contains("data-tab=\"agent\""));
+    assert!(INDEX_HTML.contains("id=\"tab-agent\""));
+    assert!(INDEX_HTML.contains("Рабочая память — TaskContext"));
+    assert!(INDEX_HTML.contains("Долговременная память — знания"));
+    assert!(INDEX_HTML.contains("/api/agents/manage"));
+    assert!(INDEX_HTML.contains("function enterAgent(id)"));
+    assert!(INDEX_HTML.contains("saved_agent_id: activeAgentId"));
+}
+
+#[test]
+fn web_ui_renders_memory_layers_control() {
+    // 3-layer debug panel + manual control wired to the endpoint.
+    assert!(INDEX_HTML.contains("Модель памяти — слои"));
+    assert!(INDEX_HTML.contains("function renderMemoryLayers(layers)"));
+    assert!(INDEX_HTML.contains("renderMemoryLayers(contextDebug.layers)"));
+    assert!(INDEX_HTML.contains("🟡 Краткосрочная"));
+    assert!(INDEX_HTML.contains("🔵 Рабочая"));
+    assert!(INDEX_HTML.contains("🟢 Долговременная"));
+    assert!(INDEX_HTML.contains("/api/memory/update"));
+    assert!(INDEX_HTML.contains("memoryFactAdd"));
 }
 
 #[test]
