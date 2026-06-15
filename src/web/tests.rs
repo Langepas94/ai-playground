@@ -1195,10 +1195,12 @@ fn web_ui_is_agent_centric() {
     assert!(INDEX_HTML.contains("function gateLoadModels()"));
     assert!(INDEX_HTML.contains("function gateProviderPayload()"));
     assert!(INDEX_HTML.contains("id=\"gateCustomModel\""));
-    assert!(INDEX_HTML.contains("id=\"gateInitialContext\""));
-    assert!(INDEX_HTML.contains("Стартовый контекст"));
-    assert!(INDEX_HTML.contains("initial_context: $('gateInitialContext').value.trim()"));
+    assert!(INDEX_HTML.contains("Информация о проекте и агенте"));
+    assert!(!INDEX_HTML.contains("id=\"gateInitialContext\""));
+    assert!(!INDEX_HTML.contains("Стартовый контекст"));
+    assert!(!INDEX_HTML.contains("initial_context: $('gateInitialContext').value.trim()"));
     assert!(INDEX_HTML.contains("Что агент должен уточнить"));
+    assert!(INDEX_HTML.contains("domain: $('gateDomain').value.trim()"));
     assert!(!INDEX_HTML.contains("Обязательные поля профиля (по одному на строку"));
     // Stateful panes: profile (interview), task (stage FSM), invariants.
     assert!(INDEX_HTML.contains("data-tab=\"aprofile\""));

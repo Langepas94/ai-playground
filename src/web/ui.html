@@ -886,8 +886,7 @@
           </div>
         </details>
         <label>Base URL<input id="gateBaseUrl" spellcheck="false" placeholder="оставь пустым для дефолта провайдера"></label>
-        <label>Домен — чем агент занимается<textarea id="gateDomain" rows="3" placeholder="напр. помощник Android-разработчика: Kotlin, Compose, MVI"></textarea></label>
-        <label>Стартовый контекст — что агент уже должен знать<textarea id="gateInitialContext" rows="4" placeholder="напр. пиццерия в Волгограде для молодёжи. Важно обыграть реку Волгу, локальный вайб и небольшую команду."></textarea></label>
+        <label>Информация о проекте и агенте<textarea id="gateDomain" rows="5" placeholder="напр. агент-ресторатор для пиццерии в Волгограде: помогает с меню, рекламой и продвижением. Важно обыгрывать реку Волгу, локальный вайб и молодую аудиторию. Работает только на русском языке."></textarea></label>
         <label>Что агент должен уточнить (опционально)<textarea id="gateSeed" rows="2" placeholder="напр. город, аудитория, бюджет, ограничения"></textarea></label>
         <label>Инварианты — жёсткие ограничения (по одному на строку)<textarea id="gateInvariants" rows="3" placeholder="только Kotlin&#10;архитектура только MVI&#10;никаких платных API"></textarea></label>
         <div class="actions">
@@ -1889,7 +1888,6 @@
     function resetGateCreateForm() {
       $('gateName').value = '';
       $('gateDomain').value = '';
-      $('gateInitialContext').value = '';
       $('gateSeed').value = '';
       $('gateInvariants').value = '';
       $('gateCustomModel').value = '';
@@ -1998,7 +1996,6 @@
         model: $('gateCustomModel').value.trim() || $('gateModel').value.trim(),
         base_url: $('gateBaseUrl').value.trim(),
         domain: $('gateDomain').value.trim(),
-        initial_context: $('gateInitialContext').value.trim(),
         seed_fields: lineToList('gateSeed'),
         invariants: lineToList('gateInvariants'),
       };

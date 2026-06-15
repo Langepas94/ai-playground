@@ -742,10 +742,10 @@ async fn agents_manage(
             let payload = request
                 .agent
                 .ok_or_else(|| AppError::InvalidInput("Agent payload is required".to_string()))?;
-            let domain = payload.domain.clone().unwrap_or_default();
-            if domain.trim().is_empty() {
+            let project_info = payload.domain.clone().unwrap_or_default();
+            if project_info.trim().is_empty() {
                 return Err(AppError::InvalidInput(
-                    "Domain is required to build a schema".to_string(),
+                    "Project information is required to build a schema".to_string(),
                 )
                 .into());
             }
@@ -759,7 +759,7 @@ async fn agents_manage(
             )?;
             let seed = clean_lines(payload.seed_fields.clone().unwrap_or_default());
             let schema_domain = schema_domain_prompt(
-                domain.trim(),
+                project_info.trim(),
                 payload.initial_context.as_deref().unwrap_or_default(),
             );
             let fields = build_profile_schema(
