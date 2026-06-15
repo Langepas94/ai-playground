@@ -480,6 +480,51 @@ fn manually_saved_long_term_fact_uses_saved_agent_scope_across_dialogs() {
 }
 
 #[test]
+fn agent_initial_context_is_freeform_long_term_memory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalSessionStore::from_root(dir.path().join("sessions"));
+    let context = "Пиццерия в Волгограде для молодёжи. Название ВолгаПицца утверждено.";
+
+    persist_agent_initial_context(&store, "menu-agent", Some(context))
+        .expect("persist initial context");
+
+    let mut second_dialog_memory = AgentMemory::default();
+    store
+        .seed_long_term("agent:menu-agent", &mut second_dialog_memory)
+        .expect("seed long-term");
+
+    assert_eq!(
+        second_dialog_memory
+            .facts
+            .get("project_context")
+            .map(String::as_str),
+        Some(context)
+    );
+    assert_eq!(
+        second_dialog_memory.fact_layer("project_context"),
+        MemoryLayer::LongTerm
+    );
+}
+
+#[test]
+fn agent_initial_context_rejects_sensitive_values() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalSessionStore::from_root(dir.path().join("sessions"));
+
+    let error = persist_agent_initial_context(
+        &store,
+        "menu-agent",
+        Some("openai token sk-1234567890abcdef1234567890abcdef"),
+    )
+    .expect_err("sensitive context should be rejected");
+
+    assert!(
+        error.to_string().contains("looks sensitive"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn web_memory_config_maps_strategy_and_limits() {
     let config = WebMemoryConfig {
         strategy: Some("sticky-facts".to_string()),
@@ -1150,6 +1195,11 @@ fn web_ui_is_agent_centric() {
     assert!(INDEX_HTML.contains("function gateLoadModels()"));
     assert!(INDEX_HTML.contains("function gateProviderPayload()"));
     assert!(INDEX_HTML.contains("id=\"gateCustomModel\""));
+    assert!(INDEX_HTML.contains("id=\"gateInitialContext\""));
+    assert!(INDEX_HTML.contains("Стартовый контекст"));
+    assert!(INDEX_HTML.contains("initial_context: $('gateInitialContext').value.trim()"));
+    assert!(INDEX_HTML.contains("Что агент должен уточнить"));
+    assert!(!INDEX_HTML.contains("Обязательные поля профиля (по одному на строку"));
     // Stateful panes: profile (interview), task (stage FSM), invariants.
     assert!(INDEX_HTML.contains("data-tab=\"aprofile\""));
     assert!(INDEX_HTML.contains("data-tab=\"task\""));

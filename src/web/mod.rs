@@ -714,6 +714,11 @@ async fn agents_manage(
                 updated_at_unix: crate::chat::unix_now(),
             };
             state.sessions.save_agent(&saved)?;
+            persist_agent_initial_context(
+                &state.sessions,
+                &id,
+                payload.initial_context.as_deref(),
+            )?;
             // Persist the interview schema (long-term layer) if the UI sent one,
             // preserving any values already elicited for matching keys.
             if let Some(schema) = payload.profile_schema.clone() {
@@ -753,8 +758,18 @@ async fn agents_manage(
                 request.token_provider.as_deref(),
             )?;
             let seed = clean_lines(payload.seed_fields.clone().unwrap_or_default());
-            let fields =
-                build_profile_schema(&state.client, &profile, &token, domain.trim(), &seed).await?;
+            let schema_domain = schema_domain_prompt(
+                domain.trim(),
+                payload.initial_context.as_deref().unwrap_or_default(),
+            );
+            let fields = build_profile_schema(
+                &state.client,
+                &profile,
+                &token,
+                schema_domain.as_str(),
+                &seed,
+            )
+            .await?;
             response.profile = Some(AgentProfile {
                 fields,
                 updated_at_unix: crate::chat::unix_now(),
@@ -816,6 +831,48 @@ fn clean_lines(lines: Vec<String>) -> Vec<String> {
         .map(|line| line.trim().to_string())
         .filter(|line| !line.is_empty())
         .collect()
+}
+
+fn schema_domain_prompt(domain: &str, initial_context: &str) -> String {
+    let initial_context = initial_context.trim();
+    if initial_context.is_empty() {
+        domain.trim().to_string()
+    } else {
+        format!(
+            "{}\n\nAlready known project context:\n{}",
+            domain.trim(),
+            initial_context
+        )
+    }
+}
+
+fn persist_agent_initial_context(
+    sessions: &LocalSessionStore,
+    agent_id: &str,
+    initial_context: Option<&str>,
+) -> Result<(), AppError> {
+    let Some(initial_context) = initial_context
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    if crate::chat::memory::looks_sensitive(initial_context) {
+        return Err(AppError::InvalidInput(
+            "Initial agent context looks sensitive; do not save secrets in long-term memory"
+                .to_string(),
+        ));
+    }
+
+    let profile_key = format!("agent:{agent_id}");
+    let mut memory = AgentMemory::default();
+    sessions.seed_long_term(&profile_key, &mut memory)?;
+    memory.set_fact_in_layer(
+        "project_context".to_string(),
+        initial_context.to_string(),
+        MemoryLayer::LongTerm,
+    );
+    sessions.save_long_term(&profile_key, &memory)
 }
 
 /// Merge a freshly-built/edited schema into the stored profile, carrying over any
@@ -922,6 +979,9 @@ struct AgentPayload {
     /// Free-text domain description (drives the interview + on-domain injection).
     #[serde(default)]
     domain: Option<String>,
+    /// Free-form facts/context to save as durable agent memory at creation time.
+    #[serde(default)]
+    initial_context: Option<String>,
     /// Hard constraints checked against responses.
     #[serde(default)]
     invariants: Option<Vec<String>>,
