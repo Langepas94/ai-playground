@@ -675,6 +675,22 @@
     .stage-step.current { background: #3a5cc7; color: #fff; border-color: #3a5cc7; }
     .stage-step.passed { background: #dcfce7; color: #166534; border-color: #bbf7d0; }
     .violation-item { color: #b91c1c; font-weight: 600; }
+    .dialogs-bar {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      padding: 8px 0 4px; border-top: 1px solid #eef0f4; margin-top: 6px;
+    }
+    .dialogs-label { font-size: 12px; color: #64748b; font-weight: 600; }
+    .dialogs-list { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; }
+    .dialog-chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12px; padding: 4px 10px; border-radius: 999px;
+      background: #f1f5f9; color: #334155; border: 1px solid #e2e8f0; cursor: pointer;
+      max-width: 220px;
+    }
+    .dialog-chip .dc-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 170px; }
+    .dialog-chip.active { background: #3a5cc7; color: #fff; border-color: #3a5cc7; }
+    .dialog-chip .dc-del { opacity: 0.6; font-weight: 700; }
+    .dialog-chip .dc-del:hover { opacity: 1; }
     .debug-doc-row {
       display: flex;
       align-items: center;
@@ -887,6 +903,11 @@
             <span>История<strong id="historyLabel">0 сообщений</strong></span>
             <span>Хранилище<strong id="storageLabel">—</strong></span>
           </div>
+        </div>
+        <div id="dialogsBar" class="dialogs-bar" style="display:none">
+          <span class="dialogs-label">Чаты:</span>
+          <div id="dialogsList" class="dialogs-list"></div>
+          <button id="dialogNew" class="secondary icon-btn" type="button" title="Новый чат у этого агента">+ чат</button>
         </div>
         <div id="conversation" class="conversation" aria-live="polite">
           <p class="conversation-empty">Ответ появится здесь.</p>
@@ -1502,11 +1523,13 @@
     }
 
     function sessionCacheKey() {
-      return `ai_chat_session:${$('agentMode').value}:${currentProvider()}:${selectedModel()}`;
+      const scope = activeAgentId ? `agent:${activeAgentId}` : `${$('agentMode').value}:${currentProvider()}:${selectedModel()}`;
+      return `ai_chat_session:${scope}`;
     }
 
     function branchCacheKey() {
-      return `ai_chat_branches:${$('agentMode').value}:${currentProvider()}:${selectedModel()}`;
+      const scope = activeAgentId ? `agent:${activeAgentId}` : `${$('agentMode').value}:${currentProvider()}:${selectedModel()}`;
+      return `ai_chat_branches:${scope}`;
     }
 
     function selectedAgent() {
@@ -1700,7 +1723,8 @@
         provider: currentProvider(),
         model: selectedModel(),
         session_id: newSession ? null : localStorage.getItem(sessionCacheKey()),
-        new_session: newSession
+        new_session: newSession,
+        saved_agent_id: activeAgentId || null,
       };
     }
 
@@ -1843,6 +1867,7 @@
       $('agentGate').style.display = 'grid';
       $('workspace').style.display = 'none';
       $('activeAgentBar').style.display = 'none';
+      $('dialogsBar').style.display = 'none';
       refreshGateList();
     }
 
@@ -2074,6 +2099,7 @@
         renderChatHistory();
         await loadChatSession();
         $('systemPrompt').value = agent.system_prompt || '';
+        await refreshDialogs();
       } catch (error) {
         $('gateListStatus').textContent = 'Ошибка входа: ' + error.message;
       }
@@ -2087,6 +2113,84 @@
         renderProfilePane(data.profile);
         renderTaskPane(data.task);
       } catch (_) { /* non-fatal */ }
+    }
+
+    // ---- Dialogs (chats) of the active agent ----------------------------
+    async function refreshDialogs() {
+      const bar = $('dialogsBar');
+      if (!activeAgentId) { bar.style.display = 'none'; return; }
+      bar.style.display = 'flex';
+      try {
+        const data = await agentsManage({ action: 'dialogs', id: activeAgentId });
+        renderDialogs(data.dialogs || []);
+      } catch (_) { /* non-fatal */ }
+    }
+
+    function renderDialogs(dialogs) {
+      const list = $('dialogsList');
+      if (!dialogs.length) {
+        list.innerHTML = '<span class="dialogs-label">пока один чат</span>';
+        return;
+      }
+      list.innerHTML = dialogs.map((d) => {
+        const active = d.id === chatSessionId ? ' active' : '';
+        const title = (d.title && d.title.trim()) || ('чат ' + d.id.slice(0, 6));
+        return `<span class="dialog-chip${active}" data-id="${escapeHtml(d.id)}" title="${escapeHtml(title)}">`
+          + `<span class="dc-title" data-act="switch">${escapeHtml(title)}</span>`
+          + `<span class="dc-del" data-act="del" title="Удалить чат">✕</span></span>`;
+      }).join('');
+      list.querySelectorAll('.dialog-chip').forEach((chip) => {
+        const id = chip.dataset.id;
+        chip.querySelector('[data-act="switch"]').addEventListener('click', () => switchDialog(id));
+        chip.querySelector('[data-act="del"]').addEventListener('click', (e) => { e.stopPropagation(); deleteDialog(id); });
+      });
+    }
+
+    async function switchDialog(sessionId) {
+      if (!sessionId || sessionId === chatSessionId) return;
+      resetBranches();
+      try {
+        const data = await requestJson('/api/agent/session', {
+          agent_id: $('agentMode').value,
+          provider: currentProvider(),
+          model: selectedModel(),
+          session_id: sessionId,
+          new_session: false,
+          saved_agent_id: activeAgentId || null,
+        });
+        chatSessionId = data.session_id || sessionId;
+        forceNewSession = false;
+        chatHistory = data.messages || [];
+        restoreSystemPromptFromHistory(chatHistory);
+        setSessionMetrics(data.metrics);
+        if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
+        renderChatHistory();
+        await refreshDialogs();
+      } catch (error) {
+        setStatus('Ошибка переключения чата: ' + error.message, true);
+      }
+    }
+
+    async function newDialog() {
+      if (!activeAgentId) return;
+      await startNewChatSession();
+      await refreshDialogs();
+    }
+
+    async function deleteDialog(sessionId) {
+      if (!activeAgentId || !sessionId) return;
+      try {
+        const data = await agentsManage({ action: 'dialog-delete', id: activeAgentId, session_id: sessionId });
+        const remaining = data.dialogs || [];
+        if (sessionId === chatSessionId) {
+          if (remaining.length) { await switchDialog(remaining[0].id); }
+          else { await startNewChatSession(); }
+        }
+        renderDialogs(remaining.length ? remaining : []);
+        await refreshDialogs();
+      } catch (error) {
+        setStatus('Ошибка удаления чата: ' + error.message, true);
+      }
     }
 
     async function deleteFromGate() {
@@ -2746,6 +2850,7 @@
                 setContextDebug(data.context_debug);
                 renderAgentState(data.agent_state);
                 refreshAgentPanes();
+                refreshDialogs();
                 setStatus('Готово');
               } else if (eventType === 'error') {
                 throw new Error(eventData);
@@ -2844,6 +2949,7 @@
         setContextDebug(data.context_debug);
         renderAgentState(data.agent_state);
         refreshAgentPanes();
+        refreshDialogs();
         setStatus('Готово');
         await refreshTokenStatus();
       } catch (error) {
@@ -2964,6 +3070,7 @@
     $('gateSchemaAdd').addEventListener('click', () => addSchemaRow());
     $('gateCreate').addEventListener('click', createAgentFromGate);
     $('invariantsSave').addEventListener('click', saveInvariants);
+    $('dialogNew').addEventListener('click', newDialog);
 
     $('memoryFactAdd').addEventListener('click', () => {
       const key = $('memoryLayerKey').value.trim();

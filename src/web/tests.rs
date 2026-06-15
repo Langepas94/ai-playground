@@ -850,6 +850,11 @@ fn web_ui_is_agent_centric() {
     assert!(INDEX_HTML.contains("function showGate()"));
     assert!(INDEX_HTML.contains("function renderAgentState(state)"));
     assert!(INDEX_HTML.contains("saved_agent_id: activeAgentId"));
+    // Multiple dialogs per agent: chat list + switch/new/delete.
+    assert!(INDEX_HTML.contains("id=\"dialogsBar\""));
+    assert!(INDEX_HTML.contains("'dialogs'"));
+    assert!(INDEX_HTML.contains("function switchDialog(sessionId)"));
+    assert!(INDEX_HTML.contains("'dialog-delete'"));
 }
 
 #[test]

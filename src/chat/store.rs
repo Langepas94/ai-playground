@@ -285,6 +285,52 @@ struct AgentsIndex {
     agents: Vec<AgentSummary>,
 }
 
+/// One chat (dialog) belonging to an agent. An agent can have many; they all
+/// share the agent's working + long-term memory but keep separate chat history.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DialogMeta {
+    #[serde(default)]
+    pub id: String,
+    /// Short label, derived from the first user message (or renamed by the user).
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub created_at_unix: u64,
+    #[serde(default)]
+    pub updated_at_unix: u64,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct DialogsIndex {
+    #[serde(default)]
+    dialogs: Vec<DialogMeta>,
+}
+
+/// Extract the agent id from a session key of the form `agent:<id>`.
+pub fn agent_id_from_key(session_key: &str) -> Option<&str> {
+    session_key
+        .strip_prefix("agent:")
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+}
+
+/// Derive a short dialog title from the first user message in a history.
+fn dialog_title_from_messages(messages: &[ChatMessage]) -> String {
+    let first = messages
+        .iter()
+        .find(|message| message.role == Role::User)
+        .map(|message| message.content.trim())
+        .unwrap_or_default();
+    let one_line = first.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX: usize = 48;
+    if one_line.chars().count() <= MAX {
+        one_line
+    } else {
+        let truncated: String = one_line.chars().take(MAX).collect();
+        format!("{truncated}…")
+    }
+}
+
 pub fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -478,6 +524,13 @@ impl LocalSessionStore {
                 format!("could not write session index: {error}"),
             )
         })?;
+        // For an agent's session, also register it in the agent's dialog index so
+        // the UI can list and switch between the agent's chats. Title is seeded
+        // from the first user message; later turns keep it.
+        if let Some(agent_id) = agent_id_from_key(profile_key) {
+            let title = dialog_title_from_messages(messages);
+            self.register_dialog(agent_id, session_id, &title)?;
+        }
         Ok(())
     }
 
@@ -617,10 +670,15 @@ impl LocalSessionStore {
     }
 
     pub fn delete_agent(&self, id: &str) -> Result<(), AppError> {
+        // Remove the agent's dialog chats (history/metrics/memory) first.
+        for dialog in self.list_dialogs(id)? {
+            let _ = self.delete_dialog(id, &dialog.id);
+        }
         for path in [
             self.agent_path(id),
             self.agent_task_path(id),
             self.agent_profile_path(id),
+            self.agent_dialogs_path(id),
         ] {
             if path.exists() {
                 fs::remove_file(&path)
@@ -661,6 +719,82 @@ impl LocalSessionStore {
 
     pub fn save_profile(&self, id: &str, profile: &AgentProfile) -> Result<(), AppError> {
         self.write_toon(&self.agent_profile_path(id), profile)
+    }
+
+    /// All dialogs (chats) of an agent, newest first.
+    pub fn list_dialogs(&self, agent_id: &str) -> Result<Vec<DialogMeta>, AppError> {
+        let index: DialogsIndex = self
+            .read_toon(&self.agent_dialogs_path(agent_id))?
+            .unwrap_or_default();
+        let mut dialogs = index.dialogs;
+        dialogs.sort_by(|left, right| right.updated_at_unix.cmp(&left.updated_at_unix));
+        Ok(dialogs)
+    }
+
+    /// Upsert a dialog into the agent's index and bump its `updated_at`. The title
+    /// is only set when empty (first message), so later turns don't overwrite it.
+    pub fn register_dialog(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        title: &str,
+    ) -> Result<(), AppError> {
+        let path = self.agent_dialogs_path(agent_id);
+        let mut index: DialogsIndex = self.read_toon(&path)?.unwrap_or_default();
+        let now = unix_now();
+        let title = title.trim();
+        if let Some(entry) = index.dialogs.iter_mut().find(|d| d.id == session_id) {
+            entry.updated_at_unix = now;
+            if entry.title.trim().is_empty() && !title.is_empty() {
+                entry.title = title.to_string();
+            }
+        } else {
+            index.dialogs.push(DialogMeta {
+                id: session_id.to_string(),
+                title: title.to_string(),
+                created_at_unix: now,
+                updated_at_unix: now,
+            });
+        }
+        self.write_toon(&path, &index)
+    }
+
+    pub fn rename_dialog(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        title: &str,
+    ) -> Result<(), AppError> {
+        let path = self.agent_dialogs_path(agent_id);
+        let mut index: DialogsIndex = self.read_toon(&path)?.unwrap_or_default();
+        if let Some(entry) = index.dialogs.iter_mut().find(|d| d.id == session_id) {
+            entry.title = title.trim().to_string();
+            entry.updated_at_unix = unix_now();
+        }
+        self.write_toon(&path, &index)
+    }
+
+    /// Remove a dialog: its session/metrics/memory files and its index entry.
+    pub fn delete_dialog(&self, agent_id: &str, session_id: &str) -> Result<(), AppError> {
+        for path in [
+            self.session_path(session_id),
+            self.metrics_path(session_id),
+            self.memory_path(session_id),
+        ] {
+            if path.exists() {
+                fs::remove_file(&path)
+                    .map_err(|error| config_error(path, format!("delete failed: {error}")))?;
+            }
+        }
+        let path = self.agent_dialogs_path(agent_id);
+        let mut index: DialogsIndex = self.read_toon(&path)?.unwrap_or_default();
+        index.dialogs.retain(|d| d.id != session_id);
+        self.write_toon(&path, &index)
+    }
+
+    fn agent_dialogs_path(&self, agent_id: &str) -> PathBuf {
+        self.sessions_dir()
+            .join(format!("agent-{}.dialogs.toon", safe_key(agent_id)))
     }
 
     fn agent_path(&self, id: &str) -> PathBuf {
@@ -1234,6 +1368,63 @@ mod tests {
         // Round-trips through its string form.
         assert_eq!("execution".parse(), Ok(TaskStage::Execution));
         assert_eq!(TaskStage::Validation.to_string(), "validation");
+    }
+
+    #[test]
+    fn agent_dialogs_roundtrip_and_auto_register() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalSessionStore::from_root(dir.path().join("sessions"));
+
+        assert_eq!(agent_id_from_key("agent:a1"), Some("a1"));
+        assert_eq!(agent_id_from_key("web:x:y:z"), None);
+
+        // save_session under an agent key auto-registers a dialog with a title
+        // derived from the first user message.
+        let messages = vec![
+            ChatMessage {
+                role: Role::User,
+                content: "Спланируй экран логина для приложения".to_string(),
+            },
+            ChatMessage {
+                role: Role::Assistant,
+                content: "ок".to_string(),
+            },
+        ];
+        store
+            .save_session("agent:a1", "sess-1", &messages)
+            .expect("save session");
+        store
+            .save_session("agent:a1", "sess-2", &[])
+            .expect("save empty session");
+
+        let dialogs = store.list_dialogs("a1").expect("list");
+        assert_eq!(dialogs.len(), 2);
+        let first = dialogs.iter().find(|d| d.id == "sess-1").expect("sess-1");
+        assert!(first.title.starts_with("Спланируй экран логина"));
+
+        store
+            .rename_dialog("a1", "sess-1", "Логин")
+            .expect("rename");
+        assert_eq!(
+            store
+                .list_dialogs("a1")
+                .unwrap()
+                .iter()
+                .find(|d| d.id == "sess-1")
+                .unwrap()
+                .title,
+            "Логин"
+        );
+
+        store.delete_dialog("a1", "sess-2").expect("delete");
+        let after = store.list_dialogs("a1").expect("list after delete");
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].id, "sess-1");
+        // Ad-hoc (non-agent) sessions are not registered as dialogs.
+        store
+            .save_session("web:local:openai:gpt", "sess-3", &messages)
+            .expect("save adhoc");
+        assert!(store.list_dialogs("other").unwrap().is_empty());
     }
 
     #[test]
