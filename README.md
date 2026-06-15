@@ -100,13 +100,21 @@ Web UI использует те же provider-клиенты и тот же key
 
 Начиная с 1.0, основной экран отдает большую часть места диалогу. Справа находится inspector с вкладками `Профиль`, `Параметры`, `Метрики` и `Debug`.
 
-![Web UI](docs/assets/web-chat-inspector-profile.png)
+В текущем UI слева находятся история, поле ввода, кнопка вложений `📎`, `Отправить`, `Стоп`, `Новая сессия` и переключатель `Стримить по чанкам`. Справа во вкладке `Профиль` доступны agent mode, provider, model, live model list, context badge, token status, base URL и custom model id.
 
-В форме доступны provider, base_url, модель, prompt, загрузка списка моделей и параметры ответа. Для системной инструкции используйте поле `system_prompt`. Поля `format_instruction` и `completion_instruction` тоже уходят как system messages, но предназначены для формата ответа и правил завершения.
+Во вкладке `Параметры` находятся `system_prompt`, стратегии контекста (`Summary`, `Sliding Window`, `Sticky Facts`, `Branching`, `Scoped Branches`), pricing overrides, Billing API, token limits, sampling и extra API parameters. Поля `format_instruction` и `completion_instruction` уходят как system messages, но предназначены для формата ответа и правил завершения.
 
-Вкладка `Метрики` разделяет статистику последнего запроса и накопленную статистику диалога. Если provider возвращает подробный usage, UI показывает `prompt`, `completion`, `reasoning`, cache breakdown, visible output и total.
+Вкладка `Метрики` разделяет три уровня:
 
-Подробный how-to со скриншотами: `docs/web-ui.md`.
+- последний запрос;
+- служебный контекстный вызов (`summary`/facts/topic routing), если он был;
+- накопленную статистику текущего диалога.
+
+Если provider возвращает подробный usage, UI показывает `prompt`, `completion`, `reasoning`, cache breakdown, visible output, prediction tokens и total.
+
+PNG-скриншоты в `docs/assets/` сейчас исторические и относятся к раннему layout 1.0. Актуальное описание интерфейса держим в тексте, пока не будет переснят UI в среде с доступом к локальному браузеру.
+
+Подробный how-to: `docs/web-ui.md`.
 
 ## Параметры ответа
 
