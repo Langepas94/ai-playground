@@ -25,32 +25,42 @@
 | `POST` | `/api/chat/session` | Открыть или создать web chat session |
 | `POST` | `/api/chat` | Отправить prompt через `ChatAgent` |
 | `POST` | `/api/memory/update` | Ручное управление слоями памяти (set/delete/clear-layer), без provider-запроса |
-| `POST` | `/api/agents/manage` | CRUD именованных агентов (list/load/save/delete/save-task/save-knowledge) |
+| `POST` | `/api/agents/manage` | Stateful-агенты (list/load/save/delete/build-schema) |
 
 `/api/agent/*` сохранены как совместимые aliases для chat session/chat.
 
-## Именованные агенты (вкладка «Агент»)
+## Агенто-центричный UI + stateful-агенты
 
-Отдельная inspector-вкладка `Агент` (`data-tab="agent"`). Агент — это персистентная
-сущность: создаёшь, заходишь («Войти»), и он помнит свои настройки и 3 слоя памяти.
+Весь UI работает от агента. Пока агент не выбран — виден только **agent gate**
+(`#agentGate`): список агентов (Войти/Удалить) + создание (имя, provider/model,
+домен, обязательные поля, инварианты, «Сгенерировать интервью»). Чат/настройки/debug
+(`#workspace`) скрыты. Войдя — слева сверху всегда виден активный агент + стадия
+(`#activeAgentBar`) и кнопка «Сменить агента». Активный id — в localStorage
+(`ai_active_agent`); при загрузке агент авто-восстанавливается, иначе показывается gate.
 
-- **краткосрочная** — диалог чата (session store), `session_key = "agent:<id>"`.
-- **рабочая** — `TaskContext` (title/goal/status/steps/notes), редактор в UI.
-- **долговременная** — `KnowledgeDoc` (текст знаний/профиль/решения), хранится в
-  проектном TOON-store (не `.md`).
+Память агента заполняется **самим агентом**, не вручную:
+- **долговременная** — `AgentProfile` (схема интервью + значения). Агент сам
+  спрашивает недостающие поля и заполняет их из диалога. Вкладка `Профиль`.
+- **рабочая** — `TaskContext` со стадией FSM (`clarify→planning→execution→
+  validation→done`), ведётся автоматически, общая для всех сессий агента. Вкладка
+  `Задача` (бейдж стадии + флоу + план, read-only).
+- **инварианты** — редактируемый список (вкладка `Инварианты`), проверяются по ответу.
+- **краткосрочная** — диалог чата, `session_key = "agent:<id>"`.
 
-`POST /api/agents/manage` (`agents_manage` handler, action-dispatch как
-`memory_update`): `list` / `load` / `save` (upsert, id генерится при создании) /
-`delete` / `save-task` / `save-knowledge`. Хранение — `LocalSessionStore`:
-`agent-<id>.agent.toon`, `agent-<id>.task.toon`, `agent-<id>.knowledge.toon`,
-индекс `agents-index.toon`. Токен НЕ хранится в агенте (остаётся в keyring —
-инвариант config/secrets раздельно).
+`POST /api/agents/manage` (`agents_manage`, action-dispatch): `list` / `load`
+(agent+task+profile) / `save` (upsert + домен/инварианты + схема профиля с переносом
+значений) / `delete` / `build-schema` (LLM-генерация интервью из домена; нужен
+provider+token). Хранение — `LocalSessionStore`: `agent-<id>.agent.toon`,
+`*.task.toon`, `*.profile.toon`, индекс `agents-index.toon`. Токен НЕ хранится в
+агенте (keyring — инвариант config/secrets раздельно).
 
-При чате с активным агентом запрос несёт `saved_agent_id`; сервер биндит сессию
-к `agent:<id>`, грузит TaskContext + KnowledgeDoc и инъектит их в provider request
-блоками `[memory:working]` / `[memory:long-term]` (`ChatAgent::set_working_context`
-/ `set_knowledge`). «Войти» восстанавливает provider/model/system prompt/memory и
-оба редактора; активный id — в localStorage (`ai_active_agent`).
+Чат с активным агентом несёт `saved_agent_id`; сервер биндит сессию к `agent:<id>`,
+грузит profile/task/invariants/domain и инъектит блоками `[agent:domain]` /
+`[memory:long-term]` / `[memory:working]` / `[invariants]`. После ответа —
+`ChatAgent::stateful_postprocess` (заполнить профиль, продвинуть стадию по FSM,
+проверить инварианты), persist task+profile, и `agent_state` в ответе
+(`StatefulDebugView`: стадия, pending-вопросы, переход, нарушения) рендерится в UI
+(стадия в хедере, нарушения во вкладке Инварианты).
 
 ## Управление и дебаг памяти (memory layers)
 

@@ -19,9 +19,9 @@ use tokio::time::{Duration, sleep};
 use crate::{
     chat::memory::{MemoryConfig, MemoryLayer, MemoryStrategy},
     chat::{
-        AgentMemory, AgentSummary, ChatAgent, KnowledgeDoc, LocalSessionStore, SavedAgent,
-        SavedMemoryConfig, TaskContext, add_request_metrics, available_agents, selected_agent,
-        web_session_key,
+        AgentMemory, AgentProfile, AgentSummary, ChatAgent, LocalSessionStore, ProfileField,
+        SavedAgent, SavedMemoryConfig, StatefulReport, TaskContext, add_request_metrics,
+        available_agents, build_profile_schema, selected_agent, web_session_key,
     },
     config::ProfileConfig,
     errors::AppError,
@@ -286,9 +286,27 @@ async fn chat(
         request.saved_agent_id.as_deref(),
         &mut agent,
     )?;
-    let (response, provider_debug, context_metrics) = agent
-        .respond_with_debug_and_context_metrics(&state.client, prompt)
+    let (response, provider_debug, mut context_metrics) = agent
+        .respond_with_debug_and_context_metrics(&state.client, prompt.clone())
         .await?;
+    // Stateful post-processing: fill profile, advance task stage, check invariants.
+    let (agent_state, stateful_metrics) = run_and_persist_stateful(
+        &state.sessions,
+        request.saved_agent_id.as_deref(),
+        &mut agent,
+        &state.client,
+        &prompt,
+        &response.text,
+    )
+    .await;
+    let mut response = response;
+    if let Some(metrics) = &stateful_metrics {
+        response.metrics = add_request_metrics(&response.metrics, metrics);
+        context_metrics = Some(match context_metrics {
+            Some(current) => add_request_metrics(&current, metrics),
+            None => metrics.clone(),
+        });
+    }
     let session_metrics = add_request_metrics(&session.metrics, &response.metrics);
     state
         .sessions
@@ -314,6 +332,7 @@ async fn chat(
             provider_request: provider_debug.request,
             provider_response: provider_debug.response,
         },
+        agent_state,
     }))
 }
 
@@ -427,6 +446,7 @@ async fn chat_stream(
     let context_metrics = prepared_stream.context_metrics;
     let client = state.client.clone();
     let sessions = state.sessions.clone();
+    let saved_agent_id = request.saved_agent_id.clone();
 
     tokio::spawn(async move {
         let tx_token = tx.clone();
@@ -438,14 +458,31 @@ async fn chat_stream(
         match result {
             Ok((response, provider_debug)) => {
                 let assistant_text = response.text.clone();
+                agent.record_stream_response(prompt.clone(), assistant_text.clone());
+                // Stateful post-processing on the completed turn.
+                let (agent_state, stateful_metrics) = run_and_persist_stateful(
+                    &sessions,
+                    saved_agent_id.as_deref(),
+                    &mut agent,
+                    &client,
+                    &prompt,
+                    &assistant_text,
+                )
+                .await;
                 let mut response_metrics = response.metrics.clone();
-                let context_metrics = context_metrics.clone();
+                let mut context_metrics = context_metrics.clone();
                 if let Some(context_metrics) = &context_metrics {
                     response_metrics = add_request_metrics(&response_metrics, context_metrics);
                 }
+                if let Some(metrics) = &stateful_metrics {
+                    response_metrics = add_request_metrics(&response_metrics, metrics);
+                    context_metrics = Some(match context_metrics {
+                        Some(current) => add_request_metrics(&current, metrics),
+                        None => metrics.clone(),
+                    });
+                }
                 let session_metrics =
                     add_request_metrics(&session_metrics_before, &response_metrics);
-                agent.record_stream_response(prompt, assistant_text);
                 let _ = sessions.save_session(&session_key, &session_id, agent.history());
                 let _ = sessions.save_metrics(&session_id, &session_metrics);
                 let _ = sessions.save_memory(&session_id, agent.memory());
@@ -464,6 +501,7 @@ async fn chat_stream(
                         provider_request: provider_debug.request,
                         provider_response: provider_debug.response,
                     },
+                    "agent_state": agent_state,
                 });
                 let _ = tx.send(format!("\x00DONE\x00{done_event}"));
                 drop(tx);
@@ -537,18 +575,68 @@ fn effective_session_key(saved_agent_id: Option<&str>, fallback: &str) -> String
     }
 }
 
-/// Load the saved agent's explicit memory layers (TaskContext + knowledge doc)
-/// and attach them to the agent so they are injected into the next request.
+/// Load the saved agent's stateful layers (task + stage, profile, invariants,
+/// domain) and attach them so they are injected into the next request and so the
+/// stateful post-processing can mutate + persist them.
 fn apply_saved_agent_memory(
     store: &LocalSessionStore,
     saved_agent_id: Option<&str>,
     agent: &mut ChatAgent,
 ) -> Result<(), AppError> {
     if let Some(id) = saved_agent_id.and_then(blank_str_to_none) {
-        agent.set_working_context(Some(store.load_task(id)?));
-        agent.set_knowledge(Some(store.load_knowledge(id)?.content));
+        agent.set_task_state(Some(store.load_task(id)?));
+        agent.set_agent_profile(Some(store.load_profile(id)?));
+        if let Some(saved) = store.load_agent(id)? {
+            agent.set_invariants(saved.invariants);
+            agent.set_domain(saved.domain);
+        }
     }
     Ok(())
+}
+
+/// After a turn, run the agent's stateful post-processing and persist any changes
+/// to its working (task + stage) and long-term (profile) layers. Returns a debug
+/// view of what happened, plus the auxiliary token metrics.
+async fn run_and_persist_stateful(
+    store: &LocalSessionStore,
+    saved_agent_id: Option<&str>,
+    agent: &mut ChatAgent,
+    client: &dyn crate::providers::ProviderClient,
+    user_prompt: &str,
+    answer: &str,
+) -> (
+    Option<StatefulDebugView>,
+    Option<crate::providers::RequestMetrics>,
+) {
+    let Some(id) = saved_agent_id.and_then(blank_str_to_none) else {
+        return (None, None);
+    };
+    let report = agent
+        .stateful_postprocess(client, user_prompt, answer)
+        .await;
+    if let Some(task) = agent.task_state() {
+        let _ = store.save_task(id, task);
+    }
+    if let Some(profile) = agent.agent_profile() {
+        let _ = store.save_profile(id, profile);
+    }
+    let metrics = report.metrics.clone();
+    (Some(stateful_debug_view(&report)), metrics)
+}
+
+fn stateful_debug_view(report: &StatefulReport) -> StatefulDebugView {
+    StatefulDebugView {
+        stage: report.stage.map(|stage| stage.to_string()),
+        pending_questions: report.pending_questions.clone(),
+        violations: report.violations.clone(),
+        stage_transition: report
+            .stage_transition
+            .map(|transition| StageTransitionView {
+                from: transition.from.to_string(),
+                to: transition.to.to_string(),
+                accepted: transition.accepted,
+            }),
+    }
 }
 
 async fn agents_manage(
@@ -568,7 +656,7 @@ async fn agents_manage(
                 .ok_or_else(|| AppError::InvalidInput(format!("Unknown agent: {id}")))?;
             response.agent = Some(agent);
             response.task = Some(state.sessions.load_task(&id)?);
-            response.knowledge = Some(state.sessions.load_knowledge(&id)?);
+            response.profile = Some(state.sessions.load_profile(&id)?);
         }
         "save" => {
             let payload = request
@@ -591,14 +679,38 @@ async fn agents_manage(
                 id: id.clone(),
                 name: payload.name.trim().to_string(),
                 provider: payload.provider.trim().to_string(),
-                base_url: payload.base_url.unwrap_or_default().trim().to_string(),
+                base_url: payload
+                    .base_url
+                    .clone()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
                 model: payload.model.trim().to_string(),
-                system_prompt: payload.system_prompt.unwrap_or_default(),
-                memory: saved_memory_from_web(payload.memory.unwrap_or_default()),
+                system_prompt: payload.system_prompt.clone().unwrap_or_default(),
+                domain: payload
+                    .domain
+                    .clone()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+                invariants: clean_lines(payload.invariants.clone().unwrap_or_default()),
+                memory: saved_memory_from_web(payload.memory.clone().unwrap_or_default()),
                 created_at_unix,
                 updated_at_unix: crate::chat::unix_now(),
             };
             state.sessions.save_agent(&saved)?;
+            // Persist the interview schema (long-term layer) if the UI sent one,
+            // preserving any values already elicited for matching keys.
+            if let Some(schema) = payload.profile_schema.clone() {
+                let mut profile = state.sessions.load_profile(&id)?;
+                profile.fields = merge_profile_schema(profile.fields, schema);
+                profile.updated_at_unix = crate::chat::unix_now();
+                state.sessions.save_profile(&id, &profile)?;
+                response.profile = Some(profile);
+            } else {
+                response.profile = Some(state.sessions.load_profile(&id)?);
+            }
+            response.task = Some(state.sessions.load_task(&id)?);
             response.agent = Some(saved);
         }
         "delete" => {
@@ -606,26 +718,87 @@ async fn agents_manage(
             state.sessions.delete_agent(&id)?;
             response.agents = state.sessions.list_agents()?;
         }
-        "save-task" => {
-            let id = require_agent_id(request.id.as_deref())?;
-            let task = request.task.unwrap_or_default().into_task();
-            state.sessions.save_task(&id, &task)?;
-            response.task = Some(task);
-        }
-        "save-knowledge" => {
-            let id = require_agent_id(request.id.as_deref())?;
-            let doc = KnowledgeDoc {
-                content: request.knowledge.unwrap_or_default(),
+        "build-schema" => {
+            let payload = request
+                .agent
+                .ok_or_else(|| AppError::InvalidInput("Agent payload is required".to_string()))?;
+            let domain = payload.domain.clone().unwrap_or_default();
+            if domain.trim().is_empty() {
+                return Err(AppError::InvalidInput(
+                    "Domain is required to build a schema".to_string(),
+                )
+                .into());
+            }
+            let profile = payload_profile(&payload)?;
+            validate_base_url(&profile.provider.to_string(), &profile.base_url)?;
+            let token = resolve_web_token(
+                state.secrets.as_ref(),
+                &profile,
+                request.token.as_deref().unwrap_or_default(),
+                request.token_provider.as_deref(),
+            )?;
+            let seed = clean_lines(payload.seed_fields.clone().unwrap_or_default());
+            let fields =
+                build_profile_schema(&state.client, &profile, &token, domain.trim(), &seed).await?;
+            response.profile = Some(AgentProfile {
+                fields,
                 updated_at_unix: crate::chat::unix_now(),
-            };
-            state.sessions.save_knowledge(&id, &doc)?;
-            response.knowledge = Some(doc);
+            });
         }
         other => {
             return Err(AppError::InvalidInput(format!("Unknown agent action: {other}")).into());
         }
     }
     Ok(Json(response))
+}
+
+/// Build a `ProfileConfig` from an agent payload (for the schema-builder call).
+fn payload_profile(payload: &AgentPayload) -> Result<ProfileConfig, AppError> {
+    let provider = parse_provider(&payload.provider)?;
+    if payload.model.trim().is_empty() {
+        return Err(AppError::InvalidInput("Model is required".to_string()));
+    }
+    Ok(ProfileConfig {
+        provider,
+        model: payload.model.trim().to_string(),
+        base_url: payload.base_url.clone().unwrap_or_default(),
+        token_ref: String::new(),
+    })
+}
+
+/// Trim, drop blanks, from a list of free-text lines (invariants / seed fields).
+fn clean_lines(lines: Vec<String>) -> Vec<String> {
+    lines
+        .into_iter()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+/// Merge a freshly-built/edited schema into the stored profile, carrying over any
+/// already-elicited values for keys that survive.
+fn merge_profile_schema(
+    existing: Vec<ProfileField>,
+    schema: Vec<ProfileFieldPayload>,
+) -> Vec<ProfileField> {
+    schema
+        .into_iter()
+        .filter(|field| !field.key.trim().is_empty())
+        .map(|field| {
+            let key = field.key.trim().to_string();
+            let value = existing
+                .iter()
+                .find(|old| old.key == key)
+                .map(|old| old.value.clone())
+                .unwrap_or_default();
+            ProfileField {
+                key,
+                question: field.question.trim().to_string(),
+                required: field.required,
+                value,
+            }
+        })
+        .collect()
 }
 
 fn require_agent_id(id: Option<&str>) -> Result<String, AppError> {
@@ -677,10 +850,11 @@ struct AgentsManageRequest {
     id: Option<String>,
     #[serde(default)]
     agent: Option<AgentPayload>,
+    /// Token override + its provider, used by `build-schema` (mirrors chat).
     #[serde(default)]
-    task: Option<TaskPayload>,
+    token: Option<String>,
     #[serde(default)]
-    knowledge: Option<String>,
+    token_provider: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -697,39 +871,30 @@ struct AgentPayload {
     model: String,
     #[serde(default)]
     system_prompt: Option<String>,
+    /// Free-text domain description (drives the interview + on-domain injection).
+    #[serde(default)]
+    domain: Option<String>,
+    /// Hard constraints checked against responses.
+    #[serde(default)]
+    invariants: Option<Vec<String>>,
+    /// Required field names the user wants the agent to elicit (schema seed).
+    #[serde(default)]
+    seed_fields: Option<Vec<String>>,
+    /// Interview schema (optionally edited by the user) to persist on save.
+    #[serde(default)]
+    profile_schema: Option<Vec<ProfileFieldPayload>>,
     #[serde(default)]
     memory: Option<WebMemoryConfig>,
 }
 
-#[derive(Debug, Default, Deserialize)]
-struct TaskPayload {
+#[derive(Debug, Clone, Deserialize)]
+struct ProfileFieldPayload {
     #[serde(default)]
-    title: String,
+    key: String,
     #[serde(default)]
-    goal: String,
+    question: String,
     #[serde(default)]
-    status: String,
-    #[serde(default)]
-    steps: Vec<String>,
-    #[serde(default)]
-    notes: String,
-}
-
-impl TaskPayload {
-    fn into_task(self) -> TaskContext {
-        TaskContext {
-            title: self.title,
-            goal: self.goal,
-            status: self.status,
-            steps: self
-                .steps
-                .into_iter()
-                .map(|step| step.trim().to_string())
-                .filter(|step| !step.is_empty())
-                .collect(),
-            notes: self.notes,
-        }
-    }
+    required: bool,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -737,7 +902,7 @@ struct AgentsManageResponse {
     agents: Vec<AgentSummary>,
     agent: Option<SavedAgent>,
     task: Option<TaskContext>,
-    knowledge: Option<KnowledgeDoc>,
+    profile: Option<AgentProfile>,
 }
 
 async fn memory_update(
@@ -1235,6 +1400,8 @@ struct ChatWebResponse {
     messages: Vec<ChatMessage>,
     context_debug: ContextDebugView,
     debug: ChatDebugView,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_state: Option<StatefulDebugView>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1296,6 +1463,23 @@ struct ScopedTopicDebugView {
 struct ChatDebugView {
     provider_request: HttpDebugRequest,
     provider_response: HttpDebugResponse,
+}
+
+/// Stateful-agent view: current task stage, pending interview questions, the
+/// stage transition decided this turn, and any invariant violations.
+#[derive(Debug, Clone, Default, Serialize)]
+struct StatefulDebugView {
+    stage: Option<String>,
+    pending_questions: Vec<String>,
+    violations: Vec<String>,
+    stage_transition: Option<StageTransitionView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct StageTransitionView {
+    from: String,
+    to: String,
+    accepted: bool,
 }
 
 fn build_context_debug(

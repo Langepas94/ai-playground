@@ -637,6 +637,44 @@
       font-weight: 600;
       color: #3a5cc7;
     }
+    .brand { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+    .active-agent-bar { display: flex; align-items: center; gap: 10px; }
+    .active-agent-chip {
+      font-size: 13px; font-weight: 600; color: #1f2d4d;
+      background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 999px;
+      padding: 4px 12px;
+    }
+    .active-agent-chip .topic-chip { margin-left: 6px; }
+    .agent-gate {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 20px;
+      align-items: start; padding: 24px; max-width: 1100px; margin: 0 auto;
+    }
+    .gate-card {
+      background: #fff; border: 1px solid #e2e8f0; border-radius: 14px;
+      padding: 20px; display: flex; flex-direction: column; gap: 10px;
+    }
+    .gate-card h2 { margin: 0 0 4px; }
+    @media (max-width: 880px) { .agent-gate { grid-template-columns: 1fr; } }
+    .profile-fields { display: flex; flex-direction: column; gap: 8px; }
+    .profile-field {
+      display: flex; justify-content: space-between; gap: 10px;
+      border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px 10px; font-size: 13px;
+    }
+    .profile-field.missing { border-color: #f0c36d; background: #fffbf0; }
+    .profile-field .pf-key { font-weight: 600; color: #3a5cc7; }
+    .profile-field .pf-val { color: #1f2d4d; text-align: right; }
+    .readonly-box {
+      border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px 10px;
+      background: #f8fafc; font-size: 13px; white-space: pre-wrap; min-height: 18px;
+    }
+    .stage-flow { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+    .stage-step {
+      font-size: 12px; padding: 3px 9px; border-radius: 999px;
+      background: #f1f5f9; color: #64748b; border: 1px solid #e2e8f0;
+    }
+    .stage-step.current { background: #3a5cc7; color: #fff; border-color: #3a5cc7; }
+    .stage-step.passed { background: #dcfce7; color: #166534; border-color: #bbf7d0; }
+    .violation-item { color: #b91c1c; font-weight: 600; }
     .debug-doc-row {
       display: flex;
       align-items: center;
@@ -795,11 +833,52 @@
 <body>
   <main>
     <header>
-      <h1>ai playground</h1>
+      <div class="brand">
+        <h1>ai playground</h1>
+        <div id="activeAgentBar" class="active-agent-bar" style="display:none">
+          <span class="active-agent-chip">🤖 <strong id="activeAgentName">—</strong> <span id="activeAgentStage" class="topic-chip">clarify</span></span>
+          <button id="switchAgent" class="secondary icon-btn" type="button" title="Сменить агента">Сменить агента</button>
+        </div>
+      </div>
       <div id="status" class="status">Готово</div>
     </header>
 
-    <div class="layout">
+    <div id="agentGate" class="agent-gate">
+      <div class="gate-card">
+        <h2>Войти в агента</h2>
+        <div class="field-help">Агент — отдельная сущность: помнит provider/model, профиль (интервью), задачу со стадией и инварианты. Выбери существующего или создай нового — без агента рабочее пространство закрыто.</div>
+        <label>Сохранённые агенты<select id="gateAgentList" size="6"><option value="">— пока нет —</option></select></label>
+        <div class="actions">
+          <button id="gateEnter" type="button">Войти</button>
+          <button id="gateDelete" class="secondary" type="button">Удалить</button>
+        </div>
+        <div id="gateListStatus" class="field-help"></div>
+      </div>
+      <div class="gate-card">
+        <h2>Создать агента</h2>
+        <label>Имя<input id="gateName" spellcheck="false" placeholder="напр. Android-ассистент"></label>
+        <label>Provider<select id="gateProvider"></select></label>
+        <label>Model<input id="gateModel" spellcheck="false" placeholder="напр. gpt-4.1-mini"></label>
+        <label>Base URL<input id="gateBaseUrl" spellcheck="false" placeholder="оставь пустым для дефолта провайдера"></label>
+        <label>Домен — чем агент занимается<textarea id="gateDomain" rows="3" placeholder="напр. помощник Android-разработчика: Kotlin, Compose, MVI"></textarea></label>
+        <label>Обязательные поля профиля (по одному на строку, опционально)<textarea id="gateSeed" rows="2" placeholder="стек&#10;размер команды&#10;уровень"></textarea></label>
+        <label>Инварианты — жёсткие ограничения (по одному на строку)<textarea id="gateInvariants" rows="3" placeholder="только Kotlin&#10;архитектура только MVI&#10;никаких платных API"></textarea></label>
+        <div class="actions">
+          <button id="gateBuildSchema" class="secondary" type="button">Сгенерировать интервью</button>
+        </div>
+        <div id="gateSchemaWrap" style="display:none">
+          <div class="field-help">Вопросы интервью — агент сам спросит юзера и заполнит. Можно править/удалять.</div>
+          <div id="gateSchema"></div>
+          <button id="gateSchemaAdd" class="secondary icon-btn" type="button">+ поле</button>
+        </div>
+        <div class="actions">
+          <button id="gateCreate" type="button">Создать и войти</button>
+        </div>
+        <div id="gateCreateStatus" class="field-help"></div>
+      </div>
+    </div>
+
+    <div class="layout" id="workspace" style="display:none">
       <section class="prompt">
         <div class="chat-header">
           <h2>Диалог</h2>
@@ -836,8 +915,10 @@
 
       <section class="controls">
         <div class="inspector-tabs" role="tablist" aria-label="Inspector">
-          <button class="tab-button active" type="button" data-tab="profile">Профиль</button>
-          <button class="tab-button" type="button" data-tab="agent">Агент</button>
+          <button class="tab-button active" type="button" data-tab="profile">Модель</button>
+          <button class="tab-button" type="button" data-tab="aprofile">Профиль</button>
+          <button class="tab-button" type="button" data-tab="task">Задача</button>
+          <button class="tab-button" type="button" data-tab="invariants">Инварианты</button>
           <button class="tab-button" type="button" data-tab="params">Параметры</button>
           <button class="tab-button" type="button" data-tab="metrics">Метрики</button>
           <button class="tab-button" type="button" data-tab="debug">Debug</button>
@@ -869,45 +950,47 @@
           </div>
         </div>
 
-        <div id="tab-agent" class="inspector-pane">
+        <div id="tab-aprofile" class="inspector-pane">
           <div class="group">
-            <h2>Агент <span id="activeAgentBadge" class="context-badge">не выбран</span></h2>
+            <h2>🟢 Профиль (долговременная память)</h2>
             <div class="field-help">
-              Отдельный именованный агент: создаёшь, заходишь — он помнит provider/model/system prompt/memory и две явные памяти:
-              рабочую (TaskContext — данные текущей задачи) и долговременную (знания/профиль/решения). Краткосрочная — это сам диалог чата.
+              Агент сам интервьюирует юзера по этим полям и заполняет их из диалога. Идёт в каждый запрос блоком <code>[memory:long-term]</code>. Значения проставляет агент — вручную трогать не нужно.
             </div>
-            <label>Сохранённые агенты<select id="agentList"><option value="">— нет —</option></select></label>
-            <div class="actions">
-              <button id="agentEnter" class="secondary" type="button">Войти</button>
-              <button id="agentDelete" class="secondary" type="button">Удалить</button>
-            </div>
-            <label>Имя нового/текущего агента<input id="agentName" spellcheck="false" placeholder="напр. Rust-ревьюер"></label>
-            <div class="actions">
-              <button id="agentSave" type="button">Сохранить агента (текущие настройки)</button>
-            </div>
-            <div id="agentStatus" class="field-help"></div>
+            <div id="profileFields" class="profile-fields">Войди в агента, чтобы увидеть профиль.</div>
+            <div id="profilePending" class="field-help"></div>
           </div>
+        </div>
+
+        <div id="tab-task" class="inspector-pane">
           <div class="group">
-            <h2>🔵 Рабочая память — TaskContext</h2>
-            <div class="field-help">Данные текущей задачи. Идут в каждый запрос блоком <code>[memory:working]</code>.</div>
-            <label>Задача (title)<input id="taskTitle" spellcheck="false"></label>
-            <label>Цель (goal)<input id="taskGoal" spellcheck="false"></label>
-            <label>Статус<input id="taskStatus" spellcheck="false" placeholder="напр. active / blocked / done"></label>
-            <label>Шаги (по одному на строку)<textarea id="taskSteps" rows="3"></textarea></label>
-            <label>Заметки<textarea id="taskNotes" rows="2"></textarea></label>
-            <div class="actions">
-              <button id="taskSave" class="secondary" type="button">Сохранить TaskContext</button>
+            <h2>🔵 Задача (рабочая память)</h2>
+            <div class="field-help">
+              Стадия задачи ведётся автоматически (state machine) и общая для всех диалогов агента. Идёт в каждый запрос блоком <code>[memory:working]</code>.
             </div>
-            <div id="taskStatusLine" class="field-help"></div>
+            <div class="model-meta-row">
+              <span class="model-meta-label">Стадия:</span>
+              <span id="taskStageBadge" class="context-badge">—</span>
+            </div>
+            <div id="taskStageFlow" class="stage-flow"></div>
+            <label>Цель<div id="taskGoalView" class="readonly-box">—</div></label>
+            <label>План<div id="taskPlanView" class="readonly-box">—</div></label>
+            <label>Результаты<div id="taskResultsView" class="readonly-box">—</div></label>
+            <div id="taskTransitionLine" class="field-help"></div>
           </div>
+        </div>
+
+        <div id="tab-invariants" class="inspector-pane">
           <div class="group">
-            <h2>🟢 Долговременная память — знания</h2>
-            <div class="field-help">Профиль / решения / знания. Хранится в проектном store (TOON). Идёт в каждый запрос блоком <code>[memory:long-term]</code>.</div>
-            <label>Документ знаний<textarea id="knowledgeDoc" rows="8" placeholder="Профиль пользователя, принятые решения, устойчивые факты…"></textarea></label>
-            <div class="actions">
-              <button id="knowledgeSave" class="secondary" type="button">Сохранить знания</button>
+            <h2>⛔ Инварианты</h2>
+            <div class="field-help">
+              Жёсткие ограничения агента. Инъектятся в каждый запрос и проверяются по ответу в коде — нарушения видны ниже и подаются агенту как фидбэк на следующий ход.
             </div>
-            <div id="knowledgeStatusLine" class="field-help"></div>
+            <label>Список (по одному на строку)<textarea id="invariantsBox" rows="6" placeholder="только Kotlin&#10;архитектура только MVI"></textarea></label>
+            <div class="actions">
+              <button id="invariantsSave" class="secondary" type="button">Сохранить инварианты</button>
+            </div>
+            <div id="invariantsStatusLine" class="field-help"></div>
+            <div id="violationsView" class="field-help"></div>
           </div>
         </div>
 
@@ -1752,28 +1835,127 @@
       return data;
     }
 
-    function setActiveAgentBadge() {
-      const badge = $('activeAgentBadge');
-      const option = activeAgentId
-        ? Array.from($('agentList').options).find((o) => o.value === activeAgentId)
-        : null;
-      badge.textContent = activeAgentId ? (option ? option.textContent : activeAgentId.slice(0, 8)) : 'не выбран';
+    const TASK_STAGES = ['clarify', 'planning', 'execution', 'validation', 'done'];
+    let currentInvariants = [];
+
+    // ---- Gate ↔ workspace visibility -------------------------------------
+    function showGate() {
+      $('agentGate').style.display = 'grid';
+      $('workspace').style.display = 'none';
+      $('activeAgentBar').style.display = 'none';
+      refreshGateList();
     }
 
-    async function refreshAgentList() {
+    function showWorkspace() {
+      $('agentGate').style.display = 'none';
+      $('workspace').style.display = '';
+      $('activeAgentBar').style.display = 'flex';
+    }
+
+    function setActiveAgentChip(name, stage) {
+      $('activeAgentName').textContent = name || '—';
+      $('activeAgentStage').textContent = stage || 'clarify';
+    }
+
+    function lineToList(id) {
+      return $(id).value.split('\n').map((s) => s.trim()).filter(Boolean);
+    }
+
+    // ---- Gate: list + create --------------------------------------------
+    async function refreshGateList() {
       try {
         const data = await agentsManage({ action: 'list' });
-        const select = $('agentList');
         const agents = data.agents || [];
+        const select = $('gateAgentList');
         select.innerHTML = agents.length
-          ? agents.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)} · ${escapeHtml(a.provider)}/${escapeHtml(a.model)}</option>`).join('')
-          : '<option value="">— нет —</option>';
-        if (activeAgentId && agents.some((a) => a.id === activeAgentId)) {
-          select.value = activeAgentId;
-        }
-        setActiveAgentBadge();
+          ? agents.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)} · ${escapeHtml(a.provider)}/${escapeHtml(a.model)} · ${escapeHtml(a.stage || 'clarify')}</option>`).join('')
+          : '<option value="">— пока нет —</option>';
+        if (activeAgentId && agents.some((a) => a.id === activeAgentId)) select.value = activeAgentId;
+        $('gateListStatus').textContent = agents.length ? '' : 'Создай первого агента справа.';
       } catch (error) {
-        $('agentStatus').textContent = 'Ошибка списка: ' + error.message;
+        $('gateListStatus').textContent = 'Ошибка списка: ' + error.message;
+      }
+    }
+
+    function applyGateProviderDefaults() {
+      const item = (providers || []).find((p) => p.id === $('gateProvider').value);
+      if (!item) return;
+      $('gateBaseUrl').value = item.default_base_url || '';
+      if (!$('gateModel').value.trim()) $('gateModel').placeholder = item.default_model || 'model id';
+    }
+
+    function populateGateProviders() {
+      if (!providers || !providers.length) return;
+      $('gateProvider').innerHTML = providers.map((item) => `<option value="${item.id}">${item.name}</option>`).join('');
+      applyGateProviderDefaults();
+    }
+
+    function gatePayload() {
+      return {
+        name: $('gateName').value.trim(),
+        provider: $('gateProvider').value,
+        model: $('gateModel').value.trim(),
+        base_url: $('gateBaseUrl').value.trim(),
+        domain: $('gateDomain').value.trim(),
+        seed_fields: lineToList('gateSeed'),
+        invariants: lineToList('gateInvariants'),
+      };
+    }
+
+    function addSchemaRow(field) {
+      field = field || { key: '', question: '', required: true };
+      const row = document.createElement('div');
+      row.className = 'profile-field schema-row';
+      row.innerHTML = `
+        <input class="pf-key-in" placeholder="ключ" value="${escapeHtml(field.key)}" style="width:30%">
+        <input class="pf-q-in" placeholder="вопрос юзеру" value="${escapeHtml(field.question)}" style="flex:1">
+        <label style="display:flex;align-items:center;gap:4px;font-size:12px">обяз.<input type="checkbox" class="pf-req-in" ${field.required ? 'checked' : ''}></label>
+        <button type="button" class="secondary icon-btn pf-del">✕</button>`;
+      row.querySelector('.pf-del').addEventListener('click', () => row.remove());
+      $('gateSchema').appendChild(row);
+    }
+
+    function readSchemaRows() {
+      return Array.from($('gateSchema').querySelectorAll('.schema-row')).map((row) => ({
+        key: row.querySelector('.pf-key-in').value.trim(),
+        question: row.querySelector('.pf-q-in').value.trim(),
+        required: row.querySelector('.pf-req-in').checked,
+      })).filter((f) => f.key);
+    }
+
+    async function gateBuildSchema() {
+      const payload = gatePayload();
+      if (!payload.domain) { $('gateCreateStatus').textContent = 'Укажи домен.'; return; }
+      if (!payload.provider || !payload.model) { $('gateCreateStatus').textContent = 'Нужны provider и model.'; return; }
+      $('gateBuildSchema').disabled = true;
+      $('gateCreateStatus').textContent = 'Генерирую интервью…';
+      try {
+        const data = await agentsManage({ action: 'build-schema', agent: payload, token: $('token').value });
+        $('gateSchema').innerHTML = '';
+        (data.profile?.fields || []).forEach(addSchemaRow);
+        $('gateSchemaWrap').style.display = '';
+        $('gateCreateStatus').textContent = 'Схема готова — проверь и создавай.';
+      } catch (error) {
+        $('gateCreateStatus').textContent = 'Ошибка генерации: ' + error.message;
+      } finally {
+        $('gateBuildSchema').disabled = false;
+      }
+    }
+
+    async function createAgentFromGate() {
+      const payload = gatePayload();
+      if (!payload.name) { $('gateCreateStatus').textContent = 'Укажи имя.'; return; }
+      if (!payload.provider || !payload.model) { $('gateCreateStatus').textContent = 'Нужны provider и model.'; return; }
+      payload.id = null;
+      payload.system_prompt = null;
+      payload.memory = memoryPayload();
+      const schema = readSchemaRows();
+      if (schema.length) payload.profile_schema = schema;
+      try {
+        const data = await agentsManage({ action: 'save', agent: payload });
+        await enterAgent(data.agent.id);
+      } catch (error) {
+        $('gateCreateStatus').textContent = 'Ошибка создания: ' + error.message;
       }
     }
 
@@ -1793,25 +1975,79 @@
       $('memoryStrategy').dispatchEvent(new Event('change', { bubbles: true }));
     }
 
-    function fillTaskEditor(task) {
+    // ---- Workspace panes -------------------------------------------------
+    function renderProfilePane(profile) {
+      const wrap = $('profileFields');
+      const fields = (profile && profile.fields) || [];
+      if (!fields.length) {
+        wrap.textContent = 'У этого агента нет схемы интервью.';
+        $('profilePending').textContent = '';
+        return;
+      }
+      wrap.innerHTML = fields.map((f) => {
+        const filled = (f.value || '').trim();
+        const cls = (!filled && f.required) ? 'profile-field missing' : 'profile-field';
+        const val = filled ? escapeHtml(filled) : '<em>агент спросит…</em>';
+        const req = f.required ? ' *' : '';
+        return `<div class="${cls}"><span class="pf-key">${escapeHtml(f.key)}${req}</span><span class="pf-val">${val}</span></div>`;
+      }).join('');
+      const pending = fields.filter((f) => f.required && !(f.value || '').trim()).map((f) => f.key);
+      $('profilePending').textContent = pending.length
+        ? 'Агент ещё спросит: ' + pending.join(', ')
+        : 'Все обязательные поля заполнены.';
+    }
+
+    function renderStageFlow(stage) {
+      const idx = TASK_STAGES.indexOf(stage || 'clarify');
+      $('taskStageFlow').innerHTML = TASK_STAGES.map((s, i) => {
+        const cls = i === idx ? 'stage-step current' : (i < idx ? 'stage-step passed' : 'stage-step');
+        return `<span class="${cls}">${s}</span>`;
+      }).join('');
+    }
+
+    function renderTaskPane(task) {
       task = task || {};
-      $('taskTitle').value = task.title || '';
-      $('taskGoal').value = task.goal || '';
-      $('taskStatus').value = task.status || '';
-      $('taskSteps').value = (task.steps || []).join('\n');
-      $('taskNotes').value = task.notes || '';
+      const stage = task.stage || 'clarify';
+      $('taskStageBadge').textContent = stage;
+      renderStageFlow(stage);
+      $('taskGoalView').textContent = task.goal || '—';
+      $('taskPlanView').textContent = (task.plan && task.plan.length) ? task.plan.map((p) => '• ' + p).join('\n') : '—';
+      $('taskResultsView').textContent = (task.results && task.results.length) ? task.results.map((p) => '• ' + p).join('\n') : '—';
     }
 
-    function taskEditorPayload() {
-      return {
-        title: $('taskTitle').value,
-        goal: $('taskGoal').value,
-        status: $('taskStatus').value,
-        steps: $('taskSteps').value.split('\n').map((s) => s.trim()).filter(Boolean),
-        notes: $('taskNotes').value,
-      };
+    function renderInvariants(list) {
+      currentInvariants = list || [];
+      $('invariantsBox').value = currentInvariants.join('\n');
+      $('violationsView').textContent = '';
     }
 
+    function renderAgentState(state) {
+      if (!state) return;
+      if (state.stage) {
+        $('taskStageBadge').textContent = state.stage;
+        renderStageFlow(state.stage);
+        setActiveAgentChip($('activeAgentName').textContent, state.stage);
+      }
+      if (state.stage_transition) {
+        const t = state.stage_transition;
+        $('taskTransitionLine').textContent = t.accepted
+          ? `Переход стадии: ${t.from} → ${t.to} ✓`
+          : `Переход ${t.from} → ${t.to} отклонён (нельзя перепрыгивать стадии).`;
+      } else {
+        $('taskTransitionLine').textContent = '';
+      }
+      if ((state.violations || []).length) {
+        $('violationsView').innerHTML = 'Нарушены инварианты:<br>' +
+          state.violations.map((v) => `<span class="violation-item">• ${escapeHtml(v)}</span>`).join('<br>');
+      } else {
+        $('violationsView').textContent = '';
+      }
+      if ((state.pending_questions || []).length) {
+        $('profilePending').textContent = 'Агент ещё спросит: ' + state.pending_questions.join(', ');
+      }
+    }
+
+    // ---- Enter / refresh / delete ---------------------------------------
     async function enterAgent(id) {
       if (!id) return;
       try {
@@ -1819,7 +2055,6 @@
         const agent = data.agent || {};
         activeAgentId = agent.id || id;
         localStorage.setItem('ai_active_agent', activeAgentId);
-        $('agentName').value = agent.name || '';
         if (agent.provider) { $('provider').value = agent.provider; $('provider').dispatchEvent(new Event('change', { bubbles: true })); }
         if (agent.base_url) $('baseUrl').value = agent.base_url;
         if (agent.model) {
@@ -1827,79 +2062,67 @@
           if ($('model').value !== agent.model) $('customModel').value = agent.model;
         }
         applyAgentMemoryToForm(agent.memory);
-        fillTaskEditor(data.task);
-        $('knowledgeDoc').value = (data.knowledge && data.knowledge.content) || '';
-        setActiveAgentBadge();
-        // bind a fresh session bound to this agent (loadChatSession derives the
-        // system prompt from stored messages, so restore it AFTER the load)
+        renderProfilePane(data.profile);
+        renderTaskPane(data.task);
+        renderInvariants(agent.invariants);
+        setActiveAgentChip(agent.name, (data.task && data.task.stage) || 'clarify');
+        showWorkspace();
+        // bind a fresh session for this agent (loadChatSession derives the system
+        // prompt from stored messages, so restore it AFTER the load)
         chatSessionId = null;
         chatHistory = [];
         renderChatHistory();
         await loadChatSession();
         $('systemPrompt').value = agent.system_prompt || '';
-        $('agentStatus').textContent = 'Вошли в агента «' + (agent.name || activeAgentId) + '». Настройки восстановлены.';
       } catch (error) {
-        $('agentStatus').textContent = 'Ошибка входа: ' + error.message;
+        $('gateListStatus').textContent = 'Ошибка входа: ' + error.message;
       }
     }
 
-    async function saveCurrentAgent() {
-      const name = $('agentName').value.trim();
-      if (!name) { $('agentStatus').textContent = 'Укажите имя агента.'; return; }
+    // Reload the agent's stored layers after a turn (profile/stage may have moved).
+    async function refreshAgentPanes() {
+      if (!activeAgentId) return;
+      try {
+        const data = await agentsManage({ action: 'load', id: activeAgentId });
+        renderProfilePane(data.profile);
+        renderTaskPane(data.task);
+      } catch (_) { /* non-fatal */ }
+    }
+
+    async function deleteFromGate() {
+      const id = $('gateAgentList').value;
+      if (!id) return;
+      try {
+        await agentsManage({ action: 'delete', id });
+        if (activeAgentId === id) { activeAgentId = null; localStorage.removeItem('ai_active_agent'); }
+        await refreshGateList();
+        $('gateListStatus').textContent = 'Агент удалён.';
+      } catch (error) {
+        $('gateListStatus').textContent = 'Ошибка удаления: ' + error.message;
+      }
+    }
+
+    async function saveInvariants() {
+      if (!activeAgentId) { $('invariantsStatusLine').textContent = 'Сначала войди в агента.'; return; }
       try {
         const data = await agentsManage({
           action: 'save',
           agent: {
             id: activeAgentId,
-            name,
+            name: $('activeAgentName').textContent,
             provider: currentProvider(),
             base_url: $('baseUrl').value.trim(),
             model: selectedModel(),
             system_prompt: textValue('systemPrompt'),
+            domain: null,
+            invariants: lineToList('invariantsBox'),
             memory: memoryPayload(),
           },
         });
-        activeAgentId = data.agent.id;
-        localStorage.setItem('ai_active_agent', activeAgentId);
-        await refreshAgentList();
-        $('agentList').value = activeAgentId;
-        setActiveAgentBadge();
-        $('agentStatus').textContent = 'Агент сохранён.';
+        renderInvariants(data.agent.invariants);
+        $('invariantsStatusLine').textContent = 'Инварианты сохранены.';
       } catch (error) {
-        $('agentStatus').textContent = 'Ошибка сохранения: ' + error.message;
-      }
-    }
-
-    async function deleteCurrentAgent() {
-      const id = $('agentList').value;
-      if (!id) return;
-      try {
-        await agentsManage({ action: 'delete', id });
-        if (activeAgentId === id) { activeAgentId = null; localStorage.removeItem('ai_active_agent'); }
-        await refreshAgentList();
-        $('agentStatus').textContent = 'Агент удалён.';
-      } catch (error) {
-        $('agentStatus').textContent = 'Ошибка удаления: ' + error.message;
-      }
-    }
-
-    async function saveTaskContext() {
-      if (!activeAgentId) { $('taskStatusLine').textContent = 'Сначала войдите в агента или сохраните его.'; return; }
-      try {
-        await agentsManage({ action: 'save-task', id: activeAgentId, task: taskEditorPayload() });
-        $('taskStatusLine').textContent = 'TaskContext сохранён.';
-      } catch (error) {
-        $('taskStatusLine').textContent = 'Ошибка: ' + error.message;
-      }
-    }
-
-    async function saveKnowledgeDoc() {
-      if (!activeAgentId) { $('knowledgeStatusLine').textContent = 'Сначала войдите в агента или сохраните его.'; return; }
-      try {
-        await agentsManage({ action: 'save-knowledge', id: activeAgentId, knowledge: $('knowledgeDoc').value });
-        $('knowledgeStatusLine').textContent = 'Знания сохранены.';
-      } catch (error) {
-        $('knowledgeStatusLine').textContent = 'Ошибка: ' + error.message;
+        $('invariantsStatusLine').textContent = 'Ошибка: ' + error.message;
       }
     }
 
@@ -2386,10 +2609,18 @@
       applyProviderDefaults();
       updateProviderDocLink();
       renderBranchControls();
+      populateGateProviders();
       await refreshTokenStatus();
-      await loadChatSession();
       await loadModels().catch(() => {}); // автозагрузка; ошибка не критична
-      await refreshAgentList();
+      // Agent-centric entry: enter the last agent, else show the gate.
+      if (activeAgentId) {
+        await refreshGateList();
+        const exists = Array.from($('gateAgentList').options).some((o) => o.value === activeAgentId);
+        if (exists) { await enterAgent(activeAgentId); }
+        else { activeAgentId = null; localStorage.removeItem('ai_active_agent'); showGate(); }
+      } else {
+        showGate();
+      }
       setStatus('Готово');
     }
 
@@ -2513,6 +2744,8 @@
                 setSessionMetrics(data.session_metrics);
                 setDebug(data.debug);
                 setContextDebug(data.context_debug);
+                renderAgentState(data.agent_state);
+                refreshAgentPanes();
                 setStatus('Готово');
               } else if (eventType === 'error') {
                 throw new Error(eventData);
@@ -2609,6 +2842,8 @@
         setSessionMetrics(data.session_metrics);
         setDebug(data.debug);
         setContextDebug(data.context_debug);
+        renderAgentState(data.agent_state);
+        refreshAgentPanes();
         setStatus('Готово');
         await refreshTokenStatus();
       } catch (error) {
@@ -2720,11 +2955,15 @@
     }
 
     $('attachBtn').addEventListener('click', () => $('fileInput').click());
-    $('agentEnter').addEventListener('click', () => enterAgent($('agentList').value));
-    $('agentSave').addEventListener('click', saveCurrentAgent);
-    $('agentDelete').addEventListener('click', deleteCurrentAgent);
-    $('taskSave').addEventListener('click', saveTaskContext);
-    $('knowledgeSave').addEventListener('click', saveKnowledgeDoc);
+    $('switchAgent').addEventListener('click', showGate);
+    $('gateEnter').addEventListener('click', () => enterAgent($('gateAgentList').value));
+    $('gateDelete').addEventListener('click', deleteFromGate);
+    $('gateAgentList').addEventListener('dblclick', () => enterAgent($('gateAgentList').value));
+    $('gateProvider').addEventListener('change', applyGateProviderDefaults);
+    $('gateBuildSchema').addEventListener('click', gateBuildSchema);
+    $('gateSchemaAdd').addEventListener('click', () => addSchemaRow());
+    $('gateCreate').addEventListener('click', createAgentFromGate);
+    $('invariantsSave').addEventListener('click', saveInvariants);
 
     $('memoryFactAdd').addEventListener('click', () => {
       const key = $('memoryLayerKey').value.trim();

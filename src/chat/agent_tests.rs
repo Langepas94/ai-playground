@@ -123,12 +123,23 @@ async fn agent_injects_working_and_long_term_blocks() {
         recent_messages: 4,
         ..MemoryConfig::default()
     });
-    agent.set_working_context(Some(crate::chat::store::TaskContext {
+    agent.set_task_state(Some(crate::chat::store::TaskContext {
+        stage: crate::chat::store::TaskStage::Planning,
         title: "ship agents".to_string(),
         goal: "persist settings".to_string(),
         ..crate::chat::store::TaskContext::default()
     }));
-    agent.set_knowledge(Some("user prefers Rust".to_string()));
+    agent.set_agent_profile(Some(crate::chat::store::AgentProfile {
+        fields: vec![crate::chat::store::ProfileField {
+            key: "stack".to_string(),
+            question: "Which stack?".to_string(),
+            required: true,
+            value: "Rust".to_string(),
+        }],
+        updated_at_unix: 0,
+    }));
+    agent.set_invariants(vec!["Only Rust".to_string()]);
+    agent.set_domain("rust backend assistant");
 
     agent
         .respond(&client, "hi".to_string())
@@ -142,12 +153,16 @@ async fn agent_injects_working_and_long_term_blocks() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(joined.contains("[memory:working]"), "working block missing");
+    assert!(joined.contains("Stage: planning"));
     assert!(joined.contains("ship agents"));
     assert!(
         joined.contains("[memory:long-term]"),
         "long-term block missing"
     );
-    assert!(joined.contains("user prefers Rust"));
+    assert!(joined.contains("stack: Rust"));
+    assert!(joined.contains("[invariants]"), "invariants block missing");
+    assert!(joined.contains("Only Rust"));
+    assert!(joined.contains("[agent:domain]"), "domain block missing");
 }
 
 #[tokio::test]
