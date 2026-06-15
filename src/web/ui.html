@@ -994,7 +994,7 @@
           <div class="group">
             <h2>🔵 Задача (рабочая память)</h2>
             <div class="field-help">
-              Стадия задачи ведётся автоматически (state machine) и общая для всех диалогов агента. Идёт в каждый запрос блоком <code>[memory:working]</code>.
+              Стадия задачи ведётся автоматически (state machine) и отдельная для текущего диалога. Идёт в каждый запрос блоком <code>[memory:working]</code>.
             </div>
             <div class="model-meta-row">
               <span class="model-meta-label">Стадия:</span>
@@ -1834,6 +1834,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             agent_id: backendAgentId(),
+            saved_agent_id: activeAgentId || null,
             provider: currentProvider(),
             model,
             session_id: chatSessionId,
@@ -2139,9 +2140,9 @@
         }
         applyAgentMemoryToForm(agent.memory);
         renderProfilePane(data.profile);
-        renderTaskPane(data.task);
+        renderTaskPane(null);
         renderInvariants(agent.invariants);
-        setActiveAgentChip(agent.name, (data.task && data.task.stage) || 'clarify');
+        setActiveAgentChip(agent.name, 'clarify');
         showWorkspace();
         // bind a fresh session for this agent (loadChatSession derives the system
         // prompt from stored messages, so restore it AFTER the load)
@@ -2150,6 +2151,7 @@
         renderChatHistory();
         await loadChatSession();
         $('systemPrompt').value = agent.system_prompt || '';
+        await refreshAgentPanes();
         await refreshDialogs();
       } catch (error) {
         $('gateListStatus').textContent = 'Ошибка входа: ' + error.message;
@@ -2160,9 +2162,10 @@
     async function refreshAgentPanes() {
       if (!activeAgentId) return;
       try {
-        const data = await agentsManage({ action: 'load', id: activeAgentId });
+        const data = await agentsManage({ action: 'load', id: activeAgentId, session_id: chatSessionId || null });
         renderProfilePane(data.profile);
         renderTaskPane(data.task);
+        setActiveAgentChip($('activeAgentName').textContent, (data.task && data.task.stage) || 'clarify');
       } catch (_) { /* non-fatal */ }
     }
 
@@ -2216,6 +2219,7 @@
         setSessionMetrics(data.metrics);
         if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
         renderChatHistory();
+        await refreshAgentPanes();
         await refreshDialogs();
       } catch (error) {
         setStatus('Ошибка переключения чата: ' + error.message, true);
@@ -2535,6 +2539,7 @@
       setSessionMetrics(data.metrics);
       if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
       renderChatHistory();
+      await refreshAgentPanes();
     }
 
     function setMetrics(metrics, contextMetrics = null) {

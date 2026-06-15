@@ -163,6 +163,47 @@ async fn agent_injects_working_and_long_term_blocks() {
     assert!(joined.contains("[invariants]"), "invariants block missing");
     assert!(joined.contains("Only Rust"));
     assert!(joined.contains("[agent:domain]"), "domain block missing");
+    assert!(
+        joined.contains("do not treat it as a refusal policy"),
+        "domain should not become a hard refusal boundary"
+    );
+}
+
+#[tokio::test]
+async fn stateful_postprocess_seeds_task_goal_from_first_prompt() {
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec![
+            r#"{"stage":"clarify","reason":"asking clarifying questions"}"#.to_string(),
+        ]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_task_state(Some(crate::chat::store::TaskContext::default()));
+
+    agent
+        .stateful_postprocess(
+            &client,
+            "Давай придумаем продуктовое меню для пиццерии. Команда небольшая.",
+            "Сначала уточню детали.",
+        )
+        .await;
+
+    let task = agent.task_state().expect("task state");
+    assert_eq!(
+        task.goal,
+        "Давай придумаем продуктовое меню для пиццерии. Команда небольшая."
+    );
+    assert_eq!(task.title, "Давай придумаем продуктовое меню для пиццерии");
+    assert_eq!(task.stage, crate::chat::store::TaskStage::Clarify);
 }
 
 #[tokio::test]

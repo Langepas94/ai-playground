@@ -698,6 +698,16 @@ impl LocalSessionStore {
             .unwrap_or_default())
     }
 
+    pub fn load_dialog_task(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+    ) -> Result<TaskContext, AppError> {
+        Ok(self
+            .read_toon(&self.agent_dialog_task_path(agent_id, session_id))?
+            .unwrap_or_default())
+    }
+
     /// Persist the working-memory task and keep the picker index's stage in sync.
     pub fn save_task(&self, id: &str, task: &TaskContext) -> Result<(), AppError> {
         self.write_toon(&self.agent_task_path(id), task)?;
@@ -709,6 +719,15 @@ impl LocalSessionStore {
             self.write_toon(&self.agents_index_path(), &index)?;
         }
         Ok(())
+    }
+
+    pub fn save_dialog_task(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        task: &TaskContext,
+    ) -> Result<(), AppError> {
+        self.write_toon(&self.agent_dialog_task_path(agent_id, session_id), task)
     }
 
     pub fn load_profile(&self, id: &str) -> Result<AgentProfile, AppError> {
@@ -780,6 +799,7 @@ impl LocalSessionStore {
             self.session_path(session_id),
             self.metrics_path(session_id),
             self.memory_path(session_id),
+            self.agent_dialog_task_path(agent_id, session_id),
         ] {
             if path.exists() {
                 fs::remove_file(&path)
@@ -805,6 +825,14 @@ impl LocalSessionStore {
     fn agent_task_path(&self, id: &str) -> PathBuf {
         self.sessions_dir()
             .join(format!("agent-{}.task.toon", safe_key(id)))
+    }
+
+    fn agent_dialog_task_path(&self, agent_id: &str, session_id: &str) -> PathBuf {
+        self.sessions_dir().join(format!(
+            "agent-{}.dialog-{}.task.toon",
+            safe_key(agent_id),
+            safe_key(session_id)
+        ))
     }
 
     fn agent_profile_path(&self, id: &str) -> PathBuf {
@@ -1289,6 +1317,50 @@ mod tests {
     }
 
     #[test]
+    fn agent_long_term_facts_are_shared_between_dialogs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalSessionStore::from_root(dir.path().join("sessions"));
+        let agent_key = "agent:menu-agent";
+
+        let mut first_dialog_memory = AgentMemory::default();
+        first_dialog_memory.set_fact_in_layer(
+            "available_products".to_string(),
+            "tomatoes, basil, mozzarella".to_string(),
+            MemoryLayer::LongTerm,
+        );
+        first_dialog_memory.set_fact_in_layer(
+            "current_task".to_string(),
+            "invent menu".to_string(),
+            MemoryLayer::Working,
+        );
+        store
+            .save_long_term(agent_key, &first_dialog_memory)
+            .expect("save agent long-term");
+
+        let mut second_dialog_memory = AgentMemory::default();
+        store
+            .seed_long_term(agent_key, &mut second_dialog_memory)
+            .expect("seed agent long-term");
+
+        assert_eq!(
+            second_dialog_memory
+                .facts
+                .get("available_products")
+                .map(String::as_str),
+            Some("tomatoes, basil, mozzarella"),
+            "manually saved long-term facts should be visible in another dialog"
+        );
+        assert_eq!(
+            second_dialog_memory.fact_layer("available_products"),
+            MemoryLayer::LongTerm
+        );
+        assert!(
+            !second_dialog_memory.facts.contains_key("current_task"),
+            "working facts should not leak between dialogs"
+        );
+    }
+
+    #[test]
     fn saved_agents_roundtrip_list_and_delete() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = LocalSessionStore::from_root(dir.path().join("sessions"));
@@ -1396,6 +1468,36 @@ mod tests {
         store
             .save_session("agent:a1", "sess-2", &[])
             .expect("save empty session");
+        let task_1 = TaskContext {
+            title: "menu".to_string(),
+            goal: "invent dishes".to_string(),
+            ..TaskContext::default()
+        };
+        let task_2 = TaskContext {
+            title: "slogan".to_string(),
+            goal: "invent slogan".to_string(),
+            ..TaskContext::default()
+        };
+        store
+            .save_dialog_task("a1", "sess-1", &task_1)
+            .expect("save dialog task 1");
+        store
+            .save_dialog_task("a1", "sess-2", &task_2)
+            .expect("save dialog task 2");
+        assert_eq!(
+            store
+                .load_dialog_task("a1", "sess-1")
+                .expect("load dialog task 1")
+                .goal,
+            "invent dishes"
+        );
+        assert_eq!(
+            store
+                .load_dialog_task("a1", "sess-2")
+                .expect("load dialog task 2")
+                .goal,
+            "invent slogan"
+        );
 
         let dialogs = store.list_dialogs("a1").expect("list");
         assert_eq!(dialogs.len(), 2);
@@ -1420,6 +1522,13 @@ mod tests {
         let after = store.list_dialogs("a1").expect("list after delete");
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].id, "sess-1");
+        assert!(
+            store
+                .load_dialog_task("a1", "sess-2")
+                .expect("deleted task")
+                .is_empty(),
+            "dialog task should be deleted with the dialog"
+        );
         // Ad-hoc (non-agent) sessions are not registered as dialogs.
         store
             .save_session("web:local:openai:gpt", "sess-3", &messages)

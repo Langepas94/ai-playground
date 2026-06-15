@@ -371,7 +371,10 @@ impl ChatAgent {
         if !self.domain.is_empty() {
             blocks.push(ChatMessage {
                 role: Role::System,
-                content: format!("[agent:domain] {}", self.domain),
+                content: format!(
+                    "[agent:domain] Specialization/background: {}. Use this context to be helpful, but do not treat it as a refusal policy. Related adjacent tasks are allowed unless explicit invariants forbid them.",
+                    self.domain
+                ),
             });
         }
 
@@ -704,6 +707,7 @@ impl ChatAgent {
         }
 
         if self.task_state.is_some() {
+            self.capture_task_seed(user_prompt);
             let (transition, metrics) = self.advance_task_stage(client, user_prompt, answer).await;
             report.stage = self.task_state.as_ref().map(|task| task.stage);
             report.stage_transition = transition;
@@ -851,6 +855,22 @@ impl ChatAgent {
             }),
             Some(response.metrics),
         )
+    }
+
+    fn capture_task_seed(&mut self, user_prompt: &str) {
+        let Some(task) = self.task_state.as_mut() else {
+            return;
+        };
+        let prompt = user_prompt.trim();
+        if prompt.is_empty() {
+            return;
+        }
+        if task.goal.trim().is_empty() {
+            task.goal = prompt.to_string();
+        }
+        if task.title.trim().is_empty() {
+            task.title = task_title_from_prompt(prompt);
+        }
     }
 
     /// Validate the response against the invariants in code (via a cheap LLM
@@ -1222,6 +1242,25 @@ fn facts_from_entry_array(items: &[serde_json::Value]) -> Vec<ExtractedFact> {
 
 fn parse_fact_layer(value: &serde_json::Value) -> Option<MemoryLayer> {
     value.as_str()?.parse::<MemoryLayer>().ok()
+}
+
+fn task_title_from_prompt(prompt: &str) -> String {
+    let cleaned = prompt
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or(prompt)
+        .trim_matches(['"', '\'', '`', '*', '#', ' ']);
+    let first_sentence = cleaned
+        .split(['.', '!', '?', '\n'])
+        .next()
+        .unwrap_or(cleaned)
+        .trim();
+    let mut title = first_sentence.chars().take(80).collect::<String>();
+    if first_sentence.chars().count() > 80 {
+        title.push('…');
+    }
+    title
 }
 
 /// A proposed task-stage transition and whether the FSM accepted it.

@@ -10,6 +10,109 @@ fn web_profile(provider: ProviderKind) -> ProfileConfig {
     }
 }
 
+#[derive(Debug, Default)]
+struct StatefulFakeClient {
+    replies: std::sync::Mutex<Vec<String>>,
+}
+
+impl StatefulFakeClient {
+    fn with_replies(replies: Vec<&str>) -> Self {
+        Self {
+            replies: std::sync::Mutex::new(
+                replies.into_iter().map(ToString::to_string).rev().collect(),
+            ),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::providers::ProviderClient for StatefulFakeClient {
+    async fn list_models(
+        &self,
+        _profile: &ProfileConfig,
+        _token: &str,
+    ) -> Result<Vec<String>, AppError> {
+        Ok(Vec::new())
+    }
+
+    async fn chat_completion(
+        &self,
+        _profile: &ProfileConfig,
+        _token: &str,
+        _request: crate::providers::ChatRequest,
+    ) -> Result<crate::providers::ChatResponse, AppError> {
+        let text = self
+            .replies
+            .lock()
+            .expect("replies")
+            .pop()
+            .unwrap_or_else(|| r#"{"stage":"clarify","reason":"stay"}"#.to_string());
+        Ok(crate::providers::ChatResponse {
+            text,
+            finish_reason: Some("stop".to_string()),
+            metrics: crate::providers::RequestMetrics {
+                elapsed_ms: 1,
+                usage: None,
+                cost: None,
+            },
+        })
+    }
+
+    async fn chat_completion_with_debug(
+        &self,
+        profile: &ProfileConfig,
+        token: &str,
+        request: crate::providers::ChatRequest,
+    ) -> Result<
+        (
+            crate::providers::ChatResponse,
+            crate::providers::ProviderExchangeDebug,
+        ),
+        AppError,
+    > {
+        let response = self.chat_completion(profile, token, request).await?;
+        Ok((
+            response,
+            crate::providers::ProviderExchangeDebug {
+                request: crate::providers::HttpDebugRequest {
+                    method: "POST".to_string(),
+                    url: "https://example.test/v1/chat/completions".to_string(),
+                    headers: Default::default(),
+                    body: serde_json::json!({}),
+                },
+                response: crate::providers::HttpDebugResponse {
+                    status: 200,
+                    headers: Default::default(),
+                    body: serde_json::json!({}),
+                },
+            },
+        ))
+    }
+}
+
+fn web_test_agent(id: &str) -> SavedAgent {
+    SavedAgent {
+        id: id.to_string(),
+        name: "Menu helper".to_string(),
+        provider: "openai-compatible".to_string(),
+        model: "test-model".to_string(),
+        domain: "restaurant menu helper".to_string(),
+        ..SavedAgent::default()
+    }
+}
+
+fn web_test_chat_agent() -> ChatAgent {
+    ChatAgent::new(
+        web_profile(ProviderKind::OpenAiCompatible),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    )
+}
+
 #[test]
 fn web_token_uses_provider_keyring_when_form_is_empty() {
     let secrets = MemorySecretStore::default();
@@ -176,6 +279,160 @@ fn web_rejects_unknown_agent_id() {
         Err(AppError::InvalidInput(_))
     ));
     assert!(selected_agent(Some(crate::chat::LOCAL_SESSION_AGENT_ID)).is_ok());
+}
+
+#[test]
+fn saved_agent_uses_agent_scoped_session_key_for_chat_and_manual_memory() {
+    assert_eq!(
+        effective_session_key(Some("menu-agent"), "web:local:deepseek:deepseek-chat"),
+        "agent:menu-agent"
+    );
+    assert_eq!(
+        effective_session_key(None, "web:local:deepseek:deepseek-chat"),
+        "web:local:deepseek:deepseek-chat"
+    );
+    assert_eq!(
+        effective_session_key(Some("   "), "web:local:deepseek:deepseek-chat"),
+        "web:local:deepseek:deepseek-chat"
+    );
+}
+
+#[test]
+fn saved_agent_loads_task_from_active_dialog_not_global_agent_task() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalSessionStore::from_root(dir.path().join("sessions"));
+    store
+        .save_agent(&web_test_agent("menu-agent"))
+        .expect("save agent");
+    store
+        .save_task(
+            "menu-agent",
+            &TaskContext {
+                title: "global stale menu task".to_string(),
+                goal: "create pizza menu".to_string(),
+                ..TaskContext::default()
+            },
+        )
+        .expect("save legacy task");
+    store
+        .save_dialog_task(
+            "menu-agent",
+            "slogan-dialog",
+            &TaskContext {
+                title: "slogan".to_string(),
+                goal: "invent slogan".to_string(),
+                ..TaskContext::default()
+            },
+        )
+        .expect("save dialog task");
+
+    let mut agent = web_test_chat_agent();
+    apply_saved_agent_memory(&store, Some("menu-agent"), "slogan-dialog", &mut agent)
+        .expect("apply saved agent memory");
+
+    let task = agent.task_state().expect("task state");
+    assert_eq!(task.title, "slogan");
+    assert_eq!(task.goal, "invent slogan");
+    assert_ne!(
+        task.goal, "create pizza menu",
+        "dialog B must not inherit dialog A/global working task"
+    );
+}
+
+#[tokio::test]
+async fn stateful_postprocess_persists_task_only_to_current_dialog() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalSessionStore::from_root(dir.path().join("sessions"));
+    store
+        .save_agent(&web_test_agent("menu-agent"))
+        .expect("save agent");
+
+    let mut agent = web_test_chat_agent();
+    agent.set_task_state(Some(TaskContext::default()));
+    let client =
+        StatefulFakeClient::with_replies(vec![r#"{"stage":"clarify","reason":"clarifying"}"#]);
+
+    let (debug, _metrics) = run_and_persist_stateful(
+        &store,
+        Some("menu-agent"),
+        "slogan-dialog",
+        &mut agent,
+        &client,
+        "Помоги придумать слоган для пиццерии",
+        "Конечно, давай уточним тон.",
+    )
+    .await;
+
+    assert_eq!(debug.expect("debug").stage.as_deref(), Some("clarify"));
+    assert_eq!(
+        store
+            .load_dialog_task("menu-agent", "slogan-dialog")
+            .expect("dialog task")
+            .goal,
+        "Помоги придумать слоган для пиццерии"
+    );
+    assert!(
+        store
+            .load_dialog_task("menu-agent", "menu-dialog")
+            .expect("other dialog task")
+            .is_empty(),
+        "stateful postprocess must not write into another dialog"
+    );
+    assert!(
+        store
+            .load_task("menu-agent")
+            .expect("legacy/global task")
+            .is_empty(),
+        "stateful postprocess must not write into the global agent task"
+    );
+}
+
+#[test]
+fn manually_saved_long_term_fact_uses_saved_agent_scope_across_dialogs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalSessionStore::from_root(dir.path().join("sessions"));
+    let provider_model_key = "web:local-session-agent:deepseek:deepseek-chat";
+    let agent_key = effective_session_key(Some("menu-agent"), provider_model_key);
+
+    let mut first_dialog_memory = AgentMemory::default();
+    first_dialog_memory.set_fact_in_layer(
+        "available_products".to_string(),
+        "tomatoes, basil, mozzarella".to_string(),
+        MemoryLayer::LongTerm,
+    );
+    first_dialog_memory.set_fact_in_layer(
+        "current_task".to_string(),
+        "invent menu".to_string(),
+        MemoryLayer::Working,
+    );
+    store
+        .save_long_term(&agent_key, &first_dialog_memory)
+        .expect("save long-term");
+
+    let mut second_dialog_memory = AgentMemory::default();
+    store
+        .seed_long_term(&agent_key, &mut second_dialog_memory)
+        .expect("seed second dialog");
+
+    assert_eq!(
+        second_dialog_memory
+            .facts
+            .get("available_products")
+            .map(String::as_str),
+        Some("tomatoes, basil, mozzarella")
+    );
+    assert!(
+        !second_dialog_memory.facts.contains_key("current_task"),
+        "manual long-term sharing must not bring current working task along"
+    );
+    assert!(
+        store
+            .load_long_term(provider_model_key)
+            .expect("provider/model memory")
+            .facts
+            .is_empty(),
+        "saved-agent manual memory must not be written under provider/model key"
+    );
 }
 
 #[test]
@@ -849,6 +1106,8 @@ fn web_ui_is_agent_centric() {
     assert!(INDEX_HTML.contains("data-tab=\"aprofile\""));
     assert!(INDEX_HTML.contains("data-tab=\"task\""));
     assert!(INDEX_HTML.contains("data-tab=\"invariants\""));
+    assert!(INDEX_HTML.contains("отдельная для текущего диалога"));
+    assert!(!INDEX_HTML.contains("общая для всех диалогов агента"));
     // Wiring: build-schema action, gate↔workspace, agent_state rendering.
     assert!(INDEX_HTML.contains("/api/agents/manage"));
     assert!(INDEX_HTML.contains("'build-schema'"));
@@ -876,6 +1135,7 @@ fn web_ui_renders_memory_layers_control() {
     assert!(INDEX_HTML.contains("🔵 Рабочая"));
     assert!(INDEX_HTML.contains("🟢 Долговременная"));
     assert!(INDEX_HTML.contains("/api/memory/update"));
+    assert!(INDEX_HTML.contains("saved_agent_id: activeAgentId || null"));
     assert!(INDEX_HTML.contains("memoryFactAdd"));
 }
 

@@ -120,7 +120,7 @@ long-term
 - `SavedAgent` — настройки (provider/base_url/model/system_prompt + `domain` +
   `invariants` + `SavedMemoryConfig`). Токен НЕ хранится (keyring).
 - `TaskContext` — **рабочая** память: `stage` (FSM) + title/goal/plan/results/notes
-  + `violations`. Стадия ведётся автоматически и общая для всех сессий агента.
+  + `violations`. Стадия ведётся автоматически и хранится на конкретный диалог.
 - `AgentProfile` (`Vec<ProfileField>`) — **долговременная** память: схема интервью
   (key/question/required) + заполненные агентом значения.
 - **краткосрочная** память — обычная сессия чата, `session_key = "agent:<id>"`.
@@ -129,18 +129,20 @@ long-term
 кодом (`can_transition`/`allowed_next`), нелегальные отклоняются. Сериализуется как
 строка (как `MemoryLayer`), чтобы TOON хранил её как plain-значение.
 
-Хранение через `LocalSessionStore`: `agent-<id>.agent.toon`, `*.task.toon`,
+Хранение через `LocalSessionStore`: `agent-<id>.agent.toon`, legacy/default
+`*.task.toon`, dialog-scoped `agent-<id>.dialog-<session>.task.toon`,
 `*.profile.toon`, `*.dialogs.toon`, индекс `agents-index.toon` (со стадией). Методы
-`list_agents`, `load_agent`, `save_agent`, `delete_agent`, `load_task`/`save_task`
-(синхронит стадию в индекс), `load_profile`/`save_profile`; общий atomic-io
-`write_toon`/`read_toon`.
+`list_agents`, `load_agent`, `save_agent`, `delete_agent`,
+`load_dialog_task`/`save_dialog_task`, legacy `load_task`/`save_task`,
+`load_profile`/`save_profile`; общий atomic-io `write_toon`/`read_toon`.
 
 **Несколько диалогов на агента**: `DialogMeta` (id/title/timestamps), индекс
-`agent-<id>.dialogs.toon`. Все чаты агента делят рабочую+долговременную память, но
-у каждого своя история (`session_key = "agent:<id>"`, конкретный чат — по
-`session_id`). `save_session` авто-регистрирует диалог, если ключ — `agent:*`
-(`agent_id_from_key`), title — из первого user-сообщения. Методы `list_dialogs`,
-`register_dialog`, `rename_dialog`, `delete_dialog` (чистит session/metrics/memory).
+`agent-<id>.dialogs.toon`. Все чаты агента делят долговременный профиль и
+инварианты, но рабочая задача и история у каждого свои (`session_key = "agent:<id>"`,
+конкретный чат — по `session_id`). `save_session` авто-регистрирует диалог, если
+ключ — `agent:*` (`agent_id_from_key`), title — из первого user-сообщения. Методы
+`list_dialogs`, `register_dialog`, `rename_dialog`, `delete_dialog` (чистит
+session/metrics/memory/dialog-task).
 
 `ChatAgent` инъектит память в каждый provider request (`inject_memory_layers`):
 `[agent:domain]`, `[memory:long-term]` (профиль + что ещё спросить),

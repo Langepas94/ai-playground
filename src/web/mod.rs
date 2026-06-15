@@ -284,6 +284,7 @@ async fn chat(
     apply_saved_agent_memory(
         &state.sessions,
         request.saved_agent_id.as_deref(),
+        session.id.as_str(),
         &mut agent,
     )?;
     let (response, provider_debug, mut context_metrics) = agent
@@ -293,6 +294,7 @@ async fn chat(
     let (agent_state, stateful_metrics) = run_and_persist_stateful(
         &state.sessions,
         request.saved_agent_id.as_deref(),
+        session.id.as_str(),
         &mut agent,
         &state.client,
         &prompt,
@@ -394,6 +396,7 @@ async fn chat_stream(
     apply_saved_agent_memory(
         &state.sessions,
         request.saved_agent_id.as_deref(),
+        session.id.as_str(),
         &mut agent,
     )?;
     let prepared_stream = agent.prepare_stream_request(&state.client, &prompt).await?;
@@ -447,6 +450,7 @@ async fn chat_stream(
     let client = state.client.clone();
     let sessions = state.sessions.clone();
     let saved_agent_id = request.saved_agent_id.clone();
+    let stateful_session_id = session_id.clone();
 
     tokio::spawn(async move {
         let tx_token = tx.clone();
@@ -463,6 +467,7 @@ async fn chat_stream(
                 let (agent_state, stateful_metrics) = run_and_persist_stateful(
                     &sessions,
                     saved_agent_id.as_deref(),
+                    stateful_session_id.as_str(),
                     &mut agent,
                     &client,
                     &prompt,
@@ -580,16 +585,17 @@ fn effective_session_key(saved_agent_id: Option<&str>, fallback: &str) -> String
     }
 }
 
-/// Load the saved agent's stateful layers (task + stage, profile, invariants,
+/// Load the saved agent's stateful layers (dialog task + stage, profile, invariants,
 /// domain) and attach them so they are injected into the next request and so the
 /// stateful post-processing can mutate + persist them.
 fn apply_saved_agent_memory(
     store: &LocalSessionStore,
     saved_agent_id: Option<&str>,
+    session_id: &str,
     agent: &mut ChatAgent,
 ) -> Result<(), AppError> {
     if let Some(id) = saved_agent_id.and_then(blank_str_to_none) {
-        agent.set_task_state(Some(store.load_task(id)?));
+        agent.set_task_state(Some(store.load_dialog_task(id, session_id)?));
         agent.set_agent_profile(Some(store.load_profile(id)?));
         if let Some(saved) = store.load_agent(id)? {
             agent.set_invariants(saved.invariants);
@@ -605,6 +611,7 @@ fn apply_saved_agent_memory(
 async fn run_and_persist_stateful(
     store: &LocalSessionStore,
     saved_agent_id: Option<&str>,
+    session_id: &str,
     agent: &mut ChatAgent,
     client: &dyn crate::providers::ProviderClient,
     user_prompt: &str,
@@ -620,7 +627,7 @@ async fn run_and_persist_stateful(
         .stateful_postprocess(client, user_prompt, answer)
         .await;
     if let Some(task) = agent.task_state() {
-        let _ = store.save_task(id, task);
+        let _ = store.save_dialog_task(id, session_id, task);
     }
     if let Some(profile) = agent.agent_profile() {
         let _ = store.save_profile(id, profile);
@@ -660,7 +667,10 @@ async fn agents_manage(
                 .load_agent(&id)?
                 .ok_or_else(|| AppError::InvalidInput(format!("Unknown agent: {id}")))?;
             response.agent = Some(agent);
-            response.task = Some(state.sessions.load_task(&id)?);
+            response.task = match request.session_id.as_deref().and_then(blank_str_to_none) {
+                Some(session_id) => Some(state.sessions.load_dialog_task(&id, session_id)?),
+                None => Some(state.sessions.load_task(&id)?),
+            };
             response.profile = Some(state.sessions.load_profile(&id)?);
         }
         "save" => {
@@ -953,7 +963,10 @@ async fn memory_update(
     let provider = parse_provider(&request.provider)?;
     let model = blank_to_none(Some(request.model.clone()))
         .ok_or_else(|| AppError::InvalidInput("Model is required".to_string()))?;
-    let session_key = web_session_key(agent.id, &provider.to_string(), &model);
+    let session_key = effective_session_key(
+        request.saved_agent_id.as_deref(),
+        &web_session_key(agent.id, &provider.to_string(), &model),
+    );
     let session = match request.session_id.as_deref().and_then(blank_str_to_none) {
         Some(session_id) => state.sessions.load_session(session_id)?,
         None => state.sessions.load_or_create_latest(&session_key)?,
@@ -1029,6 +1042,7 @@ async fn memory_update(
 #[derive(Debug, Deserialize)]
 struct MemoryUpdateRequest {
     agent_id: Option<String>,
+    saved_agent_id: Option<String>,
     provider: String,
     model: String,
     session_id: Option<String>,
