@@ -1,77 +1,44 @@
-# ai-playground — контекст для Claude
+# ai-playground - Claude context
 
-Локальный Rust CLI (`ai`) и web UI для LLM-провайдеров через OpenAI-compatible Chat Completions.
-Текущая версия: см. `Cargo.toml` → `version`.
+@/Users/artem/.codex/RTK.md
 
-## Быстрый старт для агента
+Rust CLI (`ai`) и web UI для OpenAI-compatible LLM providers.
+
+## Cheap context rules
+
+- Run shell through `rtk`.
+- Start with `docs/agent-index.md` or `src/README.md`, then only the relevant module README/file.
+- Prefer `rtk ast-index search|symbol|outline` for code navigation.
+- Do not bulk-read large files. For >500 lines, run `rtk ast-index outline <file>` and read the target slice.
+- `src/web/ui.html`, `src/web/mod.rs`, `src/chat/agent.rs`, `src/chat/memory.rs` are large; search by function/id first.
+
+## Required workflow
 
 ```bash
-rtk cargo build 2>&1 | head -30  # ОБЯЗАТЕЛЬНО после любых правок Rust
-rtk cargo fmt                     # форматирование
-rtk cargo test                    # тесты
+rtk cargo build 2>&1 | head -30
+rtk cargo fmt
+rtk cargo test
 ```
 
-> **Правило**: не коммитить и не мержить без успешного `cargo build`.
+- New task -> new branch.
+- Do not commit/merge without successful build.
+- Before committing user-visible changes, bump versions in both `Cargo.toml` files and `Cargo.lock`.
+- Version rule: patch for fixes/small internals, minor for compatible CLI/API features, major for breaking changes.
 
-## Структура
+## Map
 
-```
-src/
-  cli/
-    mod.rs        — run(), dispatch, shared helpers (prompt, request_pricing)
-    args.rs       — все *Args structs (clap)
-    commands/     — по файлу на команду (ask, chat, compare, setup, profile, ...)
-  web/
-    mod.rs        — Axum server + handlers + типы
-    ui.html       — Web UI (HTML/CSS/JS), подключается через include_str!
-  chat/           — ask/chat/compare, ConversationGoal, local agent runtime
-  config.rs       — AppConfig / ProfileConfig (TOML)
-  secrets.rs      — keyring, provider-scoped токены
-  errors.rs       — AppError, ProviderHttpError
-  providers/
-    mod.rs              — ProviderKind, trait ProviderClient, общие типы
-    openai_compatible.rs — Chat Completions impl (используется всеми)
-    openrouter.rs       — spec
-    deepseek.rs         — spec
-    gigachat.rs         — spec + custom CA bundle
-    kimi.rs             — spec
-  bin/ai.rs       — точка входа бинарника `ai`
-  lib.rs          — pub mod (использует #[path] для cli/ и web/)
-crates/aiteach-compat/  — legacy бинарник `aiteach`
-tests/http_mock.rs      — интеграционные тесты через wiremock
-docs/
-  architecture.md — обзор стека
-  checks.md       — чеклист перед релизом
-  debugging.md    — маршруты расследования багов
-```
+- CLI: `src/cli/README.md`, `src/cli/mod.rs`, `src/cli/commands/*`.
+- Cheap navigation index: `docs/agent-index.md`.
+- Web/API/UI: `src/web/README.md`, `src/web/mod.rs`, `src/web/ui.html`.
+- Chat/session/context/facts/goal: `src/chat/README.md`.
+- Providers/payload/debug/billing: `src/providers/README.md`, `src/providers/openai_compatible.rs`.
+- Config/secrets/errors: `src/config.rs`, `src/secrets.rs`, `src/errors.rs`.
+- HTTP tests: `tests/http_mock.rs`.
 
-## Рабочий процесс
+## Invariants
 
-1. Новая задача → новая ветка.
-2. Изменил код → `rtk cargo fmt` + `rtk cargo test`.
-3. Перед коммитом → поднять версию в `Cargo.toml` + `crates/aiteach-compat/Cargo.toml` + `Cargo.lock`.
-4. После завершения → смержить в `dev` и `main`.
-
-Версии: `patch` — фикс/внутренние правки, `minor` — новая CLI/API фича, `major` — breaking change.
-
-## Ключевые инварианты
-
-- Токены **никогда** не попадают в config и не печатаются полностью.
-- Config хранит профили + `active_profile`; секреты — только в keyring.
-- CLI и web используют **один и тот же** слой provider-клиентов.
-- `AppError` — единственный тип ошибок; `anyhow` только в `main`.
-- Версия одинакова в обоих `Cargo.toml`.
-
-## Добавить провайдера
-
-1. `src/providers/<name>.rs` → `pub fn spec() -> ProviderSpec`.
-2. `src/providers/mod.rs` → вариант в `ProviderKind`, `all()`, `Display`, `FromStr`, `spec()`.
-3. Тест в `tests/http_mock.rs`.
-
-## Добавить параметр ответа
-
-1. Поле в `ResponseControl` / `ChatRequest` (`providers/mod.rs`).
-2. Включить в payload (`providers/openai_compatible.rs`).
-3. Флаг в `AskArgs`/`ChatArgs` (`src/cli/args.rs`).
-4. Проброс в command handler (`src/cli/commands/` или `src/cli/mod.rs`).
-5. Поле в JSON API (`src/web/mod.rs`) и HTML (`src/web/ui.html`).
+- Never persist or print full tokens.
+- Config and secrets stay separate.
+- CLI and web share provider clients.
+- `AppError` is the user-facing error path.
+- Keep versions synchronized.

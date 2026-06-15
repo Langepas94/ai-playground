@@ -13,9 +13,9 @@ CLI / web UI
 ## С чего начинать расследование
 
 - CLI команда ведет себя странно: `src/cli/README.md`, затем `src/cli/mod.rs` для dispatch или конкретный файл в `src/cli/commands/`.
-- Web UI или JSON API сломаны: `src/web/README.md`, затем handler в `src/web/mod.rs`, DTO рядом в этом же файле, token/error/parameter helpers в соседних модулях.
+- Web UI или JSON API сломаны: `src/web/README.md`, затем handler в `src/web/mod.rs`, DTO рядом в этом же файле, token/error/parameter helpers в соседних модулях. Web unit-тесты: `src/web/tests.rs`.
 - Ответ модели, payload, usage, cost или список моделей неверные: `src/providers/README.md`, затем `src/providers/openai_compatible.rs`.
-- История, context strategy, facts, ветки диалога, goal mode или интерактивный чат работают не так: `src/chat/README.md`.
+- История, context strategy, facts, ветки диалога, goal mode или интерактивный чат работают не так: `src/chat/README.md`. Тесты агента/памяти: `src/chat/agent_tests.rs`, `src/chat/memory_tests.rs`.
 - Профиль не находится, active profile неверный, TOML не читается: `src/config.rs`.
 - Токен не находится, миграция keychain странная, секрет напечатался: `src/secrets.rs`.
 - Ошибка плохо выглядит пользователю: `src/errors.rs`.

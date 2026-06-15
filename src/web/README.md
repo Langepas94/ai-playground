@@ -4,7 +4,8 @@
 
 ## Файлы
 
-- `mod.rs` - Axum server, routes, handlers, request/response DTO и tests.
+- `mod.rs` - Axum server, routes, handlers и request/response DTO.
+- `tests.rs` - unit-тесты web handlers/DTO/UI string checks.
 - `error.rs` - преобразование `AppError` в HTTP status + JSON error body.
 - `parameters.rs` - web-facing constraints для provider response controls.
 - `tokens.rs` - web token override/status/lookup rules.

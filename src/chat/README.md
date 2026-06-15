@@ -6,9 +6,11 @@
 
 - `mod.rs` - публичный API: `ask_once`, `compare_*`, `format_request_metrics`, re-export ключевых типов.
 - `agent.rs` - `ChatAgent`: история, context strategy, сборка `ChatRequest`, вызов provider client.
+- `agent_tests.rs` - unit-тесты `ChatAgent`.
 - `session.rs` - интерактивный `ai chat`, slash-команды и terminal I/O.
 - `goal.rs` - `ConversationGoal`, `GoalState`, stop modes и сравнение goal режимов.
 - `memory.rs` - `AgentMemory`, `MemoryConfig`, summary, sticky facts и выбор сообщений для context strategies.
+- `memory_tests.rs` - unit-тесты `AgentMemory`.
 - `token_accounting.rs` - локальная оценка токенов запроса, истории, ответа, стоимости и overflow по context limit.
 - `store.rs` - `LocalSessionStore`: TOON-сессии, context sidecar, индекс последней сессии.
 - `history.rs` - сохранение истории в файл.
