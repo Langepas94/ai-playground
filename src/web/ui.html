@@ -1017,6 +1017,10 @@
             </div>
             <h3>Контекст агента в запросе</h3>
             <div id="profileAgentContext" class="topic-debug">Войди в агента, чтобы увидеть сохранённый контекст.</div>
+            <label>Domain / project context<textarea id="profileAgentDomain" rows="5" placeholder="Контекст, который уходит как [agent:domain]"></textarea></label>
+            <label>Инварианты<textarea id="profileAgentInvariants" rows="3" placeholder="по одному на строку"></textarea></label>
+            <button id="profileAgentContextSave" type="button">Сохранить контекст агента</button>
+            <div id="profileAgentContextStatus" class="field-help"></div>
             <div id="profileFields" class="profile-fields">Войди в агента, чтобы увидеть профиль.</div>
             <div id="profilePending" class="field-help"></div>
             <h3>Факты long-term</h3>
@@ -1327,6 +1331,7 @@
     let chatSessionId = null;
     let forceNewSession = false;
     let activeAgentId = localStorage.getItem('ai_active_agent') || null;
+    let activeAgent = null;
     let activeUserProfileId = localStorage.getItem('ai_active_user_profile') || '';
     let userProfiles = [];
     let pendingAttachments = []; // [{name, content}]
@@ -2260,6 +2265,9 @@
       const panel = $('profileAgentContext');
       if (!panel) return;
       agent = agent || {};
+      activeAgent = agent;
+      $('profileAgentDomain').value = agent.domain || '';
+      $('profileAgentInvariants').value = (agent.invariants || []).join('\n');
       const rows = [];
       if ((agent.domain || '').trim()) {
         rows.push(`<span class="metric-line"><em>[agent:domain]</em><b>${escapeHtml(agent.domain.trim())}</b></span>`);
@@ -2271,6 +2279,33 @@
       panel.innerHTML = rows.length
         ? `<div class="metric-lines">${rows.join('')}</div>`
         : '<span class="field-help">У агента нет сохранённого domain/invariants. Ниже можно записать отдельные long-term факты.</span>';
+    }
+
+    function agentContextPayload() {
+      return {
+        id: activeAgentId,
+        name: activeAgent?.name || $('activeAgentName').textContent,
+        provider: currentProvider(),
+        base_url: $('baseUrl').value.trim(),
+        model: selectedModel(),
+        system_prompt: textValue('systemPrompt'),
+        domain: $('profileAgentDomain').value.trim(),
+        invariants: lineToList('profileAgentInvariants'),
+        memory: memoryPayload(),
+      };
+    }
+
+    async function saveAgentContextFromProfile() {
+      if (!activeAgentId) { $('profileAgentContextStatus').textContent = 'Сначала войди в агента.'; return; }
+      try {
+        const data = await agentsManage({ action: 'save', agent: agentContextPayload() });
+        activeAgent = data.agent;
+        renderProfileAgentContext(data.agent);
+        renderInvariants(data.agent.invariants);
+        $('profileAgentContextStatus').textContent = 'Контекст агента сохранён.';
+      } catch (error) {
+        $('profileAgentContextStatus').textContent = 'Ошибка: ' + error.message;
+      }
     }
 
     function renderStageFlow(stage) {
@@ -2329,6 +2364,7 @@
       try {
         const data = await agentsManage({ action: 'load', id });
         const agent = data.agent || {};
+        activeAgent = agent;
         activeAgentId = agent.id || id;
         localStorage.setItem('ai_active_agent', activeAgentId);
         if (agent.provider) { $('provider').value = agent.provider; $('provider').dispatchEvent(new Event('change', { bubbles: true })); }
@@ -2466,20 +2502,13 @@
     async function saveInvariants() {
       if (!activeAgentId) { $('invariantsStatusLine').textContent = 'Сначала войди в агента.'; return; }
       try {
+        $('profileAgentInvariants').value = $('invariantsBox').value;
         const data = await agentsManage({
           action: 'save',
-          agent: {
-            id: activeAgentId,
-            name: $('activeAgentName').textContent,
-            provider: currentProvider(),
-            base_url: $('baseUrl').value.trim(),
-            model: selectedModel(),
-            system_prompt: textValue('systemPrompt'),
-            domain: null,
-            invariants: lineToList('invariantsBox'),
-            memory: memoryPayload(),
-          },
+          agent: agentContextPayload(),
         });
+        activeAgent = data.agent;
+        renderProfileAgentContext(data.agent);
         renderInvariants(data.agent.invariants);
         $('invariantsStatusLine').textContent = 'Инварианты сохранены.';
       } catch (error) {
@@ -3326,6 +3355,7 @@
     $('gateSchemaAdd').addEventListener('click', () => addSchemaRow());
     $('gateCreate').addEventListener('click', createAgentFromGate);
     $('invariantsSave').addEventListener('click', saveInvariants);
+    $('profileAgentContextSave').addEventListener('click', saveAgentContextFromProfile);
     $('dialogNew').addEventListener('click', newDialog);
     $('userProfileSelect').addEventListener('change', () => {
       activeUserProfileId = $('userProfileSelect').value || '';

@@ -1259,7 +1259,11 @@ fn web_ui_is_agent_centric() {
     // Stateful panes: profile (interview), task (stage FSM), invariants.
     assert!(INDEX_HTML.contains("data-tab=\"aprofile\""));
     assert!(INDEX_HTML.contains("id=\"profileAgentContext\""));
+    assert!(INDEX_HTML.contains("id=\"profileAgentDomain\""));
+    assert!(INDEX_HTML.contains("id=\"profileAgentInvariants\""));
+    assert!(INDEX_HTML.contains("id=\"profileAgentContextSave\""));
     assert!(INDEX_HTML.contains("function renderProfileAgentContext(agent)"));
+    assert!(INDEX_HTML.contains("function saveAgentContextFromProfile()"));
     assert!(INDEX_HTML.contains("renderProfileAgentContext(agent);"));
     assert!(INDEX_HTML.contains("renderProfileAgentContext(data.agent);"));
     assert!(INDEX_HTML.contains("[agent:domain]"));
@@ -1317,6 +1321,27 @@ fn web_ui_profile_tab_long_term_editor_is_actionable() {
     assert!(body.contains("$('profileLongTermKey').value = '';"));
     assert!(body.contains("$('profileLongTermValue').value = '';"));
     assert!(body.contains("Укажите ключ и значение."));
+}
+
+#[test]
+fn web_ui_profile_tab_can_edit_agent_context_without_erasing_domain() {
+    assert!(INDEX_HTML.contains("domain: $('profileAgentDomain').value.trim()"));
+    assert!(INDEX_HTML.contains("invariants: lineToList('profileAgentInvariants')"));
+    assert!(INDEX_HTML.contains(
+        "$('profileAgentContextSave').addEventListener('click', saveAgentContextFromProfile);"
+    ));
+
+    let marker = "async function saveInvariants()";
+    let start = INDEX_HTML.find(marker).expect("saveInvariants");
+    let body = &INDEX_HTML[start..INDEX_HTML.len().min(start + 900)];
+    assert!(
+        body.contains("agent: agentContextPayload()"),
+        "saving invariants must preserve the editable agent domain/context"
+    );
+    assert!(
+        !body.contains("domain: null"),
+        "saving invariants must not wipe [agent:domain]"
+    );
 }
 
 #[test]
