@@ -1015,6 +1015,8 @@
             <div class="field-help">
               Схема интервью заполняется агентом из диалога. Дополнительные долговременные факты можно записать вручную ниже; они идут в каждый запрос блоком <code>[memory:long-term]</code>.
             </div>
+            <h3>Контекст агента в запросе</h3>
+            <div id="profileAgentContext" class="topic-debug">Войди в агента, чтобы увидеть сохранённый контекст.</div>
             <div id="profileFields" class="profile-fields">Войди в агента, чтобы увидеть профиль.</div>
             <div id="profilePending" class="field-help"></div>
             <h3>Факты long-term</h3>
@@ -2254,6 +2256,23 @@
         : 'Все обязательные поля заполнены.';
     }
 
+    function renderProfileAgentContext(agent) {
+      const panel = $('profileAgentContext');
+      if (!panel) return;
+      agent = agent || {};
+      const rows = [];
+      if ((agent.domain || '').trim()) {
+        rows.push(`<span class="metric-line"><em>[agent:domain]</em><b>${escapeHtml(agent.domain.trim())}</b></span>`);
+      }
+      const invariants = agent.invariants || [];
+      if (invariants.length) {
+        rows.push(`<span class="metric-line"><em>[invariants]</em><b>${invariants.map(escapeHtml).join('<br>')}</b></span>`);
+      }
+      panel.innerHTML = rows.length
+        ? `<div class="metric-lines">${rows.join('')}</div>`
+        : '<span class="field-help">У агента нет сохранённого domain/invariants. Ниже можно записать отдельные long-term факты.</span>';
+    }
+
     function renderStageFlow(stage) {
       const idx = TASK_STAGES.indexOf(stage || 'clarify');
       $('taskStageFlow').innerHTML = TASK_STAGES.map((s, i) => {
@@ -2319,6 +2338,7 @@
           if ($('model').value !== agent.model) $('customModel').value = agent.model;
         }
         applyAgentMemoryToForm(agent.memory);
+        renderProfileAgentContext(agent);
         renderProfilePane(data.profile);
         renderTaskPane(null);
         renderInvariants(agent.invariants);
@@ -2344,6 +2364,7 @@
       if (!activeAgentId) return;
       try {
         const data = await agentsManage({ action: 'load', id: activeAgentId, session_id: chatSessionId || null });
+        renderProfileAgentContext(data.agent);
         renderProfilePane(data.profile);
         renderTaskPane(data.task);
         setActiveAgentChip($('activeAgentName').textContent, (data.task && data.task.stage) || 'clarify');

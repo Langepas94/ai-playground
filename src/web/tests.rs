@@ -1258,6 +1258,11 @@ fn web_ui_is_agent_centric() {
     assert!(!INDEX_HTML.contains("Обязательные поля профиля (по одному на строку"));
     // Stateful panes: profile (interview), task (stage FSM), invariants.
     assert!(INDEX_HTML.contains("data-tab=\"aprofile\""));
+    assert!(INDEX_HTML.contains("id=\"profileAgentContext\""));
+    assert!(INDEX_HTML.contains("function renderProfileAgentContext(agent)"));
+    assert!(INDEX_HTML.contains("renderProfileAgentContext(agent);"));
+    assert!(INDEX_HTML.contains("renderProfileAgentContext(data.agent);"));
+    assert!(INDEX_HTML.contains("[agent:domain]"));
     assert!(INDEX_HTML.contains("id=\"profileLongTermFacts\""));
     assert!(INDEX_HTML.contains("id=\"profileLongTermAdd\""));
     assert!(INDEX_HTML.contains("function renderProfileLongTermFacts(facts)"));
