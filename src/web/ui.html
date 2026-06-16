@@ -996,12 +996,8 @@
               <summary>Создать / обновить профиль</summary>
               <div class="panel-body">
                 <label>Название<input id="userProfileName" spellcheck="false" placeholder="напр. artem-short-russian"></label>
-                <label>Стиль<textarea id="userProfileStyle" rows="2" placeholder="по одному правилу на строку"></textarea></label>
-                <label>Формат<textarea id="userProfileFormat" rows="2"></textarea></label>
-                <label>Ограничения<textarea id="userProfileConstraints" rows="2"></textarea></label>
-                <label>Язык<textarea id="userProfileLanguage" rows="2" placeholder="русский, коротко"></textarea></label>
-                <label>Длина ответа<input id="userProfileLength" spellcheck="false" placeholder="short / detailed / ..."></label>
-                <label>Custom instructions<textarea id="userProfileCustom" rows="3"></textarea></label>
+                <label>Как отвечать пользователю<textarea id="userProfileInstructions" rows="7" placeholder="Например: отвечай по-русски, коротко и практично. Если вопрос про бизнес, сначала дай готовый вариант, потом пояснение. Не используй таблицы без просьбы."></textarea></label>
+                <label>Длина ответа<input id="userProfileLength" spellcheck="false" placeholder="например: коротко / подробно"></label>
                 <button id="userProfileSave" type="button">Сохранить профиль</button>
               </div>
             </details>
@@ -2052,12 +2048,12 @@
       return {
         id: $('userProfileSelect').value || null,
         display_name: $('userProfileName').value.trim(),
-        style_preferences: lineToList('userProfileStyle'),
-        format_preferences: lineToList('userProfileFormat'),
-        constraints: lineToList('userProfileConstraints'),
-        language_preferences: lineToList('userProfileLanguage'),
+        style_preferences: [],
+        format_preferences: [],
+        constraints: [],
+        language_preferences: [],
         response_length: $('userProfileLength').value.trim(),
-        custom_instructions: $('userProfileCustom').value.trim()
+        custom_instructions: $('userProfileInstructions').value.trim()
       };
     }
 
@@ -2098,12 +2094,22 @@
       const profile = userProfiles.find((item) => item.id === $('userProfileSelect').value);
       if (!profile) return;
       $('userProfileName').value = profile.display_name || '';
-      $('userProfileStyle').value = (profile.style_preferences || []).join('\n');
-      $('userProfileFormat').value = (profile.format_preferences || []).join('\n');
-      $('userProfileConstraints').value = (profile.constraints || []).join('\n');
-      $('userProfileLanguage').value = (profile.language_preferences || []).join('\n');
       $('userProfileLength').value = profile.response_length || '';
-      $('userProfileCustom').value = profile.custom_instructions || '';
+      $('userProfileInstructions').value = compactUserProfileInstructions(profile);
+    }
+
+    function compactUserProfileInstructions(profile) {
+      const chunks = [];
+      const legacy = []
+        .concat(profile.style_preferences || [])
+        .concat(profile.format_preferences || [])
+        .concat(profile.constraints || [])
+        .concat(profile.language_preferences || [])
+        .map((item) => (item || '').trim())
+        .filter(Boolean);
+      if (legacy.length) chunks.push(legacy.join('\n'));
+      if ((profile.custom_instructions || '').trim()) chunks.push(profile.custom_instructions.trim());
+      return chunks.join('\n\n');
     }
 
     // ---- Gate: list + create --------------------------------------------

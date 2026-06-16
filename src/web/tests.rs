@@ -1286,6 +1286,15 @@ fn web_ui_is_agent_centric() {
     assert!(INDEX_HTML.contains("id=\"activeAgentBar\""));
     assert!(INDEX_HTML.contains("data-tab=\"userprofile\""));
     assert!(INDEX_HTML.contains("id=\"userProfileSelect\""));
+    assert!(INDEX_HTML.contains("id=\"userProfileInstructions\""));
+    assert!(INDEX_HTML.contains("Как отвечать пользователю"));
+    assert!(INDEX_HTML.contains("custom_instructions: $('userProfileInstructions').value.trim()"));
+    assert!(!INDEX_HTML.contains("id=\"userProfileStyle\""));
+    assert!(!INDEX_HTML.contains("id=\"userProfileFormat\""));
+    assert!(!INDEX_HTML.contains("id=\"userProfileConstraints\""));
+    assert!(!INDEX_HTML.contains("id=\"userProfileLanguage\""));
+    assert!(!INDEX_HTML.contains("id=\"userProfileCustom\""));
+    assert!(!INDEX_HTML.contains("по одному правилу на строку"));
     assert!(INDEX_HTML.contains("/api/user-profiles/manage"));
     assert!(INDEX_HTML.contains("user_profile_id: activeUserProfileId || '__none__'"));
     assert!(INDEX_HTML.contains("Переключение не меняет agent definition"));
