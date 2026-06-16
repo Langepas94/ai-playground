@@ -1093,12 +1093,10 @@ async fn user_profiles_manage(
         }
         "bind" => {
             let mut bindings = state.sessions.load_user_profile_bindings()?;
-            if let Some(profile_id) = request
-                .active_profile_id
-                .as_deref()
-                .and_then(blank_str_to_none)
-            {
-                bindings.active_profile_id = profile_id.to_string();
+            if let Some(active_profile_id) = request.active_profile_id.as_deref() {
+                bindings.active_profile_id = blank_str_to_none(active_profile_id)
+                    .map(str::to_string)
+                    .unwrap_or_default();
             }
             if let Some(agent_id) = request.agent_id.as_deref().and_then(blank_str_to_none) {
                 match request

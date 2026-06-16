@@ -280,6 +280,100 @@ async fn same_agent_can_use_different_user_profiles_at_runtime() {
     assert!(second.contains("[agent:domain] Specialization/background: support-agent"));
 }
 
+#[tokio::test]
+async fn user_profile_stays_lower_priority_than_agent_context() {
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec!["ok".to_string()]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_domain("Rust backend agent");
+    agent.set_invariants(vec!["Answer only in Russian".to_string()]);
+    agent.set_user_profile(Some(crate::chat::store::UserProfile {
+        id: "english-detailed".to_string(),
+        display_name: "English detailed".to_string(),
+        language_preferences: vec!["Always answer in English".to_string()],
+        response_length: "very detailed".to_string(),
+        ..crate::chat::store::UserProfile::default()
+    }));
+
+    agent
+        .respond(&client, "explain lifetimes".to_string())
+        .await
+        .expect("respond");
+
+    let seen = client.seen_messages.lock().unwrap();
+    let messages = &seen[0];
+    let domain_index = messages
+        .iter()
+        .position(|message| message.content.contains("[agent:domain]"))
+        .expect("domain block");
+    let invariants_index = messages
+        .iter()
+        .position(|message| message.content.contains("[invariants]"))
+        .expect("invariants block");
+    let user_profile_index = messages
+        .iter()
+        .position(|message| message.content.contains("[user-profile]"))
+        .expect("user profile block");
+
+    assert!(domain_index < user_profile_index);
+    assert!(invariants_index < user_profile_index);
+    assert!(
+        messages[user_profile_index]
+            .content
+            .contains("apply this profile to style, format, language"),
+        "profile block should be scoped to presentation preferences"
+    );
+    assert!(
+        messages[user_profile_index]
+            .content
+            .contains("Do not change the agent identity, tools, workflow, or capabilities"),
+        "profile must not override agent identity or capabilities"
+    );
+}
+
+#[tokio::test]
+async fn empty_user_profile_is_not_injected() {
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec!["ok".to_string()]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_user_profile(Some(crate::chat::store::UserProfile::default()));
+
+    agent
+        .respond(&client, "hello".to_string())
+        .await
+        .expect("respond");
+
+    let seen = client.seen_messages.lock().unwrap();
+    assert!(
+        seen[0]
+            .iter()
+            .all(|message| !message.content.contains("[user-profile]")),
+        "empty profile should not add an inert prompt block"
+    );
+}
+
 #[test]
 fn task_block_keeps_tracked_task_as_context_not_a_gate() {
     let block = render_task_block(&crate::chat::store::TaskContext {

@@ -113,6 +113,50 @@ fn web_test_chat_agent() -> ChatAgent {
     )
 }
 
+fn web_test_state(store: LocalSessionStore) -> AppState {
+    AppState {
+        client: ReqwestProviderClient::new().expect("client"),
+        secrets: std::sync::Arc::new(MemorySecretStore::default()),
+        sessions: store,
+        prices: LiteLlmPriceCatalog::new().expect("prices"),
+    }
+}
+
+#[tokio::test]
+async fn user_profiles_bind_can_clear_active_profile() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalSessionStore::from_root(dir.path().join("sessions"));
+    store
+        .save_user_profile_bindings(&UserProfileBindings {
+            active_profile_id: "artem-short-russian".to_string(),
+            ..UserProfileBindings::default()
+        })
+        .expect("save bindings");
+    let state = web_test_state(store);
+
+    let result = user_profiles_manage(
+        State(state),
+        Json(UserProfilesManageRequest {
+            action: "bind".to_string(),
+            active_profile_id: Some(String::new()),
+            id: None,
+            profile: None,
+            agent_id: None,
+            default_profile_id: None,
+        }),
+    )
+    .await;
+    let Json(response) = match result {
+        Ok(response) => response,
+        Err(_) => panic!("bind should succeed"),
+    };
+
+    assert!(
+        response.bindings.active_profile_id.is_empty(),
+        "clearing the UI selection must not keep injecting the old active profile"
+    );
+}
+
 #[test]
 fn web_token_uses_provider_keyring_when_form_is_empty() {
     let secrets = MemorySecretStore::default();
@@ -1251,6 +1295,35 @@ fn web_ui_renders_memory_layers_control() {
     assert!(INDEX_HTML.contains("/api/memory/update"));
     assert!(INDEX_HTML.contains("saved_agent_id: activeAgentId || null"));
     assert!(INDEX_HTML.contains("memoryFactAdd"));
+}
+
+#[test]
+fn web_ui_profile_tab_long_term_editor_is_actionable() {
+    let marker = "$('profileLongTermAdd').addEventListener('click'";
+    let start = INDEX_HTML.find(marker).expect("profile long-term handler");
+    let body = &INDEX_HTML[start..INDEX_HTML.len().min(start + 900)];
+
+    assert!(
+        body.contains(
+            "memoryUpdate('set', { layer: 'long-term', key, value }, 'profileLongTermStatus')"
+        ),
+        "profile tab must write facts into the long-term layer, not only render static text"
+    );
+    assert!(body.contains("$('profileLongTermKey').value = '';"));
+    assert!(body.contains("$('profileLongTermValue').value = '';"));
+    assert!(body.contains("Укажите ключ и значение."));
+}
+
+#[test]
+fn web_ui_empty_user_profile_selection_disables_runtime_profile() {
+    let marker = "function chatPayload()";
+    let start = INDEX_HTML.find(marker).expect("chatPayload");
+    let body = &INDEX_HTML[start..INDEX_HTML.len().min(start + 1600)];
+
+    assert!(
+        body.contains("user_profile_id: activeUserProfileId || '__none__'"),
+        "empty UI selection must send an explicit no-profile sentinel"
+    );
 }
 
 #[test]

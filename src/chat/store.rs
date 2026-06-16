@@ -1707,6 +1707,67 @@ mod tests {
     }
 
     #[test]
+    fn user_profile_resolution_priority_is_explicit_agent_default_then_active() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalSessionStore::from_root(dir.path().join("sessions"));
+        for id in ["active", "agent-default", "explicit"] {
+            store
+                .save_user_profile(&UserProfile {
+                    id: id.to_string(),
+                    display_name: id.to_string(),
+                    updated_at_unix: 1,
+                    ..UserProfile::default()
+                })
+                .expect("save profile");
+        }
+        let mut bindings = UserProfileBindings {
+            active_profile_id: "active".to_string(),
+            ..UserProfileBindings::default()
+        };
+        bindings
+            .default_profile_per_agent
+            .insert("coding-agent".to_string(), "agent-default".to_string());
+        store
+            .save_user_profile_bindings(&bindings)
+            .expect("save bindings");
+
+        assert_eq!(
+            store
+                .resolve_user_profile(Some("explicit"), Some("coding-agent"))
+                .expect("explicit")
+                .expect("profile")
+                .id,
+            "explicit",
+            "explicit runtime selection must win"
+        );
+        assert_eq!(
+            store
+                .resolve_user_profile(None, Some("coding-agent"))
+                .expect("agent default")
+                .expect("profile")
+                .id,
+            "agent-default",
+            "agent default is selection metadata, not ownership"
+        );
+        assert_eq!(
+            store
+                .resolve_user_profile(None, Some("other-agent"))
+                .expect("active")
+                .expect("profile")
+                .id,
+            "active",
+            "active profile is the fallback"
+        );
+        assert!(
+            store
+                .resolve_user_profile(Some("missing"), Some("coding-agent"))
+                .expect("missing explicit")
+                .is_none(),
+            "a missing explicit profile must not silently fall back to another profile"
+        );
+    }
+
+    #[test]
     fn task_stage_transitions_enforced() {
         // Legal forward transitions.
         assert!(TaskStage::Clarify.can_transition(TaskStage::Planning));
