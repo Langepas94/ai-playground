@@ -697,8 +697,14 @@ async fn agents_manage(
                 .ok_or_else(|| AppError::InvalidInput(format!("Unknown agent: {id}")))?;
             response.agent = Some(agent);
             response.task = match request.session_id.as_deref().and_then(blank_str_to_none) {
-                Some(session_id) => Some(state.sessions.load_dialog_task(&id, session_id)?),
-                None => Some(state.sessions.load_task(&id)?),
+                Some(session_id) => {
+                    response.task_id = state.sessions.dialog_task_id(&id, session_id)?;
+                    Some(state.sessions.load_dialog_task(&id, session_id)?)
+                }
+                None => {
+                    response.task_id = "default".to_string();
+                    Some(state.sessions.load_task(&id)?)
+                }
             };
             response.profile = Some(state.sessions.load_profile(&id)?);
         }
@@ -831,6 +837,52 @@ async fn agents_manage(
                 .ok_or_else(|| AppError::InvalidInput("session_id is required".to_string()))?;
             state.sessions.delete_dialog(&id, session_id)?;
             response.dialogs = state.sessions.list_dialogs(&id)?;
+        }
+        "task-load" => {
+            let id = require_agent_id(request.id.as_deref())?;
+            let task_id = request
+                .task_id
+                .as_deref()
+                .and_then(blank_str_to_none)
+                .map(str::to_string)
+                .unwrap_or_else(|| "default".to_string());
+            if let Some(session_id) = request.session_id.as_deref().and_then(blank_str_to_none) {
+                state
+                    .sessions
+                    .assign_dialog_task(&id, session_id, &task_id)?;
+            }
+            response.task_id = task_id.clone();
+            response.task = Some(state.sessions.load_scoped_task(&id, &task_id)?);
+        }
+        "task-save" => {
+            let id = require_agent_id(request.id.as_deref())?;
+            let task_id = request
+                .task_id
+                .as_deref()
+                .and_then(blank_str_to_none)
+                .map(str::to_string)
+                .unwrap_or_else(|| "default".to_string());
+            let task = request
+                .task
+                .ok_or_else(|| AppError::InvalidInput("Task payload is required".to_string()))?
+                .into_task_context();
+            let saved_task = if let Some(session_id) =
+                request.session_id.as_deref().and_then(blank_str_to_none)
+            {
+                state
+                    .sessions
+                    .assign_dialog_task(&id, session_id, &task_id)?;
+                state.sessions.save_dialog_task(&id, session_id, &task)?;
+                state.sessions.load_dialog_task(&id, session_id)?
+            } else if task_id == "default" {
+                state.sessions.save_task(&id, &task)?;
+                state.sessions.load_task(&id)?
+            } else {
+                state.sessions.save_scoped_task(&id, &task_id, &task)?;
+                state.sessions.load_scoped_task(&id, &task_id)?
+            };
+            response.task_id = task_id.clone();
+            response.task = Some(saved_task);
         }
         other => {
             return Err(AppError::InvalidInput(format!("Unknown agent action: {other}")).into());
@@ -989,6 +1041,10 @@ struct AgentsManageRequest {
     session_id: Option<String>,
     #[serde(default)]
     title: Option<String>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    task: Option<TaskPayload>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1034,11 +1090,43 @@ struct ProfileFieldPayload {
     required: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct TaskPayload {
+    #[serde(default)]
+    stage: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    goal: String,
+    #[serde(default)]
+    plan: Vec<String>,
+    #[serde(default)]
+    results: Vec<String>,
+    #[serde(default)]
+    notes: String,
+}
+
+impl TaskPayload {
+    fn into_task_context(self) -> TaskContext {
+        TaskContext {
+            stage: self.stage.parse().unwrap_or_default(),
+            title: self.title.trim().to_string(),
+            goal: self.goal.trim().to_string(),
+            plan: clean_lines(self.plan),
+            results: clean_lines(self.results),
+            notes: self.notes.trim().to_string(),
+            violations: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Default, Serialize)]
 struct AgentsManageResponse {
     agents: Vec<AgentSummary>,
     agent: Option<SavedAgent>,
     task: Option<TaskContext>,
+    #[serde(default)]
+    task_id: String,
     profile: Option<AgentProfile>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     dialogs: Vec<crate::chat::DialogMeta>,

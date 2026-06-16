@@ -424,6 +424,57 @@ fn saved_agent_can_load_different_task_when_dialog_is_assigned_elsewhere() {
 }
 
 #[tokio::test]
+async fn agents_manage_can_manually_save_and_bind_dialog_task() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalSessionStore::from_root(dir.path().join("sessions"));
+    store
+        .save_agent(&web_test_agent("menu-agent"))
+        .expect("save agent");
+    let state = web_test_state(store.clone());
+
+    let result = agents_manage(
+        State(state),
+        Json(AgentsManageRequest {
+            action: "task-save".to_string(),
+            id: Some("menu-agent".to_string()),
+            session_id: Some("menu-dialog".to_string()),
+            task_id: Some("menu".to_string()),
+            task: Some(TaskPayload {
+                stage: "execution".to_string(),
+                title: "menu backlog".to_string(),
+                goal: "build potato-first delivery menu".to_string(),
+                plan: vec!["draft sections".to_string(), "price combos".to_string()],
+                results: vec!["approved brand: 34 Картошки".to_string()],
+                notes: "manual note from owner".to_string(),
+            }),
+            agent: None,
+            token: None,
+            token_provider: None,
+            title: None,
+        }),
+    )
+    .await;
+    let Json(response) = match result {
+        Ok(response) => response,
+        Err(_) => panic!("task-save should succeed"),
+    };
+
+    assert_eq!(response.task_id, "menu");
+    assert_eq!(response.task.expect("task").stage.to_string(), "execution");
+    assert_eq!(
+        store.dialog_task_id("menu-agent", "menu-dialog").unwrap(),
+        "menu"
+    );
+
+    let mut agent = web_test_chat_agent();
+    apply_saved_agent_memory(&store, Some("menu-agent"), "menu-dialog", &mut agent)
+        .expect("apply task");
+    let task = agent.task_state().expect("task state");
+    assert_eq!(task.goal, "build potato-first delivery menu");
+    assert_eq!(task.notes, "manual note from owner");
+}
+
+#[tokio::test]
 async fn stateful_postprocess_persists_task_to_shared_feature_scope() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = LocalSessionStore::from_root(dir.path().join("sessions"));
@@ -1272,8 +1323,16 @@ fn web_ui_is_agent_centric() {
     assert!(INDEX_HTML.contains("function renderProfileLongTermFacts(facts)"));
     assert!(INDEX_HTML.contains("layer: 'long-term'"));
     assert!(INDEX_HTML.contains("data-tab=\"task\""));
+    assert!(INDEX_HTML.contains("id=\"taskIdInput\""));
+    assert!(INDEX_HTML.contains("id=\"taskLoad\""));
+    assert!(INDEX_HTML.contains("id=\"taskSave\""));
+    assert!(INDEX_HTML.contains("id=\"taskStageSelect\""));
+    assert!(INDEX_HTML.contains("id=\"taskGoalInput\""));
+    assert!(INDEX_HTML.contains("function saveTaskFromForm()"));
+    assert!(INDEX_HTML.contains("action: 'task-save'"));
+    assert!(INDEX_HTML.contains("action: 'task-load'"));
     assert!(INDEX_HTML.contains("data-tab=\"invariants\""));
-    assert!(INDEX_HTML.contains("несколько чатов могут использовать одну задачу"));
+    assert!(INDEX_HTML.contains("Task id привязывает текущий чат"));
     assert!(!INDEX_HTML.contains("общая для всех диалогов агента"));
     // Wiring: build-schema action, gate↔workspace, agent_state rendering.
     assert!(INDEX_HTML.contains("/api/agents/manage"));

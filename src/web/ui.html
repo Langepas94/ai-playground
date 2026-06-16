@@ -1038,17 +1038,32 @@
           <div class="group">
             <h2>🔵 Задача (рабочая память)</h2>
             <div class="field-help">
-              Стадия задачи ведётся автоматически (state machine) для рабочей фичи; несколько чатов могут использовать одну задачу. Идёт в каждый запрос блоком <code>[memory:working]</code>.
+              Рабочую задачу можно вести автоматически или руками. Task id привязывает текущий чат к отдельному task-файлу; несколько чатов могут использовать один task id. Идёт в каждый запрос блоком <code>[memory:working]</code>.
+            </div>
+            <label>Task id<input id="taskIdInput" spellcheck="false" placeholder="default / menu / naming"></label>
+            <div class="actions">
+              <button id="taskLoad" class="secondary" type="button">Загрузить task</button>
+              <button id="taskSave" type="button">Сохранить task</button>
             </div>
             <div class="model-meta-row">
               <span class="model-meta-label">Стадия:</span>
               <span id="taskStageBadge" class="context-badge">—</span>
             </div>
             <div id="taskStageFlow" class="stage-flow"></div>
-            <label>Цель<div id="taskGoalView" class="readonly-box">—</div></label>
-            <label>План<div id="taskPlanView" class="readonly-box">—</div></label>
-            <label>Результаты<div id="taskResultsView" class="readonly-box">—</div></label>
+            <label>Стадия<select id="taskStageSelect">
+              <option value="clarify">clarify</option>
+              <option value="planning">planning</option>
+              <option value="execution">execution</option>
+              <option value="validation">validation</option>
+              <option value="done">done</option>
+            </select></label>
+            <label>Название<input id="taskTitleInput" spellcheck="false"></label>
+            <label>Цель<textarea id="taskGoalInput" rows="3"></textarea></label>
+            <label>План<textarea id="taskPlanInput" rows="5" placeholder="по одному пункту на строку"></textarea></label>
+            <label>Результаты<textarea id="taskResultsInput" rows="5" placeholder="по одному результату на строку"></textarea></label>
+            <label>Заметки<textarea id="taskNotesInput" rows="4"></textarea></label>
             <div id="taskTransitionLine" class="field-help"></div>
+            <div id="taskStatusLine" class="field-help"></div>
           </div>
         </div>
 
@@ -1332,6 +1347,7 @@
     let forceNewSession = false;
     let activeAgentId = localStorage.getItem('ai_active_agent') || null;
     let activeAgent = null;
+    let activeTaskId = 'default';
     let activeUserProfileId = localStorage.getItem('ai_active_user_profile') || '';
     let userProfiles = [];
     let pendingAttachments = []; // [{name, content}]
@@ -1995,6 +2011,10 @@
       return $(id).value.split('\n').map((s) => s.trim()).filter(Boolean);
     }
 
+    function listToLines(list) {
+      return (list || []).join('\n');
+    }
+
     function renderUserProfiles(bindings) {
       const select = $('userProfileSelect');
       select.innerHTML = '<option value="">— без профиля —</option>' + userProfiles
@@ -2320,10 +2340,53 @@
       task = task || {};
       const stage = task.stage || 'clarify';
       $('taskStageBadge').textContent = stage;
+      $('taskStageSelect').value = TASK_STAGES.includes(stage) ? stage : 'clarify';
       renderStageFlow(stage);
-      $('taskGoalView').textContent = task.goal || '—';
-      $('taskPlanView').textContent = (task.plan && task.plan.length) ? task.plan.map((p) => '• ' + p).join('\n') : '—';
-      $('taskResultsView').textContent = (task.results && task.results.length) ? task.results.map((p) => '• ' + p).join('\n') : '—';
+      $('taskTitleInput').value = task.title || '';
+      $('taskGoalInput').value = task.goal || '';
+      $('taskPlanInput').value = listToLines(task.plan);
+      $('taskResultsInput').value = listToLines(task.results);
+      $('taskNotesInput').value = task.notes || '';
+    }
+
+    function taskPayloadFromForm() {
+      return {
+        stage: $('taskStageSelect').value,
+        title: $('taskTitleInput').value.trim(),
+        goal: $('taskGoalInput').value.trim(),
+        plan: lineToList('taskPlanInput'),
+        results: lineToList('taskResultsInput'),
+        notes: $('taskNotesInput').value.trim(),
+      };
+    }
+
+    async function loadTaskFromForm() {
+      if (!activeAgentId) { $('taskStatusLine').textContent = 'Сначала войди в агента.'; return; }
+      const taskId = $('taskIdInput').value.trim() || 'default';
+      try {
+        const data = await agentsManage({ action: 'task-load', id: activeAgentId, session_id: chatSessionId || null, task_id: taskId });
+        activeTaskId = data.task_id || taskId;
+        $('taskIdInput').value = activeTaskId;
+        renderTaskPane(data.task);
+        $('taskStatusLine').textContent = `Task '${activeTaskId}' загружен и привязан к текущему чату.`;
+      } catch (error) {
+        $('taskStatusLine').textContent = 'Ошибка загрузки task: ' + error.message;
+      }
+    }
+
+    async function saveTaskFromForm() {
+      if (!activeAgentId) { $('taskStatusLine').textContent = 'Сначала войди в агента.'; return; }
+      const taskId = $('taskIdInput').value.trim() || 'default';
+      try {
+        const data = await agentsManage({ action: 'task-save', id: activeAgentId, session_id: chatSessionId || null, task_id: taskId, task: taskPayloadFromForm() });
+        activeTaskId = data.task_id || taskId;
+        $('taskIdInput').value = activeTaskId;
+        renderTaskPane(data.task);
+        setActiveAgentChip($('activeAgentName').textContent, data.task?.stage || 'clarify');
+        $('taskStatusLine').textContent = `Task '${activeTaskId}' сохранён.`;
+      } catch (error) {
+        $('taskStatusLine').textContent = 'Ошибка сохранения task: ' + error.message;
+      }
     }
 
     function renderInvariants(list) {
@@ -2336,6 +2399,7 @@
       if (!state) return;
       if (state.stage) {
         $('taskStageBadge').textContent = state.stage;
+        $('taskStageSelect').value = TASK_STAGES.includes(state.stage) ? state.stage : 'clarify';
         renderStageFlow(state.stage);
         setActiveAgentChip($('activeAgentName').textContent, state.stage);
       }
@@ -2376,7 +2440,9 @@
         applyAgentMemoryToForm(agent.memory);
         renderProfileAgentContext(agent);
         renderProfilePane(data.profile);
-        renderTaskPane(null);
+        activeTaskId = data.task_id || 'default';
+        $('taskIdInput').value = activeTaskId;
+        renderTaskPane(data.task);
         renderInvariants(agent.invariants);
         setActiveAgentChip(agent.name, 'clarify');
         showWorkspace();
@@ -2402,6 +2468,8 @@
         const data = await agentsManage({ action: 'load', id: activeAgentId, session_id: chatSessionId || null });
         renderProfileAgentContext(data.agent);
         renderProfilePane(data.profile);
+        activeTaskId = data.task_id || activeTaskId || 'default';
+        $('taskIdInput').value = activeTaskId;
         renderTaskPane(data.task);
         setActiveAgentChip($('activeAgentName').textContent, (data.task && data.task.stage) || 'clarify');
       } catch (_) { /* non-fatal */ }
@@ -3357,6 +3425,8 @@
     $('invariantsSave').addEventListener('click', saveInvariants);
     $('profileAgentContextSave').addEventListener('click', saveAgentContextFromProfile);
     $('dialogNew').addEventListener('click', newDialog);
+    $('taskLoad').addEventListener('click', loadTaskFromForm);
+    $('taskSave').addEventListener('click', saveTaskFromForm);
     $('userProfileSelect').addEventListener('change', () => {
       activeUserProfileId = $('userProfileSelect').value || '';
       loadSelectedUserProfileIntoForm();
