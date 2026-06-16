@@ -20,8 +20,9 @@ use crate::{
     chat::memory::{MemoryConfig, MemoryLayer, MemoryStrategy},
     chat::{
         AgentMemory, AgentProfile, AgentSummary, ChatAgent, LocalSessionStore, ProfileField,
-        SavedAgent, SavedMemoryConfig, StatefulReport, TaskContext, add_request_metrics,
-        available_agents, build_profile_schema, selected_agent, web_session_key,
+        SavedAgent, SavedMemoryConfig, StatefulReport, TaskContext, UserProfile,
+        UserProfileBindings, add_request_metrics, available_agents, build_profile_schema,
+        selected_agent, web_session_key,
     },
     config::ProfileConfig,
     errors::AppError,
@@ -77,6 +78,7 @@ pub async fn serve(addr: SocketAddr) -> Result<(), AppError> {
         .route("/api/chat", post(chat))
         .route("/api/memory/update", post(memory_update))
         .route("/api/agents/manage", post(agents_manage))
+        .route("/api/user-profiles/manage", post(user_profiles_manage))
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // 50 MB — для вложений
         .with_state(AppState {
             client,
@@ -287,6 +289,12 @@ async fn chat(
         session.id.as_str(),
         &mut agent,
     )?;
+    apply_runtime_user_profile(
+        &state.sessions,
+        request.user_profile_id.as_deref(),
+        request.saved_agent_id.as_deref(),
+        &mut agent,
+    )?;
     let (response, provider_debug, mut context_metrics) = agent
         .respond_with_debug_and_context_metrics(&state.client, prompt.clone())
         .await?;
@@ -397,6 +405,12 @@ async fn chat_stream(
         &state.sessions,
         request.saved_agent_id.as_deref(),
         session.id.as_str(),
+        &mut agent,
+    )?;
+    apply_runtime_user_profile(
+        &state.sessions,
+        request.user_profile_id.as_deref(),
+        request.saved_agent_id.as_deref(),
         &mut agent,
     )?;
     let prepared_stream = agent.prepare_stream_request(&state.client, &prompt).await?;
@@ -602,6 +616,21 @@ fn apply_saved_agent_memory(
             agent.set_domain(saved.domain);
         }
     }
+    Ok(())
+}
+
+fn apply_runtime_user_profile(
+    store: &LocalSessionStore,
+    explicit_profile_id: Option<&str>,
+    saved_agent_id: Option<&str>,
+    agent: &mut ChatAgent,
+) -> Result<(), AppError> {
+    if explicit_profile_id == Some("__none__") {
+        agent.set_user_profile(None);
+        return Ok(());
+    }
+    let profile = store.resolve_user_profile(explicit_profile_id, saved_agent_id)?;
+    agent.set_user_profile(profile);
     Ok(())
 }
 
@@ -1015,6 +1044,133 @@ struct AgentsManageResponse {
     dialogs: Vec<crate::chat::DialogMeta>,
 }
 
+async fn user_profiles_manage(
+    State(state): State<AppState>,
+    Json(request): Json<UserProfilesManageRequest>,
+) -> Result<Json<UserProfilesManageResponse>, WebError> {
+    let mut response = UserProfilesManageResponse::default();
+    match request.action.as_str() {
+        "list" => {
+            response.profiles = state.sessions.list_user_profiles()?;
+            response.bindings = state.sessions.load_user_profile_bindings()?;
+        }
+        "load" => {
+            let id = require_agent_id(request.id.as_deref())?;
+            response.profile = state.sessions.load_user_profile(&id)?;
+            response.bindings = state.sessions.load_user_profile_bindings()?;
+        }
+        "save" => {
+            let payload = request.profile.ok_or_else(|| {
+                AppError::InvalidInput("User profile payload is required".to_string())
+            })?;
+            let id = payload
+                .id
+                .as_deref()
+                .and_then(blank_str_to_none)
+                .map(str::to_string)
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let profile = UserProfile {
+                id,
+                display_name: payload.display_name.trim().to_string(),
+                style_preferences: clean_lines(payload.style_preferences),
+                format_preferences: clean_lines(payload.format_preferences),
+                constraints: clean_lines(payload.constraints),
+                language_preferences: clean_lines(payload.language_preferences),
+                response_length: payload.response_length.trim().to_string(),
+                custom_instructions: payload.custom_instructions.trim().to_string(),
+                updated_at_unix: crate::chat::unix_now(),
+            };
+            state.sessions.save_user_profile(&profile)?;
+            response.profile = Some(profile);
+            response.profiles = state.sessions.list_user_profiles()?;
+            response.bindings = state.sessions.load_user_profile_bindings()?;
+        }
+        "delete" => {
+            let id = require_agent_id(request.id.as_deref())?;
+            state.sessions.delete_user_profile(&id)?;
+            response.profiles = state.sessions.list_user_profiles()?;
+            response.bindings = state.sessions.load_user_profile_bindings()?;
+        }
+        "bind" => {
+            let mut bindings = state.sessions.load_user_profile_bindings()?;
+            if let Some(profile_id) = request
+                .active_profile_id
+                .as_deref()
+                .and_then(blank_str_to_none)
+            {
+                bindings.active_profile_id = profile_id.to_string();
+            }
+            if let Some(agent_id) = request.agent_id.as_deref().and_then(blank_str_to_none) {
+                match request
+                    .default_profile_id
+                    .as_deref()
+                    .and_then(blank_str_to_none)
+                {
+                    Some(profile_id) => {
+                        bindings
+                            .default_profile_per_agent
+                            .insert(agent_id.to_string(), profile_id.to_string());
+                    }
+                    None => {
+                        bindings.default_profile_per_agent.remove(agent_id);
+                    }
+                }
+            }
+            state.sessions.save_user_profile_bindings(&bindings)?;
+            response.profiles = state.sessions.list_user_profiles()?;
+            response.bindings = bindings;
+        }
+        other => {
+            return Err(
+                AppError::InvalidInput(format!("Unknown user profile action: {other}")).into(),
+            );
+        }
+    }
+    Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
+struct UserProfilesManageRequest {
+    action: String,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    profile: Option<UserProfilePayload>,
+    #[serde(default)]
+    active_profile_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
+    default_profile_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UserProfilePayload {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    display_name: String,
+    #[serde(default)]
+    style_preferences: Vec<String>,
+    #[serde(default)]
+    format_preferences: Vec<String>,
+    #[serde(default)]
+    constraints: Vec<String>,
+    #[serde(default)]
+    language_preferences: Vec<String>,
+    #[serde(default)]
+    response_length: String,
+    #[serde(default)]
+    custom_instructions: String,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct UserProfilesManageResponse {
+    profiles: Vec<UserProfile>,
+    profile: Option<UserProfile>,
+    bindings: UserProfileBindings,
+}
+
 async fn memory_update(
     State(state): State<AppState>,
     Json(request): Json<MemoryUpdateRequest>,
@@ -1247,6 +1403,8 @@ struct ChatWebRequest {
     billing: Option<WebBilling>,
     #[serde(default)]
     saved_agent_id: Option<String>,
+    #[serde(default)]
+    user_profile_id: Option<String>,
 }
 
 impl ChatWebRequest {

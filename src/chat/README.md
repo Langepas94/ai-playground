@@ -152,8 +152,14 @@ read-only facts block при любой context strategy. `Sticky Facts` отв�
 
 `ChatAgent` инъектит память в каждый provider request (`inject_memory_layers`):
 `[agent:domain]`, `[memory:long-term]` (профиль + что ещё спросить),
-`[memory:working]` (стадия + allowed-next + план + «не перепрыгивать стадии»),
+`[memory:working]` (стадия + allowed-next + план как read-only контекст; не
+блокирует соседние запросы пользователя),
 `[invariants]` (+ прошлые нарушения как фидбэк).
+
+Reusable `UserProfile` хранится отдельно от `SavedAgent` и `AgentProfile`.
+Он описывает пользователя (стиль, формат, язык, ограничения ответа) и
+подмешивается только на runtime блоком `[user-profile]`; agent definition не
+владеет им и не дублирует его предпочтения.
 
 `ChatAgent::stateful_postprocess()` после хода (LLM-driven, реюз паттернов
 `update_sticky_facts`/классификатора): заполняет профиль из сообщения юзера

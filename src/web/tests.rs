@@ -180,6 +180,7 @@ fn web_chat_messages_put_system_prompt_before_user_prompt() {
         pricing: None,
         billing: None,
         saved_agent_id: None,
+        user_profile_id: None,
     };
 
     let messages = request.initial_history(Vec::new());
@@ -223,6 +224,7 @@ fn web_chat_history_keeps_prior_messages_and_does_not_duplicate_system_prompt() 
         pricing: None,
         billing: None,
         saved_agent_id: None,
+        user_profile_id: None,
     };
 
     let messages = request.initial_history(Vec::new());
@@ -261,6 +263,7 @@ fn web_chat_initial_history_prefers_local_store_over_client_messages() {
         pricing: None,
         billing: None,
         saved_agent_id: None,
+        user_profile_id: None,
     };
 
     let messages = request.initial_history(vec![ChatMessage {
@@ -800,6 +803,7 @@ fn web_request_pricing_uses_official_deepseek_pricing_before_stale_catalog() {
         pricing: None,
         billing: None,
         saved_agent_id: None,
+        user_profile_id: None,
     };
     let profile = request.profile().expect("profile");
 
@@ -891,6 +895,7 @@ fn web_request_context_limit_prefers_request_then_catalog() {
         pricing: None,
         billing: None,
         saved_agent_id: None,
+        user_profile_id: None,
     };
     let profile = request.profile().expect("profile");
 
@@ -1184,6 +1189,11 @@ fn web_ui_is_agent_centric() {
     assert!(INDEX_HTML.contains("id=\"agentGate\""));
     assert!(INDEX_HTML.contains("id=\"workspace\""));
     assert!(INDEX_HTML.contains("id=\"activeAgentBar\""));
+    assert!(INDEX_HTML.contains("data-tab=\"userprofile\""));
+    assert!(INDEX_HTML.contains("id=\"userProfileSelect\""));
+    assert!(INDEX_HTML.contains("/api/user-profiles/manage"));
+    assert!(INDEX_HTML.contains("user_profile_id: activeUserProfileId || '__none__'"));
+    assert!(INDEX_HTML.contains("Переключение не меняет agent definition"));
     assert!(INDEX_HTML.contains("Создать агента"));
     assert!(INDEX_HTML.contains("id=\"newAgent\""));
     assert!(INDEX_HTML.contains("function showCreateAgentGate()"));

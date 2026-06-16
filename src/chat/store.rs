@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     io::{BufRead, Write},
     path::{Path, PathBuf},
@@ -92,6 +93,45 @@ pub struct SavedMemoryConfig {
     pub topic_auto_create: bool,
     #[serde(default)]
     pub topic_classifier_prompt: String,
+}
+
+/// Reusable user preferences, intentionally separate from `SavedAgent`.
+/// A profile describes the person receiving answers; it does not define agent
+/// identity, tools, workflow, or capabilities.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UserProfile {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub style_preferences: Vec<String>,
+    #[serde(default)]
+    pub format_preferences: Vec<String>,
+    #[serde(default)]
+    pub constraints: Vec<String>,
+    #[serde(default)]
+    pub language_preferences: Vec<String>,
+    #[serde(default)]
+    pub response_length: String,
+    #[serde(default)]
+    pub custom_instructions: String,
+    #[serde(default)]
+    pub updated_at_unix: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UserProfileBindings {
+    #[serde(default)]
+    pub active_profile_id: String,
+    #[serde(default)]
+    pub default_profile_per_agent: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct UserProfilesIndex {
+    #[serde(default)]
+    profiles: Vec<UserProfile>,
 }
 
 /// Stage of the task state machine. Auto-detected by the agent from the dialog,
@@ -312,6 +352,11 @@ struct DialogsIndex {
 
 fn default_task_id() -> String {
     "default".to_string()
+}
+
+fn blank_str_to_none(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if value.is_empty() { None } else { Some(value) }
 }
 
 /// Extract the agent id from a session key of the form `agent:<id>`.
@@ -807,6 +852,100 @@ impl LocalSessionStore {
         self.write_toon(&self.agent_profile_path(id), profile)
     }
 
+    pub fn list_user_profiles(&self) -> Result<Vec<UserProfile>, AppError> {
+        let index: UserProfilesIndex = self
+            .read_toon(&self.user_profiles_index_path())?
+            .unwrap_or_default();
+        let mut profiles = index.profiles;
+        profiles.sort_by(|left, right| right.updated_at_unix.cmp(&left.updated_at_unix));
+        Ok(profiles)
+    }
+
+    pub fn load_user_profile(&self, id: &str) -> Result<Option<UserProfile>, AppError> {
+        let id = id.trim();
+        if id.is_empty() {
+            return Ok(None);
+        }
+        Ok(self
+            .list_user_profiles()?
+            .into_iter()
+            .find(|profile| profile.id == id))
+    }
+
+    pub fn save_user_profile(&self, profile: &UserProfile) -> Result<(), AppError> {
+        if profile.id.trim().is_empty() {
+            return Err(AppError::InvalidInput(
+                "User profile id is required".to_string(),
+            ));
+        }
+        let mut saved = profile.clone();
+        saved.id = saved.id.trim().to_string();
+        saved.display_name = saved.display_name.trim().to_string();
+        if saved.display_name.is_empty() {
+            saved.display_name = saved.id.clone();
+        }
+        let mut index: UserProfilesIndex = self
+            .read_toon(&self.user_profiles_index_path())?
+            .unwrap_or_default();
+        if let Some(existing) = index.profiles.iter_mut().find(|entry| entry.id == saved.id) {
+            *existing = saved;
+        } else {
+            index.profiles.push(saved);
+        }
+        self.write_toon(&self.user_profiles_index_path(), &index)
+    }
+
+    pub fn delete_user_profile(&self, id: &str) -> Result<(), AppError> {
+        let id = id.trim();
+        let mut index: UserProfilesIndex = self
+            .read_toon(&self.user_profiles_index_path())?
+            .unwrap_or_default();
+        index.profiles.retain(|entry| entry.id != id);
+        self.write_toon(&self.user_profiles_index_path(), &index)?;
+        let mut bindings = self.load_user_profile_bindings()?;
+        if bindings.active_profile_id == id {
+            bindings.active_profile_id.clear();
+        }
+        bindings
+            .default_profile_per_agent
+            .retain(|_, profile_id| profile_id != id);
+        self.save_user_profile_bindings(&bindings)
+    }
+
+    pub fn load_user_profile_bindings(&self) -> Result<UserProfileBindings, AppError> {
+        Ok(self
+            .read_toon(&self.user_profile_bindings_path())?
+            .unwrap_or_default())
+    }
+
+    pub fn save_user_profile_bindings(
+        &self,
+        bindings: &UserProfileBindings,
+    ) -> Result<(), AppError> {
+        self.write_toon(&self.user_profile_bindings_path(), bindings)
+    }
+
+    pub fn resolve_user_profile(
+        &self,
+        explicit_profile_id: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> Result<Option<UserProfile>, AppError> {
+        let bindings = self.load_user_profile_bindings()?;
+        let selected = explicit_profile_id
+            .and_then(blank_str_to_none)
+            .map(str::to_string)
+            .or_else(|| {
+                agent_id
+                    .and_then(blank_str_to_none)
+                    .and_then(|id| bindings.default_profile_per_agent.get(id).cloned())
+            })
+            .or_else(|| blank_str_to_none(&bindings.active_profile_id).map(str::to_string));
+        match selected {
+            Some(id) => self.load_user_profile(&id),
+            None => Ok(None),
+        }
+    }
+
     /// All dialogs (chats) of an agent, newest first.
     pub fn list_dialogs(&self, agent_id: &str) -> Result<Vec<DialogMeta>, AppError> {
         let index: DialogsIndex = self
@@ -909,6 +1048,14 @@ impl LocalSessionStore {
 
     fn agents_index_path(&self) -> PathBuf {
         self.sessions_dir().join("agents-index.toon")
+    }
+
+    fn user_profiles_index_path(&self) -> PathBuf {
+        self.sessions_dir().join("user-profiles-index.toon")
+    }
+
+    fn user_profile_bindings_path(&self) -> PathBuf {
+        self.sessions_dir().join("user-profile-bindings.toon")
     }
 
     /// Atomic TOON write (temp file + rename), creating the data dir as needed.
@@ -1486,6 +1633,77 @@ mod tests {
         store.delete_agent("a1").expect("delete");
         assert!(store.load_agent("a1").expect("load after delete").is_none());
         assert!(store.list_agents().expect("list after delete").is_empty());
+    }
+
+    #[test]
+    fn user_profiles_are_reusable_runtime_bindings_not_agent_owned() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalSessionStore::from_root(dir.path().join("sessions"));
+        store
+            .save_agent(&SavedAgent {
+                id: "coding-agent".to_string(),
+                name: "Coding".to_string(),
+                updated_at_unix: 1,
+                ..SavedAgent::default()
+            })
+            .expect("save coding agent");
+        store
+            .save_agent(&SavedAgent {
+                id: "research-agent".to_string(),
+                name: "Research".to_string(),
+                updated_at_unix: 2,
+                ..SavedAgent::default()
+            })
+            .expect("save research agent");
+
+        let profile = UserProfile {
+            id: "artem-short-russian".to_string(),
+            display_name: "Artem short Russian".to_string(),
+            style_preferences: vec!["short".to_string()],
+            language_preferences: vec!["Russian".to_string()],
+            updated_at_unix: 10,
+            ..UserProfile::default()
+        };
+        store.save_user_profile(&profile).expect("save profile");
+        let mut bindings = UserProfileBindings {
+            active_profile_id: profile.id.clone(),
+            ..UserProfileBindings::default()
+        };
+        bindings
+            .default_profile_per_agent
+            .insert("research-agent".to_string(), profile.id.clone());
+        store
+            .save_user_profile_bindings(&bindings)
+            .expect("save bindings");
+
+        let coding_profile = store
+            .resolve_user_profile(None, Some("coding-agent"))
+            .expect("resolve coding")
+            .expect("coding profile");
+        let research_profile = store
+            .resolve_user_profile(None, Some("research-agent"))
+            .expect("resolve research")
+            .expect("research profile");
+        assert_eq!(coding_profile.id, profile.id);
+        assert_eq!(research_profile.id, profile.id);
+
+        store.delete_agent("research-agent").expect("delete agent");
+        assert!(
+            store
+                .load_user_profile("artem-short-russian")
+                .expect("load profile")
+                .is_some(),
+            "deleting an agent must not delete a reusable user profile"
+        );
+        assert!(
+            store
+                .load_agent("coding-agent")
+                .expect("load coding")
+                .expect("coding present")
+                .system_prompt
+                .is_empty(),
+            "agent definition must not duplicate user profile preferences"
+        );
     }
 
     #[test]

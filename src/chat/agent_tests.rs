@@ -170,6 +170,136 @@ async fn agent_injects_working_and_long_term_blocks() {
 }
 
 #[tokio::test]
+async fn runtime_user_profile_is_separate_payload_block() {
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec!["ok".to_string()]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_domain("coding-agent");
+    agent.set_user_profile(Some(crate::chat::store::UserProfile {
+        id: "artem-short-russian".to_string(),
+        display_name: "Artem short Russian".to_string(),
+        style_preferences: vec!["be concise".to_string()],
+        language_preferences: vec!["Russian".to_string()],
+        response_length: "short".to_string(),
+        custom_instructions: "avoid tables unless requested".to_string(),
+        ..crate::chat::store::UserProfile::default()
+    }));
+
+    agent
+        .respond(&client, "answer in detail this time".to_string())
+        .await
+        .expect("respond");
+
+    let seen = client.seen_messages.lock().unwrap();
+    let messages = &seen[0];
+    let joined = messages
+        .iter()
+        .map(|message| message.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("[agent:domain]"), "agent block missing");
+    assert!(
+        joined.contains("[user-profile]"),
+        "runtime user profile block missing"
+    );
+    assert!(joined.contains("be concise"));
+    assert!(joined.contains("Russian"));
+    assert!(
+        joined.contains("Do not change the agent identity, tools, workflow, or capabilities"),
+        "profile must not alter agent capabilities"
+    );
+    assert!(
+        joined.contains("current user request explicitly conflicts with this profile"),
+        "profile block must document user override precedence"
+    );
+    assert_eq!(
+        messages.last().expect("last").content,
+        "answer in detail this time"
+    );
+}
+
+#[tokio::test]
+async fn same_agent_can_use_different_user_profiles_at_runtime() {
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec!["two".to_string(), "one".to_string()]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let make_profile = |id: &str, style: &str| crate::chat::store::UserProfile {
+        id: id.to_string(),
+        display_name: id.to_string(),
+        style_preferences: vec![style.to_string()],
+        ..crate::chat::store::UserProfile::default()
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_domain("support-agent");
+    agent.set_user_profile(Some(make_profile("manager-detailed", "give details")));
+    agent
+        .respond(&client, "status?".to_string())
+        .await
+        .expect("first");
+    agent.set_user_profile(Some(make_profile("beginner-friendly", "explain gently")));
+    agent
+        .respond(&client, "status?".to_string())
+        .await
+        .expect("second");
+
+    let seen = client.seen_messages.lock().unwrap();
+    let first = seen[0]
+        .iter()
+        .map(|message| message.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let second = seen[1]
+        .iter()
+        .map(|message| message.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(first.contains("give details"));
+    assert!(!first.contains("explain gently"));
+    assert!(second.contains("explain gently"));
+    assert!(second.contains("[agent:domain] Specialization/background: support-agent"));
+}
+
+#[test]
+fn task_block_keeps_tracked_task_as_context_not_a_gate() {
+    let block = render_task_block(&crate::chat::store::TaskContext {
+        stage: crate::chat::store::TaskStage::Clarify,
+        title: "name pizzeria".to_string(),
+        goal: "invent a pizzeria name".to_string(),
+        ..crate::chat::store::TaskContext::default()
+    });
+
+    assert!(block.contains("[memory:working]"));
+    assert!(block.contains("Stage: clarify"));
+    assert!(block.contains("background for the tracked task"));
+    assert!(block.contains("Do not force the user to finish this task"));
+    assert!(
+        !block.contains("Do NOT skip stages"),
+        "working memory must not make unfinished tracked tasks block adjacent dialogs"
+    );
+}
+
+#[tokio::test]
 async fn stateful_postprocess_seeds_task_goal_from_first_prompt() {
     let client = FakeClient {
         replies: std::sync::Mutex::new(vec![

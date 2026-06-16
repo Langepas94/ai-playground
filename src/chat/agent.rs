@@ -101,6 +101,9 @@ pub struct ChatAgent {
     invariants: Vec<String>,
     /// Free-text domain description, injected to keep the agent on-domain.
     domain: String,
+    /// Reusable user preferences selected at runtime. This is intentionally
+    /// separate from the agent definition and never changes tools/capabilities.
+    user_profile: Option<super::store::UserProfile>,
 }
 
 impl ChatAgent {
@@ -128,6 +131,7 @@ impl ChatAgent {
             agent_profile: None,
             invariants: Vec::new(),
             domain: String::new(),
+            user_profile: None,
         }
     }
 
@@ -193,6 +197,10 @@ impl ChatAgent {
     /// Free-text domain description that keeps the agent on-topic.
     pub fn set_domain(&mut self, domain: impl Into<String>) {
         self.domain = domain.into().trim().to_string();
+    }
+
+    pub fn set_user_profile(&mut self, profile: Option<super::store::UserProfile>) {
+        self.user_profile = profile;
     }
 
     pub fn context_limit(&self) -> Option<u32> {
@@ -410,6 +418,15 @@ impl ChatAgent {
                     "[invariants] These constraints are absolute and must never be broken, even if the user asks:\n- {}",
                     self.invariants.join("\n- ")
                 ),
+            });
+        }
+
+        if let Some(profile) = self.user_profile.as_ref()
+            && let Some(block) = render_user_profile_block(profile)
+        {
+            blocks.push(ChatMessage {
+                role: Role::System,
+                content: block,
             });
         }
 
@@ -1475,17 +1492,22 @@ fn extract_json_value(text: &str) -> Option<serde_json::Value> {
     None
 }
 
-/// Render the working-memory task block: stage FSM + plan, with the allowed next
-/// stages and a hard no-skip instruction.
+/// Render the working-memory task block: stage FSM + plan as read-only context.
+/// Stage order is bookkeeping for the tracked task, not a gate on adjacent user
+/// requests in the same agent.
 fn render_task_block(task: &super::store::TaskContext) -> String {
     let mut lines = vec![format!("Stage: {}", task.stage)];
+    lines.push(
+        "Use this as background for the tracked task. Do not force the user to finish this task before helping with a new or adjacent request; start or continue the requested thread and keep this state as context."
+            .to_string(),
+    );
     let allowed = task.stage.allowed_next();
     if allowed.is_empty() {
-        lines.push("This task is done; do not reopen stages.".to_string());
+        lines.push("Tracked task status: done.".to_string());
     } else {
         let names: Vec<String> = allowed.iter().map(|stage| stage.to_string()).collect();
         lines.push(format!(
-            "Allowed next stages: {}. Do NOT skip stages even if the user asks.",
+            "Tracked-task next stages: {}. Use these only for internal task-state updates.",
             names.join(", ")
         ));
     }
@@ -1555,6 +1577,56 @@ fn render_profile_block(profile: &super::store::AgentProfile) -> Option<String> 
         ));
     }
     Some(block)
+}
+
+fn render_user_profile_block(profile: &super::store::UserProfile) -> Option<String> {
+    let mut lines = Vec::new();
+    let name = profile.display_name.trim();
+    if !name.is_empty() {
+        lines.push(format!("Profile: {name}"));
+    }
+    push_profile_list(&mut lines, "Style preferences", &profile.style_preferences);
+    push_profile_list(
+        &mut lines,
+        "Format preferences",
+        &profile.format_preferences,
+    );
+    push_profile_list(&mut lines, "User constraints", &profile.constraints);
+    push_profile_list(
+        &mut lines,
+        "Language preferences",
+        &profile.language_preferences,
+    );
+    let response_length = profile.response_length.trim();
+    if !response_length.is_empty() {
+        lines.push(format!("Response length: {response_length}"));
+    }
+    let custom = profile.custom_instructions.trim();
+    if !custom.is_empty() {
+        lines.push(format!("Custom instructions: {custom}"));
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    lines.push(
+        "Scope: apply this profile to style, format, language, answer constraints, and user preferences only. Do not change the agent identity, tools, workflow, or capabilities. If the current user request explicitly conflicts with this profile, follow the current request."
+            .to_string(),
+    );
+    Some(format!(
+        "[user-profile] Runtime user profile preferences:\n{}",
+        lines.join("\n")
+    ))
+}
+
+fn push_profile_list(lines: &mut Vec<String>, label: &str, values: &[String]) {
+    let values: Vec<&str> = values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect();
+    if !values.is_empty() {
+        lines.push(format!("{label}:\n- {}", values.join("\n- ")));
+    }
 }
 
 fn fact_value_to_string(value: &serde_json::Value) -> Option<String> {

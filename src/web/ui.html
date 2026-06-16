@@ -947,6 +947,7 @@
       <section class="controls">
         <div class="inspector-tabs" role="tablist" aria-label="Inspector">
           <button class="tab-button active" type="button" data-tab="profile">Модель</button>
+          <button class="tab-button" type="button" data-tab="userprofile">Пользователь</button>
           <button class="tab-button" type="button" data-tab="aprofile">Профиль</button>
           <button class="tab-button" type="button" data-tab="task">Задача</button>
           <button class="tab-button" type="button" data-tab="invariants">Инварианты</button>
@@ -977,6 +978,34 @@
                 <label>Custom model id<input id="customModel" spellcheck="false" placeholder="Если нужной модели нет в списке"></label>
               </div>
             </details>
+          </div>
+        </div>
+
+        <div id="tab-userprofile" class="inspector-pane">
+          <div class="group">
+            <h2>Профиль пользователя</h2>
+            <div class="field-help">
+              Reusable настройки пользователя подмешиваются к любому агенту на runtime. Переключение не меняет agent definition.
+            </div>
+            <label>Активный профиль<select id="userProfileSelect"><option value="">— без профиля —</option></select></label>
+            <div class="actions">
+              <button id="userProfileBind" class="secondary" type="button">Применить к чату</button>
+              <button id="userProfileDefaultForAgent" class="secondary" type="button">Default для агента</button>
+            </div>
+            <details class="panel">
+              <summary>Создать / обновить профиль</summary>
+              <div class="panel-body">
+                <label>Название<input id="userProfileName" spellcheck="false" placeholder="напр. artem-short-russian"></label>
+                <label>Стиль<textarea id="userProfileStyle" rows="2" placeholder="по одному правилу на строку"></textarea></label>
+                <label>Формат<textarea id="userProfileFormat" rows="2"></textarea></label>
+                <label>Ограничения<textarea id="userProfileConstraints" rows="2"></textarea></label>
+                <label>Язык<textarea id="userProfileLanguage" rows="2" placeholder="русский, коротко"></textarea></label>
+                <label>Длина ответа<input id="userProfileLength" spellcheck="false" placeholder="short / detailed / ..."></label>
+                <label>Custom instructions<textarea id="userProfileCustom" rows="3"></textarea></label>
+                <button id="userProfileSave" type="button">Сохранить профиль</button>
+              </div>
+            </details>
+            <div id="userProfileStatus" class="field-help"></div>
           </div>
         </div>
 
@@ -1288,6 +1317,8 @@
     let chatSessionId = null;
     let forceNewSession = false;
     let activeAgentId = localStorage.getItem('ai_active_agent') || null;
+    let activeUserProfileId = localStorage.getItem('ai_active_user_profile') || '';
+    let userProfiles = [];
     let pendingAttachments = []; // [{name, content}]
     let branchState = { checkpoint: null, branches: [], activeId: null };
 
@@ -1571,6 +1602,7 @@
         new_session: currentBranch() ? !currentBranch().sessionId : forceNewSession,
         messages: currentBranch()?.messages || chatHistory,
         saved_agent_id: activeAgentId || null,
+        user_profile_id: activeUserProfileId || '__none__',
         memory: memoryPayload(),
         pricing: pricingPayload(),
         billing: billingPayload(),
@@ -1873,6 +1905,19 @@
       return data;
     }
 
+    async function userProfilesManage(body) {
+      const response = await fetch('/api/user-profiles/manage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || ('HTTP ' + response.status));
+      }
+      return data;
+    }
+
     const TASK_STAGES = ['clarify', 'planning', 'execution', 'validation', 'done'];
     let currentInvariants = [];
 
@@ -1919,6 +1964,97 @@
 
     function lineToList(id) {
       return $(id).value.split('\n').map((s) => s.trim()).filter(Boolean);
+    }
+
+    function renderUserProfiles(bindings) {
+      const select = $('userProfileSelect');
+      select.innerHTML = '<option value="">— без профиля —</option>' + userProfiles
+        .map((profile) => `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.display_name || profile.id)}</option>`)
+        .join('');
+      const agentDefault = activeAgentId && bindings?.default_profile_per_agent
+        ? bindings.default_profile_per_agent[activeAgentId]
+        : '';
+      const selected = activeUserProfileId || agentDefault || bindings?.active_profile_id || '';
+      if (selected && userProfiles.some((profile) => profile.id === selected)) {
+        activeUserProfileId = selected;
+        select.value = selected;
+        localStorage.setItem('ai_active_user_profile', selected);
+      } else {
+        activeUserProfileId = '';
+        select.value = '';
+        localStorage.removeItem('ai_active_user_profile');
+      }
+      $('userProfileStatus').textContent = activeUserProfileId
+        ? 'Профиль будет добавлен в runtime payload отдельно от агента.'
+        : 'Профиль не выбран.';
+    }
+
+    async function refreshUserProfiles() {
+      try {
+        const data = await userProfilesManage({ action: 'list' });
+        userProfiles = data.profiles || [];
+        renderUserProfiles(data.bindings || {});
+      } catch (error) {
+        $('userProfileStatus').textContent = 'Ошибка профилей: ' + error.message;
+      }
+    }
+
+    function userProfilePayload() {
+      return {
+        id: $('userProfileSelect').value || null,
+        display_name: $('userProfileName').value.trim(),
+        style_preferences: lineToList('userProfileStyle'),
+        format_preferences: lineToList('userProfileFormat'),
+        constraints: lineToList('userProfileConstraints'),
+        language_preferences: lineToList('userProfileLanguage'),
+        response_length: $('userProfileLength').value.trim(),
+        custom_instructions: $('userProfileCustom').value.trim()
+      };
+    }
+
+    async function saveUserProfile() {
+      const payload = userProfilePayload();
+      if (!payload.display_name) { $('userProfileStatus').textContent = 'Укажи название профиля.'; return; }
+      try {
+        const data = await userProfilesManage({ action: 'save', profile: payload });
+        activeUserProfileId = data.profile?.id || '';
+        if (activeUserProfileId) localStorage.setItem('ai_active_user_profile', activeUserProfileId);
+        userProfiles = data.profiles || [];
+        renderUserProfiles(data.bindings || {});
+        $('userProfileStatus').textContent = 'Профиль сохранен.';
+      } catch (error) {
+        $('userProfileStatus').textContent = 'Ошибка сохранения: ' + error.message;
+      }
+    }
+
+    async function bindActiveUserProfile(defaultForAgent = false) {
+      activeUserProfileId = $('userProfileSelect').value || '';
+      if (activeUserProfileId) localStorage.setItem('ai_active_user_profile', activeUserProfileId);
+      else localStorage.removeItem('ai_active_user_profile');
+      try {
+        const body = defaultForAgent
+          ? { action: 'bind', agent_id: activeAgentId || null, default_profile_id: activeUserProfileId || null }
+          : { action: 'bind', active_profile_id: activeUserProfileId || null };
+        const data = await userProfilesManage(body);
+        renderUserProfiles(data.bindings || {});
+        $('userProfileStatus').textContent = defaultForAgent
+          ? 'Default profile для агента обновлен без изменения agent definition.'
+          : 'Активный профиль обновлен.';
+      } catch (error) {
+        $('userProfileStatus').textContent = 'Ошибка binding: ' + error.message;
+      }
+    }
+
+    function loadSelectedUserProfileIntoForm() {
+      const profile = userProfiles.find((item) => item.id === $('userProfileSelect').value);
+      if (!profile) return;
+      $('userProfileName').value = profile.display_name || '';
+      $('userProfileStyle').value = (profile.style_preferences || []).join('\n');
+      $('userProfileFormat').value = (profile.format_preferences || []).join('\n');
+      $('userProfileConstraints').value = (profile.constraints || []).join('\n');
+      $('userProfileLanguage').value = (profile.language_preferences || []).join('\n');
+      $('userProfileLength').value = profile.response_length || '';
+      $('userProfileCustom').value = profile.custom_instructions || '';
     }
 
     // ---- Gate: list + create --------------------------------------------
@@ -2166,6 +2302,7 @@
         renderInvariants(agent.invariants);
         setActiveAgentChip(agent.name, 'clarify');
         showWorkspace();
+        await refreshUserProfiles();
         // bind a fresh session for this agent (loadChatSession derives the system
         // prompt from stored messages, so restore it AFTER the load)
         chatSessionId = null;
@@ -2794,6 +2931,7 @@
       populateGateProviders();
       await refreshTokenStatus();
       await loadModels().catch(() => {}); // автозагрузка; ошибка не критична
+      await refreshUserProfiles();
       // Agent-centric entry: always show the chooser/create gate on load.
       // The last agent is selected in the list, but chat opens only after
       // an explicit "Войти" or "Создать и войти" action.
@@ -3146,6 +3284,14 @@
     $('gateCreate').addEventListener('click', createAgentFromGate);
     $('invariantsSave').addEventListener('click', saveInvariants);
     $('dialogNew').addEventListener('click', newDialog);
+    $('userProfileSelect').addEventListener('change', () => {
+      activeUserProfileId = $('userProfileSelect').value || '';
+      loadSelectedUserProfileIntoForm();
+      bindActiveUserProfile(false);
+    });
+    $('userProfileBind').addEventListener('click', () => bindActiveUserProfile(false));
+    $('userProfileDefaultForAgent').addEventListener('click', () => bindActiveUserProfile(true));
+    $('userProfileSave').addEventListener('click', saveUserProfile);
 
     $('memoryFactAdd').addEventListener('click', () => {
       const key = $('memoryLayerKey').value.trim();
