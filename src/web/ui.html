@@ -1013,10 +1013,18 @@
           <div class="group">
             <h2>🟢 Профиль (долговременная память)</h2>
             <div class="field-help">
-              Агент сам интервьюирует юзера по этим полям и заполняет их из диалога. Идёт в каждый запрос блоком <code>[memory:long-term]</code>. Значения проставляет агент — вручную трогать не нужно.
+              Схема интервью заполняется агентом из диалога. Дополнительные долговременные факты можно записать вручную ниже; они идут в каждый запрос блоком <code>[memory:long-term]</code>.
             </div>
             <div id="profileFields" class="profile-fields">Войди в агента, чтобы увидеть профиль.</div>
             <div id="profilePending" class="field-help"></div>
+            <h3>Факты long-term</h3>
+            <div id="profileLongTermFacts" class="topic-debug">Факты появятся после первого запроса или ручной записи.</div>
+            <div class="memory-layer-control">
+              <input id="profileLongTermKey" spellcheck="false" placeholder="ключ, напр. project_context">
+              <input id="profileLongTermValue" spellcheck="false" placeholder="значение">
+              <button id="profileLongTermAdd" type="button">Записать</button>
+            </div>
+            <div id="profileLongTermStatus" class="field-help"></div>
           </div>
         </div>
 
@@ -1827,11 +1835,24 @@
       return `<div class="memory-layer"><div class="memory-layer-head"><strong>${title}</strong> <span class="field-help">${hint}</span> <button type="button" class="mem-clear" data-layer="${layerKey}">Очистить слой</button></div><div class="metric-lines">${items}</div></div>`;
     }
 
+    function renderProfileLongTermFacts(facts) {
+      const panel = $('profileLongTermFacts');
+      if (!panel) return;
+      facts = facts || [];
+      panel.innerHTML = facts.length
+        ? `<div class="metric-lines">${facts.map((fact) => `<span class="metric-line"><em>${escapeHtml(fact.key)}</em><b>${escapeHtml(fact.value)}</b> <button type="button" class="profile-mem-del" data-key="${escapeHtml(fact.key)}" title="Удалить факт">✕</button></span>`).join('')}</div>`
+        : '<span class="field-help">Пока нет ручных или автоматически сохранённых long-term фактов.</span>';
+      panel.querySelectorAll('.profile-mem-del').forEach((btn) => {
+        btn.onclick = () => memoryUpdate('delete', { key: btn.dataset.key }, 'profileLongTermStatus');
+      });
+    }
+
     function renderMemoryLayers(layers) {
       const panel = $('memoryLayersPanel');
       if (!panel) return;
       if (!layers) {
         panel.textContent = 'Контекст еще не собран.';
+        renderProfileLongTermFacts(null);
         return;
       }
       const st = layers.short_term || {};
@@ -1851,10 +1872,11 @@
       panel.querySelectorAll('.mem-clear').forEach((btn) => {
         btn.onclick = () => memoryUpdate('clear-layer', { layer: btn.dataset.layer });
       });
+      renderProfileLongTermFacts((layers.long_term && layers.long_term.facts) || []);
     }
 
-    async function memoryUpdate(action, opts) {
-      const status = $('memoryLayerStatus');
+    async function memoryUpdate(action, opts, statusId = 'memoryLayerStatus') {
+      const status = $(statusId);
       const model = selectedModel();
       if (!model) {
         status.textContent = 'Сначала выберите модель.';
@@ -3303,6 +3325,18 @@
       memoryUpdate('set', { layer: $('memoryLayerSelect').value, key, value }).then(() => {
         $('memoryLayerKey').value = '';
         $('memoryLayerValue').value = '';
+      });
+    });
+    $('profileLongTermAdd').addEventListener('click', () => {
+      const key = $('profileLongTermKey').value.trim();
+      const value = $('profileLongTermValue').value.trim();
+      if (!key || !value) {
+        $('profileLongTermStatus').textContent = 'Укажите ключ и значение.';
+        return;
+      }
+      memoryUpdate('set', { layer: 'long-term', key, value }, 'profileLongTermStatus').then(() => {
+        $('profileLongTermKey').value = '';
+        $('profileLongTermValue').value = '';
       });
     });
 
