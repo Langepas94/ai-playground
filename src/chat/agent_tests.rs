@@ -125,6 +125,10 @@ async fn agent_injects_working_and_long_term_blocks() {
     });
     agent.set_task_state(Some(crate::chat::store::TaskContext {
         stage: crate::chat::store::TaskStage::Planning,
+        current_step: "change TaskContext serialization".to_string(),
+        expected_action: "agent_work".to_string(),
+        paused: true,
+        resume_hint: "continue from state machine tests".to_string(),
         title: "ship agents".to_string(),
         goal: "persist settings".to_string(),
         ..crate::chat::store::TaskContext::default()
@@ -154,6 +158,11 @@ async fn agent_injects_working_and_long_term_blocks() {
         .join("\n");
     assert!(joined.contains("[memory:working]"), "working block missing");
     assert!(joined.contains("Stage: planning"));
+    assert!(joined.contains("Paused: true"));
+    assert!(joined.contains("Current step: change TaskContext serialization"));
+    assert!(joined.contains("Expected action: agent_work"));
+    assert!(joined.contains("Resume hint: continue from state machine tests"));
+    assert!(joined.contains("do not ask them to restate the task"));
     assert!(joined.contains("ship agents"));
     assert!(
         joined.contains("[memory:long-term]"),
@@ -385,6 +394,7 @@ fn task_block_keeps_tracked_task_as_context_not_a_gate() {
 
     assert!(block.contains("[memory:working]"));
     assert!(block.contains("Stage: clarify"));
+    assert!(block.contains("Paused: false"));
     assert!(block.contains("background for the tracked task"));
     assert!(block.contains("Do not force the user to finish this task"));
     assert!(
@@ -394,10 +404,72 @@ fn task_block_keeps_tracked_task_as_context_not_a_gate() {
 }
 
 #[tokio::test]
+async fn paused_task_resume_context_is_injected_without_reexplaining() {
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec![
+            r#"{"stage":"execution","current_step":"run validation checks","expected_action":"agent_work","resume_hint":"continue from cargo test failure analysis"}"#.to_string(),
+            "Continuing from the saved validation checks.".to_string(),
+        ]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_task_state(Some(crate::chat::store::TaskContext {
+        stage: crate::chat::store::TaskStage::Execution,
+        current_step: "run validation checks".to_string(),
+        expected_action: "agent_work".to_string(),
+        paused: true,
+        resume_hint: "continue from cargo test failure analysis".to_string(),
+        ..crate::chat::store::TaskContext::default()
+    }));
+
+    let answer = agent
+        .respond(&client, "Продолжай".to_string())
+        .await
+        .expect("respond");
+    assert!(!answer.text.to_ascii_lowercase().contains("restate"));
+    assert!(!answer.text.to_ascii_lowercase().contains("explain again"));
+
+    let seen = client.seen_messages.lock().unwrap();
+    let joined = seen[0]
+        .iter()
+        .map(|message| message.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("Stage: execution"));
+    assert!(joined.contains("Paused: true"));
+    assert!(joined.contains("Current step: run validation checks"));
+    assert!(joined.contains("Expected action: agent_work"));
+    assert!(joined.contains("Resume hint: continue from cargo test failure analysis"));
+    assert!(joined.contains("do not ask them to restate the task"));
+    drop(seen);
+
+    let report = agent
+        .stateful_postprocess(&client, "Продолжай", &answer.text)
+        .await;
+    assert_eq!(report.stage, Some(crate::chat::store::TaskStage::Execution));
+    assert_eq!(report.current_step, "run validation checks");
+    assert_eq!(report.expected_action, "agent_work");
+    assert!(!report.paused);
+    let task = agent.task_state().expect("task");
+    assert!(!task.paused);
+    assert_eq!(task.current_step, "run validation checks");
+    assert_eq!(task.expected_action, "agent_work");
+}
+
+#[tokio::test]
 async fn stateful_postprocess_seeds_task_goal_from_first_prompt() {
     let client = FakeClient {
         replies: std::sync::Mutex::new(vec![
-            r#"{"stage":"clarify","reason":"asking clarifying questions"}"#.to_string(),
+            r#"{"stage":"clarify","current_step":"уточнить acceptance criteria","expected_action":"user_input","resume_hint":"ask for menu constraints","reason":"asking clarifying questions"}"#.to_string(),
         ]),
         metrics: std::sync::Mutex::new(Vec::new()),
         seen_messages: std::sync::Mutex::new(Vec::new()),
@@ -428,6 +500,9 @@ async fn stateful_postprocess_seeds_task_goal_from_first_prompt() {
     );
     assert_eq!(task.title, "Давай придумаем продуктовое меню для пиццерии");
     assert_eq!(task.stage, crate::chat::store::TaskStage::Clarify);
+    assert_eq!(task.current_step, "уточнить acceptance criteria");
+    assert_eq!(task.expected_action, "user_input");
+    assert_eq!(task.resume_hint, "ask for menu constraints");
 }
 
 #[tokio::test]

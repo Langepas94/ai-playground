@@ -725,8 +725,15 @@ impl ChatAgent {
 
         if self.task_state.is_some() {
             self.capture_task_progress(user_prompt, answer);
-            let (transition, metrics) = self.advance_task_stage(client, user_prompt, answer).await;
-            report.stage = self.task_state.as_ref().map(|task| task.stage);
+            self.apply_pause_resume_intent(user_prompt, answer);
+            let (transition, metrics) = self.advance_task_state(client, user_prompt, answer).await;
+            if let Some(task) = self.task_state.as_ref() {
+                report.stage = Some(task.stage);
+                report.current_step = task.current_step.clone();
+                report.expected_action = task.expected_action.clone();
+                report.paused = task.paused;
+                report.resume_hint = task.resume_hint.clone();
+            }
             report.stage_transition = transition;
             report.metrics = merge_optional_metrics(report.metrics, metrics);
         }
@@ -805,23 +812,39 @@ impl ChatAgent {
         Some(response.metrics)
     }
 
-    /// Ask the model which stage best fits the dialog now, then apply it only if
-    /// the task-state FSM allows the transition. Illegal proposals are rejected.
-    async fn advance_task_stage(
+    /// Ask the model which formal state best fits the dialog now, then apply it
+    /// only if the task-state FSM allows the transition. Illegal stage proposals
+    /// are rejected, but step/action metadata can still be refreshed.
+    async fn advance_task_state(
         &mut self,
         client: &dyn ProviderClient,
         user_prompt: &str,
         answer: &str,
     ) -> (Option<StageTransition>, Option<RequestMetrics>) {
-        let current = match self.task_state.as_ref() {
-            Some(task) => task.stage,
-            None => return (None, None),
-        };
+        let (current, paused, current_step, expected_action, resume_hint) =
+            match self.task_state.as_ref() {
+                Some(task) => (
+                    task.stage,
+                    task.paused,
+                    task.current_step.clone(),
+                    task.expected_action.clone(),
+                    task.resume_hint.clone(),
+                ),
+                None => return (None, None),
+            };
+        if paused {
+            return (None, None);
+        }
         let allowed = current.allowed_next();
         if allowed.is_empty() {
             return (None, None);
         }
         let options = TaskStage::ORDERED
+            .iter()
+            .map(TaskStage::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let allowed_options = allowed
             .iter()
             .map(TaskStage::to_string)
             .collect::<Vec<_>>()
@@ -832,13 +855,13 @@ impl ChatAgent {
                 ChatMessage {
                     role: Role::System,
                     content: format!(
-                        "You track a task's stage. Stages: {options}. Given the current stage and the latest exchange, decide the stage the work is in NOW. Reply with JSON {{\"stage\":\"<stage>\",\"reason\":\"...\"}}. Prefer staying in the current stage unless the exchange clearly moved it forward or back."
+                        "You track a task as a finite state machine. Stages: {options}. Allowed next stages from the current stage: {allowed_options}. Given the latest exchange, decide the formal state the work is in NOW. Reply with JSON {{\"stage\":\"<stage>\",\"current_step\":\"<specific active step>\",\"expected_action\":\"user_input|agent_work|tool_result|validation|none|<short string>\",\"resume_hint\":\"<short continuation hint>\",\"reason\":\"...\"}}. Prefer staying in the current stage unless the exchange clearly moved it through an allowed transition or completed the task."
                     ),
                 },
                 ChatMessage {
                     role: Role::User,
                     content: format!(
-                        "Current stage: {current}\n\nUser:\n{user_prompt}\n\nAssistant:\n{answer}"
+                        "Current state:\nstage: {current}\ncurrent_step: {current_step}\nexpected_action: {expected_action}\npaused: false\nresume_hint: {resume_hint}\n\nUser:\n{user_prompt}\n\nAssistant:\n{answer}"
                     ),
                 },
             ],
@@ -854,24 +877,58 @@ impl ChatAgent {
         let Ok(Ok(response)) = result else {
             return (None, None);
         };
-        let Some(proposed) = parse_proposed_stage(response.text.as_str()) else {
+        let Some(proposed) = parse_proposed_task_state(response.text.as_str()) else {
             return (None, Some(response.metrics));
         };
-        if proposed == current {
+
+        if let Some(task) = self.task_state.as_mut() {
+            task.set_progress(proposed.current_step, proposed.expected_action);
+            if !proposed.resume_hint.trim().is_empty() {
+                task.resume_hint = proposed.resume_hint;
+            }
+        }
+
+        if proposed.stage == current {
             return (None, Some(response.metrics));
         }
-        let accepted = current.can_transition(proposed);
+        let accepted = current.can_transition(proposed.stage);
         if accepted && let Some(task) = self.task_state.as_mut() {
-            task.stage = proposed;
+            task.stage = proposed.stage;
         }
         (
             Some(StageTransition {
                 from: current,
-                to: proposed,
+                to: proposed.stage,
                 accepted,
             }),
             Some(response.metrics),
         )
+    }
+
+    fn apply_pause_resume_intent(&mut self, user_prompt: &str, answer: &str) {
+        let Some(task) = self.task_state.as_mut() else {
+            return;
+        };
+        let prompt = user_prompt.trim().to_lowercase();
+        if task.paused
+            && (prompt.contains("resume")
+                || prompt.contains("continue")
+                || prompt.contains("продолж")
+                || prompt.contains("возобнов"))
+        {
+            task.resume();
+            return;
+        }
+        if !task.paused
+            && (prompt.contains("pause")
+                || prompt.contains("paused")
+                || prompt.contains("пауза")
+                || prompt.contains("поставь на паузу")
+                || prompt.contains("приостанов"))
+        {
+            let hint = task_resume_hint(task, user_prompt, answer);
+            task.pause(hint);
+        }
     }
 
     fn capture_task_progress(&mut self, user_prompt: &str, answer: &str) {
@@ -1319,6 +1376,14 @@ pub struct StageTransition {
     pub accepted: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ProposedTaskState {
+    stage: TaskStage,
+    current_step: String,
+    expected_action: String,
+    resume_hint: String,
+}
+
 /// Result of one turn's stateful post-processing, surfaced to the debug view.
 #[derive(Debug, Clone, Default)]
 pub struct StatefulReport {
@@ -1326,6 +1391,10 @@ pub struct StatefulReport {
     pub pending_questions: Vec<String>,
     /// Current task stage after processing (None when no task is active).
     pub stage: Option<TaskStage>,
+    pub current_step: String,
+    pub expected_action: String,
+    pub paused: bool,
+    pub resume_hint: String,
     /// The transition decided this turn, if any (includes rejected ones).
     pub stage_transition: Option<StageTransition>,
     /// Invariants the last response violated (empty = clean).
@@ -1441,11 +1510,31 @@ fn parse_profile_updates(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Parse `{"stage":"...","reason":"..."}` into a stage, if recognised.
-fn parse_proposed_stage(text: &str) -> Option<TaskStage> {
+fn parse_proposed_task_state(text: &str) -> Option<ProposedTaskState> {
     let value = extract_json_value(text)?;
-    let stage = value.as_object()?.get("stage")?.as_str()?;
-    stage.parse().ok()
+    let object = value.as_object()?;
+    let stage = object.get("stage")?.as_str()?.parse().ok()?;
+    Some(ProposedTaskState {
+        stage,
+        current_step: object
+            .get("current_step")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+        expected_action: object
+            .get("expected_action")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+        resume_hint: object
+            .get("resume_hint")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+    })
 }
 
 /// Parse `{"violations":[...]}` into a list of violated-constraint strings.
@@ -1497,10 +1586,17 @@ fn extract_json_value(text: &str) -> Option<serde_json::Value> {
 /// requests in the same agent.
 fn render_task_block(task: &super::store::TaskContext) -> String {
     let mut lines = vec![format!("Stage: {}", task.stage)];
+    lines.push(format!("Paused: {}", task.paused));
     lines.push(
         "Use this as background for the tracked task. Do not force the user to finish this task before helping with a new or adjacent request; start or continue the requested thread and keep this state as context."
             .to_string(),
     );
+    if task.paused {
+        lines.push(
+            "Task is paused. If the user asks to resume or continue, use the saved step/action/hint below and do not ask them to restate the task."
+                .to_string(),
+        );
+    }
     let allowed = task.stage.allowed_next();
     if allowed.is_empty() {
         lines.push("Tracked task status: done.".to_string());
@@ -1510,6 +1606,16 @@ fn render_task_block(task: &super::store::TaskContext) -> String {
             "Tracked-task next stages: {}. Use these only for internal task-state updates.",
             names.join(", ")
         ));
+    }
+    for (label, value) in [
+        ("Current step", task.current_step.as_str()),
+        ("Expected action", task.expected_action.as_str()),
+        ("Resume hint", task.resume_hint.as_str()),
+    ] {
+        let value = value.trim();
+        if !value.is_empty() {
+            lines.push(format!("{label}: {value}"));
+        }
     }
     for (label, value) in [("Title", task.title.as_str()), ("Goal", task.goal.as_str())] {
         let value = value.trim();
@@ -1540,6 +1646,34 @@ fn render_task_block(task: &super::store::TaskContext) -> String {
         lines.push(format!("Notes: {notes}"));
     }
     format!("[memory:working] Task state:\n{}", lines.join("\n"))
+}
+
+fn task_resume_hint(task: &super::store::TaskContext, user_prompt: &str, answer: &str) -> String {
+    let mut parts = Vec::new();
+    if !task.current_step.trim().is_empty() {
+        parts.push(format!("step={}", task.current_step.trim()));
+    }
+    if !task.expected_action.trim().is_empty() {
+        parts.push(format!("expected={}", task.expected_action.trim()));
+    }
+    if !task.goal.trim().is_empty() {
+        parts.push(format!("goal={}", task.goal.trim()));
+    }
+    let prompt = user_prompt.trim();
+    if !prompt.is_empty() {
+        parts.push(format!(
+            "last_user={}",
+            prompt.chars().take(160).collect::<String>()
+        ));
+    }
+    let answer = answer.trim();
+    if !answer.is_empty() {
+        parts.push(format!(
+            "last_answer={}",
+            answer.chars().take(160).collect::<String>()
+        ));
+    }
+    parts.join("; ")
 }
 
 /// Render the long-term profile block: filled fields plus an explicit instruction

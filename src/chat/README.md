@@ -129,9 +129,12 @@ read-only facts block при любой context strategy. `Sticky Facts` отв�
   (key/question/required) + заполненные агентом значения.
 - **краткосрочная** память — обычная сессия чата, `session_key = "agent:<id>"`.
 
-`TaskStage` (`clarify→planning→execution→validation→done`) — переходы валидируются
-кодом (`can_transition`/`allowed_next`), нелегальные отклоняются. Сериализуется как
-строка (как `MemoryLayer`), чтобы TOON хранил её как plain-значение.
+`TaskStage` (`clarify`, `planning`, `execution`, `validation`, `done`) — переходы
+валидируются кодом (`can_transition`/`allowed_next`), нелегальные отклоняются.
+Основной путь `clarify→planning→execution→validation→done`, но FSM также допускает
+разрешенные завершения в `done` и возвраты `execution→planning` /
+`validation→execution`. Сериализуется как строка (как `MemoryLayer`), чтобы TOON
+хранил её как plain-значение.
 
 Хранение через `LocalSessionStore`: `agent-<id>.agent.toon`, legacy/default
 `*.task.toon`, task-scoped `agent-<id>.task-<task>.toon`,
