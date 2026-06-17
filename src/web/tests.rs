@@ -1,4 +1,5 @@
 use super::*;
+use crate::chat::TaskStage;
 use crate::secrets::MemorySecretStore;
 
 fn web_profile(provider: ProviderKind) -> ProfileConfig {
@@ -373,6 +374,64 @@ fn saved_agent_loads_shared_feature_task_across_dialogs_by_default() {
     assert!(
         task.results.iter().any(|item| item.contains("ВолгаПицца")),
         "dialog B should see approved decision from dialog A when both use the same feature task"
+    );
+}
+
+#[test]
+fn saved_agent_restores_formal_task_state_for_any_dialog_after_restart() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("sessions");
+    let store = LocalSessionStore::from_root(root.clone());
+    store
+        .save_agent(&web_test_agent("app-agent"))
+        .expect("save agent");
+    store
+        .save_dialog_task(
+            "app-agent",
+            "planning-dialog",
+            &TaskContext {
+                stage: TaskStage::Execution,
+                current_step: "create application shell".to_string(),
+                expected_action: "agent_work".to_string(),
+                paused: true,
+                resume_hint: "name and implementation plan approved".to_string(),
+                title: "create application".to_string(),
+                goal: "build an approved app".to_string(),
+                plan: vec![
+                    "collect app name".to_string(),
+                    "approve plan".to_string(),
+                    "create application shell".to_string(),
+                    "validate result".to_string(),
+                ],
+                ..TaskContext::default()
+            },
+        )
+        .expect("save shared task");
+
+    let restarted_store = LocalSessionStore::from_root(root);
+    let mut agent = web_test_chat_agent();
+    apply_saved_agent_memory(
+        &restarted_store,
+        Some("app-agent"),
+        "any-other-dialog",
+        &mut agent,
+    )
+    .expect("apply saved agent memory");
+
+    let task = agent.task_state().expect("task state");
+    assert_eq!(task.stage, TaskStage::Execution);
+    assert_eq!(task.current_step, "create application shell");
+    assert_eq!(task.expected_action, "agent_work");
+    assert!(task.paused);
+    assert_eq!(task.resume_hint, "name and implementation plan approved");
+    assert_eq!(
+        task.plan,
+        vec![
+            "collect app name",
+            "approve plan",
+            "create application shell",
+            "validate result"
+        ]
     );
 }
 

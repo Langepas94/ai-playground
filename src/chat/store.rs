@@ -1891,6 +1891,80 @@ mod tests {
     }
 
     #[test]
+    fn task_fsm_state_survives_restart_and_shared_dialog_resume() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("sessions");
+        let store = LocalSessionStore::from_root(root.clone());
+
+        store
+            .save_session(
+                "agent:app-agent",
+                "planning-window",
+                &[ChatMessage {
+                    role: Role::User,
+                    content: "Хочу создать приложение".to_string(),
+                }],
+            )
+            .expect("save planning window");
+        store
+            .save_dialog_task(
+                "app-agent",
+                "planning-window",
+                &TaskContext {
+                    stage: TaskStage::Execution,
+                    current_step: "implement approved app scaffold".to_string(),
+                    expected_action: "agent_work".to_string(),
+                    paused: true,
+                    resume_hint: "app name approved; plan approved; continue implementation"
+                        .to_string(),
+                    title: "create application".to_string(),
+                    goal: "build the approved application".to_string(),
+                    plan: vec![
+                        "clarify app name".to_string(),
+                        "approve implementation plan".to_string(),
+                        "implement app scaffold".to_string(),
+                        "run validation".to_string(),
+                    ],
+                    ..TaskContext::default()
+                },
+            )
+            .expect("save task state");
+
+        let restarted_store = LocalSessionStore::from_root(root);
+        restarted_store
+            .save_session(
+                "agent:app-agent",
+                "resume-window",
+                &[ChatMessage {
+                    role: Role::User,
+                    content: "Продолжай".to_string(),
+                }],
+            )
+            .expect("save resume window");
+
+        let resumed = restarted_store
+            .load_dialog_task("app-agent", "resume-window")
+            .expect("load shared task after restart");
+        assert_eq!(resumed.stage, TaskStage::Execution);
+        assert_eq!(resumed.current_step, "implement approved app scaffold");
+        assert_eq!(resumed.expected_action, "agent_work");
+        assert!(resumed.paused);
+        assert_eq!(
+            resumed.resume_hint,
+            "app name approved; plan approved; continue implementation"
+        );
+        assert_eq!(
+            resumed.plan,
+            vec![
+                "clarify app name",
+                "approve implementation plan",
+                "implement app scaffold",
+                "run validation"
+            ]
+        );
+    }
+
+    #[test]
     fn agent_dialogs_roundtrip_and_auto_register() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = LocalSessionStore::from_root(dir.path().join("sessions"));
