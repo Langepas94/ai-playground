@@ -633,6 +633,127 @@ async fn stateful_postprocess_seeds_task_goal_from_first_prompt() {
 }
 
 #[tokio::test]
+async fn stateful_postprocess_infers_planning_when_tracker_stays_too_conservative() {
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec![
+            r#"{"stage":"clarify","current_step":"уточнить детали","expected_action":"user_input","resume_hint":"ask more","reason":"too conservative"}"#.to_string(),
+        ]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_task_state(Some(crate::chat::store::TaskContext::default()));
+
+    let report = agent
+        .stateful_postprocess(
+            &client,
+            "Договор есть, акт подписан, заказчик признавал долг. Хочу сначала досудебную претензию.",
+            "Можно идти по плану: проверить договор, собрать документы и подготовить претензию.",
+        )
+        .await;
+
+    assert_eq!(report.stage, Some(crate::chat::store::TaskStage::Planning));
+    assert_eq!(
+        report.current_step,
+        "составить план действий и список нужных документов"
+    );
+    assert_eq!(report.expected_action, "agent_work");
+    assert!(report.stage_transition.expect("transition").accepted);
+}
+
+#[tokio::test]
+async fn stateful_postprocess_pause_preserves_visible_formal_state() {
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(Vec::new()),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_task_state(Some(crate::chat::store::TaskContext {
+        stage: crate::chat::store::TaskStage::Planning,
+        current_step: "составить план претензии".to_string(),
+        expected_action: "agent_work".to_string(),
+        goal: "подготовить досудебную претензию".to_string(),
+        ..crate::chat::store::TaskContext::default()
+    }));
+
+    let report = agent
+        .stateful_postprocess(
+            &client,
+            "Остановимся на этом месте. Я найду договор и реквизиты заказчика, вернусь с документами.",
+            "Хорошо, остановимся на плане претензии.",
+        )
+        .await;
+
+    assert_eq!(report.stage, Some(crate::chat::store::TaskStage::Planning));
+    assert_eq!(report.current_step, "составить план претензии");
+    assert_eq!(report.expected_action, "agent_work");
+    assert!(report.paused);
+    assert!(
+        report
+            .resume_hint
+            .contains("подготовить досудебную претензию")
+    );
+}
+
+#[tokio::test]
+async fn paused_task_resumes_when_user_supplies_expected_info_without_command_word() {
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec![
+            r#"{"stage":"planning","current_step":"уточнить реквизиты договора","expected_action":"user_input","resume_hint":"continue from contract details"}"#.to_string(),
+        ]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_task_state(Some(crate::chat::store::TaskContext {
+        stage: crate::chat::store::TaskStage::Planning,
+        current_step: "уточнить реквизиты договора".to_string(),
+        expected_action: "user_input".to_string(),
+        paused: true,
+        resume_hint: "ждём реквизиты договора".to_string(),
+        goal: "подготовить досудебную претензию".to_string(),
+        ..crate::chat::store::TaskContext::default()
+    }));
+
+    let report = agent
+        .stateful_postprocess(
+            &client,
+            "Нашёл договор: номер 12 от 1 апреля, заказчик ООО Ромашка.",
+            "Теперь можно продолжать подготовку претензии.",
+        )
+        .await;
+
+    assert_eq!(report.stage, Some(crate::chat::store::TaskStage::Planning));
+    assert!(!report.paused);
+    assert!(!agent.task_state().expect("task").paused);
+}
+
+#[tokio::test]
 async fn stateful_postprocess_captures_approved_task_decision() {
     let client = FakeClient {
         replies: std::sync::Mutex::new(vec![

@@ -821,7 +821,7 @@ impl ChatAgent {
         user_prompt: &str,
         answer: &str,
     ) -> (Option<StageTransition>, Option<RequestMetrics>) {
-        let (current, paused, current_step, expected_action, resume_hint) =
+        let (current, paused, current_step, expected_action, resume_hint, has_pipeline) =
             match self.task_state.as_ref() {
                 Some(task) => (
                     task.stage,
@@ -829,6 +829,7 @@ impl ChatAgent {
                     task.current_step.clone(),
                     task.expected_action.clone(),
                     task.resume_hint.clone(),
+                    !task.pipeline.is_empty(),
                 ),
                 None => return (None, None),
             };
@@ -869,16 +870,37 @@ impl ChatAgent {
             pricing: self.pricing.clone(),
             billing: self.billing.clone(),
         };
+        let deterministic = if has_pipeline {
+            None
+        } else {
+            infer_task_state_from_exchange(current, user_prompt, answer)
+        };
         let result = timeout(
             STATEFUL_STEP_TIMEOUT,
             client.chat_completion(&self.profile, &self.token, request),
         )
         .await;
-        let Ok(Ok(response)) = result else {
-            return (None, None);
-        };
-        let Some(proposed) = parse_proposed_task_state(response.text.as_str()) else {
-            return (None, Some(response.metrics));
+        let (proposed, metrics) = match result {
+            Ok(Ok(response)) => {
+                let parsed = parse_proposed_task_state(response.text.as_str());
+                let proposed = match (parsed, deterministic) {
+                    (Some(parsed), Some(deterministic))
+                        if parsed.stage == current
+                            && parsed.artifact_key.trim().is_empty()
+                            && parsed.artifact_value.trim().is_empty() =>
+                    {
+                        deterministic
+                    }
+                    (Some(parsed), _) => parsed,
+                    (None, Some(deterministic)) => deterministic,
+                    (None, None) => return (None, Some(response.metrics)),
+                };
+                (proposed, Some(response.metrics))
+            }
+            _ => match deterministic {
+                Some(proposed) => (proposed, None),
+                None => return (None, None),
+            },
         };
 
         if let Some(task) = self.task_state.as_mut() {
@@ -897,13 +919,13 @@ impl ChatAgent {
                         to: advance.to,
                         accepted: advance.accepted,
                     }),
-                    Some(response.metrics),
+                    metrics,
                 );
             }
         }
 
         if proposed.stage == current {
-            return (None, Some(response.metrics));
+            return (None, metrics);
         }
         let accepted = current.can_transition(proposed.stage);
         if accepted && let Some(task) = self.task_state.as_mut() {
@@ -915,7 +937,7 @@ impl ChatAgent {
                 to: proposed.stage,
                 accepted,
             }),
-            Some(response.metrics),
+            metrics,
         )
     }
 
@@ -935,7 +957,8 @@ impl ChatAgent {
                 || prompt.contains("возобнов")
                 || prompt.contains("утвержд")
                 || prompt.contains("одобря")
-                || prompt.contains("ок"))
+                || prompt.contains("ок")
+                || paused_user_supplied_next_info(&prompt))
         {
             if !task.approve_pipeline_pause() {
                 task.resume();
@@ -945,9 +968,12 @@ impl ChatAgent {
         if !task.paused
             && (prompt.contains("pause")
                 || prompt.contains("paused")
-                || prompt.contains("пауза")
+                || prompt.contains("пауз")
                 || prompt.contains("поставь на паузу")
-                || prompt.contains("приостанов"))
+                || prompt.contains("приостанов")
+                || prompt.contains("останов")
+                || prompt.contains("вернусь позже")
+                || prompt.contains("потом продолжим"))
         {
             let hint = task_resume_hint(task, user_prompt, answer);
             task.pause(hint);
@@ -1389,6 +1415,161 @@ fn task_decision_from_exchange(user_prompt: &str, answer: &str) -> Option<String
                 .find(|part| !part.is_empty())
         })?;
     Some(format!("Approved decision: {candidate}"))
+}
+
+fn infer_task_state_from_exchange(
+    current: TaskStage,
+    user_prompt: &str,
+    answer: &str,
+) -> Option<ProposedTaskState> {
+    let user = user_prompt.to_lowercase();
+    let combined = format!("{user}\n{}", answer.to_lowercase());
+    let wants_done = contains_any_agent(
+        &user,
+        &[
+            "итог",
+            "резюм",
+            "заверш",
+            "готово",
+            "следующие действия",
+            "что готово",
+            "final",
+            "summary",
+            "done",
+        ],
+    );
+    let wants_validation = contains_any_agent(
+        &user,
+        &[
+            "проверь",
+            "провер",
+            "риски",
+            "не хватает",
+            "нельзя утверждать",
+            "валидац",
+            "review",
+            "validate",
+        ],
+    );
+    let wants_execution = contains_any_agent(
+        &user,
+        &[
+            "составь",
+            "подготовь",
+            "напиши",
+            "черновик",
+            "шаблон",
+            "сформируй",
+            "draft",
+            "write",
+        ],
+    );
+    let wants_planning = contains_any_agent(
+        &combined,
+        &[
+            "план",
+            "что делать",
+            "досудебн",
+            "претензи",
+            "документ",
+            "срок оплат",
+            "акт подписан",
+            "заказчик призна",
+            "next step",
+            "plan",
+        ],
+    );
+
+    let mut stage = if wants_done {
+        TaskStage::Done
+    } else if wants_validation {
+        TaskStage::Validation
+    } else if wants_execution {
+        TaskStage::Execution
+    } else if wants_planning {
+        TaskStage::Planning
+    } else {
+        return None;
+    };
+
+    if !current.can_transition(stage) {
+        stage = match (current, stage) {
+            (TaskStage::Clarify, TaskStage::Execution | TaskStage::Validation) => {
+                TaskStage::Planning
+            }
+            (TaskStage::Planning, TaskStage::Validation) if wants_validation => {
+                TaskStage::Validation
+            }
+            (TaskStage::Execution, TaskStage::Done) if wants_done => TaskStage::Done,
+            (TaskStage::Execution, TaskStage::Planning) if wants_planning => TaskStage::Planning,
+            (TaskStage::Validation, TaskStage::Execution) if wants_execution => {
+                TaskStage::Execution
+            }
+            (TaskStage::Validation, TaskStage::Done) if wants_done => TaskStage::Done,
+            _ => current,
+        };
+    }
+
+    let (current_step, expected_action, resume_hint) = match stage {
+        TaskStage::Clarify => (
+            "уточнить недостающие факты".to_string(),
+            "user_input".to_string(),
+            "продолжить с уточнения фактов задачи".to_string(),
+        ),
+        TaskStage::Planning => (
+            "составить план действий и список нужных документов".to_string(),
+            "agent_work".to_string(),
+            "продолжить с плана и недостающих данных".to_string(),
+        ),
+        TaskStage::Execution => (
+            "подготовить рабочий черновик результата".to_string(),
+            "agent_work".to_string(),
+            "продолжить с подготовки черновика".to_string(),
+        ),
+        TaskStage::Validation => (
+            "проверить риски, пробелы и ограничения".to_string(),
+            "validation".to_string(),
+            "продолжить с проверки рисков и недостающих данных".to_string(),
+        ),
+        TaskStage::Done => (
+            "зафиксировать итог и следующие действия".to_string(),
+            "none".to_string(),
+            "задача завершена".to_string(),
+        ),
+    };
+
+    Some(ProposedTaskState {
+        stage,
+        current_step,
+        expected_action,
+        resume_hint,
+        artifact_key: String::new(),
+        artifact_value: String::new(),
+    })
+}
+
+fn contains_any_agent(value: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| value.contains(needle))
+}
+
+fn paused_user_supplied_next_info(prompt: &str) -> bool {
+    contains_any_agent(
+        prompt,
+        &[
+            "наш",
+            "вот",
+            "договор",
+            "реквизит",
+            "адрес",
+            "номер",
+            "ооо",
+            "акт",
+            "пункт",
+            "срок",
+            "нашёл",
+            "нашел",
+        ],
+    )
 }
 
 /// A proposed task-stage transition and whether the FSM accepted it.

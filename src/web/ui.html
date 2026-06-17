@@ -887,6 +887,7 @@
         </details>
         <label>Base URL<input id="gateBaseUrl" spellcheck="false" placeholder="оставь пустым для дефолта провайдера"></label>
         <label>Информация о проекте и агенте<textarea id="gateDomain" rows="5" placeholder="напр. агент-ресторатор для пиццерии в Волгограде: помогает с меню, рекламой и продвижением. Важно обыгрывать реку Волгу, локальный вайб и молодую аудиторию. Работает только на русском языке."></textarea></label>
+        <label>Стартовые факты вкладки Профиль<textarea id="gateInitialContext" rows="3" placeholder="Повторяемые факты для long-term памяти агента: юрисдикция, роль клиента, типовые ограничения. Не вводите токены или секреты."></textarea></label>
         <label>Что агент должен уточнить (опционально)<textarea id="gateSeed" rows="2" placeholder="напр. город, аудитория, бюджет, ограничения"></textarea></label>
         <label>Инварианты — жёсткие ограничения (по одному на строку)<textarea id="gateInvariants" rows="3" placeholder="только Kotlin&#10;архитектура только MVI&#10;никаких платных API"></textarea></label>
         <div class="actions">
@@ -935,7 +936,7 @@
             <div class="send-row">
               <button id="send" type="button">Отправить</button>
               <button id="stopBtn" class="secondary" type="button" style="display:none">Стоп</button>
-              <button id="clear" class="secondary" type="button">Новая сессия</button>
+              <button id="clear" class="secondary" type="button">Новый чат</button>
               <label class="stream-toggle" title="По чанкам — слова появляются в реальном времени. Одним ответом — ждать готовый текст целиком.">
                 <input id="streamMode" type="checkbox" checked> Стримить по чанкам
               </label>
@@ -991,6 +992,7 @@
             <div class="actions">
               <button id="userProfileBind" class="secondary" type="button">Применить к чату</button>
               <button id="userProfileDefaultForAgent" class="secondary" type="button">Default для агента</button>
+              <button id="userProfileDelete" class="secondary" type="button">Удалить профиль</button>
             </div>
             <details class="panel">
               <summary>Создать / обновить профиль</summary>
@@ -1017,8 +1019,10 @@
             <label>Инварианты<textarea id="profileAgentInvariants" rows="3" placeholder="по одному на строку"></textarea></label>
             <button id="profileAgentContextSave" type="button">Сохранить контекст агента</button>
             <div id="profileAgentContextStatus" class="field-help"></div>
+            <h3>Известная информация</h3>
             <div id="profileFields" class="profile-fields">Войди в агента, чтобы увидеть профиль.</div>
-            <div id="profilePending" class="field-help"></div>
+            <h3>Недостающие вопросы</h3>
+            <div id="profilePending" class="topic-debug">Вопросы появятся после входа в агента.</div>
             <h3>Факты long-term</h3>
             <div id="profileLongTermFacts" class="topic-debug">Факты появятся после первого запроса или ручной записи.</div>
             <div class="memory-layer-control">
@@ -1053,6 +1057,10 @@
               <option value="validation">validation</option>
               <option value="done">done</option>
             </select></label>
+            <label>Текущий шаг<input id="taskCurrentStepInput" spellcheck="false" placeholder="что делаем сейчас"></label>
+            <label>Ожидаемое действие<input id="taskExpectedActionInput" spellcheck="false" placeholder="user_input / agent_work / validation / none"></label>
+            <label class="stream-toggle"><input id="taskPausedInput" type="checkbox"> Пауза</label>
+            <label>Подсказка для продолжения<textarea id="taskResumeHintInput" rows="2" placeholder="с чего продолжить без повторного объяснения"></textarea></label>
             <label>Название<input id="taskTitleInput" spellcheck="false"></label>
             <label>Цель<textarea id="taskGoalInput" rows="3"></textarea></label>
             <label>План<textarea id="taskPlanInput" rows="5" placeholder="по одному пункту на строку"></textarea></label>
@@ -1974,6 +1982,7 @@
     function resetGateCreateForm() {
       $('gateName').value = '';
       $('gateDomain').value = '';
+      $('gateInitialContext').value = '';
       $('gateSeed').value = '';
       $('gateInvariants').value = '';
       $('gateCustomModel').value = '';
@@ -2078,9 +2087,10 @@
       else localStorage.removeItem('ai_active_user_profile');
       try {
         const body = defaultForAgent
-          ? { action: 'bind', agent_id: activeAgentId || null, default_profile_id: activeUserProfileId || null }
-          : { action: 'bind', active_profile_id: activeUserProfileId || null };
+          ? { action: 'bind', agent_id: activeAgentId || null, default_profile_id: activeUserProfileId }
+          : { action: 'bind', active_profile_id: activeUserProfileId };
         const data = await userProfilesManage(body);
+        userProfiles = data.profiles || userProfiles;
         renderUserProfiles(data.bindings || {});
         $('userProfileStatus').textContent = defaultForAgent
           ? 'Default profile для агента обновлен без изменения agent definition.'
@@ -2090,9 +2100,34 @@
       }
     }
 
+    async function deleteUserProfile() {
+      const id = $('userProfileSelect').value || '';
+      if (!id) { $('userProfileStatus').textContent = 'Сначала выбери профиль.'; return; }
+      try {
+        const data = await userProfilesManage({ action: 'delete', id });
+        if (activeUserProfileId === id) {
+          activeUserProfileId = '';
+          localStorage.removeItem('ai_active_user_profile');
+        }
+        userProfiles = data.profiles || [];
+        renderUserProfiles(data.bindings || {});
+        $('userProfileName').value = '';
+        $('userProfileLength').value = '';
+        $('userProfileInstructions').value = '';
+        $('userProfileStatus').textContent = 'Профиль удалён.';
+      } catch (error) {
+        $('userProfileStatus').textContent = 'Ошибка удаления: ' + error.message;
+      }
+    }
+
     function loadSelectedUserProfileIntoForm() {
       const profile = userProfiles.find((item) => item.id === $('userProfileSelect').value);
-      if (!profile) return;
+      if (!profile) {
+        $('userProfileName').value = '';
+        $('userProfileLength').value = '';
+        $('userProfileInstructions').value = '';
+        return;
+      }
       $('userProfileName').value = profile.display_name || '';
       $('userProfileLength').value = profile.response_length || '';
       $('userProfileInstructions').value = compactUserProfileInstructions(profile);
@@ -2118,11 +2153,12 @@
         const data = await agentsManage({ action: 'list' });
         const agents = data.agents || [];
         const select = $('gateAgentList');
-        select.innerHTML = agents.length
-          ? agents.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)} · ${escapeHtml(a.provider)}/${escapeHtml(a.model)} · ${escapeHtml(a.stage || 'clarify')}</option>`).join('')
-          : '<option value="">— пока нет —</option>';
-        if (activeAgentId && agents.some((a) => a.id === activeAgentId)) select.value = activeAgentId;
-        $('gateListStatus').textContent = agents.length ? '' : 'Создай первого агента справа.';
+      select.innerHTML = agents.length
+        ? agents.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)} · ${escapeHtml(a.provider)}/${escapeHtml(a.model)} · ${escapeHtml(a.stage || 'clarify')}</option>`).join('')
+        : '<option value="">— пока нет —</option>';
+      if (activeAgentId && agents.some((a) => a.id === activeAgentId)) select.value = activeAgentId;
+      else if (agents.length) select.value = agents[0].id;
+      $('gateListStatus').textContent = agents.length ? '' : 'Создай первого агента справа.';
       } catch (error) {
         $('gateListStatus').textContent = 'Ошибка списка: ' + error.message;
       }
@@ -2187,6 +2223,7 @@
         model: $('gateCustomModel').value.trim() || $('gateModel').value.trim(),
         base_url: $('gateBaseUrl').value.trim(),
         domain: $('gateDomain').value.trim(),
+        initial_context: $('gateInitialContext').value.trim(),
         seed_fields: lineToList('gateSeed'),
         invariants: lineToList('gateInvariants'),
       };
@@ -2265,26 +2302,36 @@
       $('memoryStrategy').dispatchEvent(new Event('change', { bubbles: true }));
     }
 
+    function applyTransportDefaultsForAgent(agent) {
+      if (!agent || agent.provider !== 'deepseek') return;
+      if (localStorage.getItem('ai_stream_mode') === null) {
+        $('streamMode').checked = false;
+        localStorage.setItem('ai_stream_mode', 'off');
+      }
+    }
+
     // ---- Workspace panes -------------------------------------------------
     function renderProfilePane(profile) {
       const wrap = $('profileFields');
       const fields = (profile && profile.fields) || [];
       if (!fields.length) {
-        wrap.textContent = 'У этого агента нет схемы интервью.';
-        $('profilePending').textContent = '';
+        wrap.innerHTML = '<span class="field-help">У этого агента нет заполненной схемы интервью.</span>';
+        $('profilePending').innerHTML = '<span class="field-help">Нет обязательных вопросов в схеме. Используй long-term факты ниже для повторяемого контекста.</span>';
         return;
       }
-      wrap.innerHTML = fields.map((f) => {
+      const known = fields.filter((f) => (f.value || '').trim());
+      const pendingFields = fields.filter((f) => f.required && !(f.value || '').trim());
+      wrap.innerHTML = known.length ? known.map((f) => {
         const filled = (f.value || '').trim();
-        const cls = (!filled && f.required) ? 'profile-field missing' : 'profile-field';
-        const val = filled ? escapeHtml(filled) : '<em>агент спросит…</em>';
         const req = f.required ? ' *' : '';
-        return `<div class="${cls}"><span class="pf-key">${escapeHtml(f.key)}${req}</span><span class="pf-val">${val}</span></div>`;
-      }).join('');
-      const pending = fields.filter((f) => f.required && !(f.value || '').trim()).map((f) => f.key);
-      $('profilePending').textContent = pending.length
-        ? 'Агент ещё спросит: ' + pending.join(', ')
-        : 'Все обязательные поля заполнены.';
+        return `<div class="profile-field"><span class="pf-key">${escapeHtml(f.key)}${req}</span><span class="pf-val">${escapeHtml(filled)}</span></div>`;
+      }).join('') : '<span class="field-help">Пока нет заполненных полей интервью.</span>';
+      $('profilePending').innerHTML = pendingFields.length
+        ? pendingFields.map((f) => {
+            const question = (f.question || f.key || '').trim();
+            return `<div class="profile-field missing"><span class="pf-key">${escapeHtml(f.key)}</span><span class="pf-val">${escapeHtml(question)}</span></div>`;
+          }).join('')
+        : '<span class="field-help">Все обязательные вопросы закрыты.</span>';
     }
 
     function renderProfileAgentContext(agent) {
@@ -2348,6 +2395,10 @@
       $('taskStageBadge').textContent = stage;
       $('taskStageSelect').value = TASK_STAGES.includes(stage) ? stage : 'clarify';
       renderStageFlow(stage);
+      $('taskCurrentStepInput').value = task.current_step || '';
+      $('taskExpectedActionInput').value = task.expected_action || '';
+      $('taskPausedInput').checked = !!task.paused;
+      $('taskResumeHintInput').value = task.resume_hint || '';
       $('taskTitleInput').value = task.title || '';
       $('taskGoalInput').value = task.goal || '';
       $('taskPlanInput').value = listToLines(task.plan);
@@ -2358,6 +2409,10 @@
     function taskPayloadFromForm() {
       return {
         stage: $('taskStageSelect').value,
+        current_step: $('taskCurrentStepInput').value.trim(),
+        expected_action: $('taskExpectedActionInput').value.trim(),
+        paused: $('taskPausedInput').checked,
+        resume_hint: $('taskResumeHintInput').value.trim(),
         title: $('taskTitleInput').value.trim(),
         goal: $('taskGoalInput').value.trim(),
         plan: lineToList('taskPlanInput'),
@@ -2409,6 +2464,10 @@
         renderStageFlow(state.stage);
         setActiveAgentChip($('activeAgentName').textContent, state.stage);
       }
+      if (state.current_step !== undefined) $('taskCurrentStepInput').value = state.current_step || '';
+      if (state.expected_action !== undefined) $('taskExpectedActionInput').value = state.expected_action || '';
+      if (state.paused !== undefined) $('taskPausedInput').checked = !!state.paused;
+      if (state.resume_hint !== undefined) $('taskResumeHintInput').value = state.resume_hint || '';
       if (state.stage_transition) {
         const t = state.stage_transition;
         $('taskTransitionLine').textContent = t.accepted
@@ -2424,7 +2483,9 @@
         $('violationsView').textContent = '';
       }
       if ((state.pending_questions || []).length) {
-        $('profilePending').textContent = 'Агент ещё спросит: ' + state.pending_questions.join(', ');
+        $('profilePending').innerHTML = state.pending_questions
+          .map((question) => `<div class="profile-field missing"><span class="pf-key">нужно</span><span class="pf-val">${escapeHtml(question)}</span></div>`)
+          .join('');
       }
     }
 
@@ -2444,13 +2505,14 @@
           if ($('model').value !== agent.model) $('customModel').value = agent.model;
         }
         applyAgentMemoryToForm(agent.memory);
+        applyTransportDefaultsForAgent(agent);
         renderProfileAgentContext(agent);
         renderProfilePane(data.profile);
         activeTaskId = data.task_id || 'default';
         $('taskIdInput').value = activeTaskId;
         renderTaskPane(data.task);
         renderInvariants(agent.invariants);
-        setActiveAgentChip(agent.name, 'clarify');
+        setActiveAgentChip(agent.name, (data.task && data.task.stage) || 'clarify');
         showWorkspace();
         await refreshUserProfiles();
         // bind a fresh session for this agent (loadChatSession derives the system
@@ -3172,6 +3234,7 @@
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let sseBuffer = '';
+        let gotDoneEvent = false;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -3193,6 +3256,7 @@
                 accText += eventData;
                 updateStreamingMessage(assistantEl, accText);
               } else if (eventType === 'done') {
+                gotDoneEvent = true;
                 const data = JSON.parse(eventData);
                 chatSessionId = data.session_id || chatSessionId;
                 forceNewSession = false;
@@ -3216,6 +3280,13 @@
               eventData = null;
             }
           }
+        }
+        if (!gotDoneEvent && accText && assistantEl) {
+          assistantEl.classList.remove('streaming');
+          assistantEl.textContent = accText;
+          chatHistory = [...chatHistory, { role: 'assistant', content: accText }];
+          renderChatHistory();
+          setStatus('Готово: стрим завершился без финального события', true);
         }
         await refreshTokenStatus();
       } catch (error) {
@@ -3442,6 +3513,7 @@
     $('userProfileBind').addEventListener('click', () => bindActiveUserProfile(false));
     $('userProfileDefaultForAgent').addEventListener('click', () => bindActiveUserProfile(true));
     $('userProfileSave').addEventListener('click', saveUserProfile);
+    $('userProfileDelete').addEventListener('click', deleteUserProfile);
 
     $('memoryFactAdd').addEventListener('click', () => {
       const key = $('memoryLayerKey').value.trim();
@@ -3532,7 +3604,7 @@ $('stopBtn').addEventListener('click', () => { if (activeAbortController) active
     $('clear').addEventListener('click', async () => {
       try {
         await startNewChatSession();
-        setStatus('Новая сессия создана');
+        setStatus('Новый чат создан');
       } catch (error) {
         localStorage.removeItem(sessionCacheKey());
         chatSessionId = null;

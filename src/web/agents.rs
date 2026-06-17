@@ -532,8 +532,16 @@ pub(super) async fn user_profiles_manage(
         "delete" => {
             let id = require_agent_id(request.id.as_deref())?;
             state.sessions.delete_user_profile(&id)?;
+            let mut bindings = state.sessions.load_user_profile_bindings()?;
+            if bindings.active_profile_id == id {
+                bindings.active_profile_id.clear();
+            }
+            bindings
+                .default_profile_per_agent
+                .retain(|_, profile_id| profile_id != &id);
+            state.sessions.save_user_profile_bindings(&bindings)?;
             response.profiles = state.sessions.list_user_profiles()?;
-            response.bindings = state.sessions.load_user_profile_bindings()?;
+            response.bindings = bindings;
         }
         "bind" => {
             let mut bindings = state.sessions.load_user_profile_bindings()?;
