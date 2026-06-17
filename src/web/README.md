@@ -22,12 +22,18 @@
 | `POST` | `/api/token/status` | Проверить наличие сохраненного токена для provider |
 | `POST` | `/api/token/save` | Сохранить token override для provider |
 | `POST` | `/api/models` | Загрузить модели provider |
+| `GET` | `/api/pricing/status` | Статус локального LiteLLM price catalog |
+| `POST` | `/api/pricing/sync` | Принудительно синхронизировать price catalog |
+| `POST` | `/api/pricing/resolve` | Найти цену и context limit для provider/model |
 | `POST` | `/api/chat/session` | Открыть или создать web chat session |
 | `POST` | `/api/chat` | Отправить prompt через `ChatAgent` |
+| `POST` | `/api/agent/chat/stream` | Streaming-ответ через SSE (`token`/`done`/`error`) |
 | `POST` | `/api/memory/update` | Ручное управление слоями памяти (set/delete/clear-layer), без provider-запроса |
 | `POST` | `/api/agents/manage` | Stateful-агенты + диалоги (list/load/save/delete/build-schema/dialogs/dialog-rename/dialog-delete) |
+| `POST` | `/api/user-profiles/manage` | Reusable user profiles: list/load/save/delete/bind |
 
-`/api/agent/*` сохранены как совместимые aliases для chat session/chat.
+`/api/agent/session` и `/api/agent/chat` сохранены как совместимые aliases для
+`/api/chat/session` и `/api/chat`.
 
 ## Агенто-центричный UI + stateful-агенты
 

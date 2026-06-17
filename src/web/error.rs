@@ -1,13 +1,44 @@
 use axum::{
     Json,
+    extract::{FromRequest, Request, rejection::JsonRejection},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
-use serde::Serialize;
+use serde::{Serialize, de::DeserializeOwned};
 
 use crate::errors::AppError;
 
 pub(crate) struct WebError(pub(crate) AppError);
+
+pub(crate) struct ApiJson<T>(pub(crate) T);
+
+impl<S, T> FromRequest<S> for ApiJson<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned,
+{
+    type Rejection = WebError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        Json::<T>::from_request(req, state)
+            .await
+            .map(|Json(value)| Self(value))
+            .map_err(|error| {
+                WebError(AppError::InvalidInput(match error {
+                    JsonRejection::JsonDataError(error) => {
+                        format!("Invalid JSON body: {error}")
+                    }
+                    JsonRejection::JsonSyntaxError(error) => {
+                        format!("Malformed JSON body: {error}")
+                    }
+                    JsonRejection::MissingJsonContentType(_) => {
+                        "Expected request body with content-type application/json".to_string()
+                    }
+                    other => format!("Invalid JSON request: {other}"),
+                }))
+            })
+    }
+}
 
 impl From<AppError> for WebError {
     fn from(error: AppError) -> Self {
