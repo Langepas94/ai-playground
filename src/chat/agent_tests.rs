@@ -615,6 +615,148 @@ async fn stateful_postprocess_captures_approved_task_decision() {
 }
 
 #[tokio::test]
+async fn stateful_postprocess_autonomously_advances_task_through_fsm_contract() {
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec![
+            r#"{"stage":"done","current_step":"deliver final result","expected_action":"none","resume_hint":"contract completed"}"#.to_string(),
+            r#"{"stage":"validation","current_step":"validate contract draft","expected_action":"validation","resume_hint":"run legal review checks"}"#.to_string(),
+            r#"{"stage":"execution","current_step":"draft contract sections","expected_action":"agent_work","resume_hint":"continue drafting the approved contract"}"#.to_string(),
+        ]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_task_state(Some(crate::chat::store::TaskContext {
+        stage: crate::chat::store::TaskStage::Planning,
+        current_step: "approve contract plan".to_string(),
+        expected_action: "user_input".to_string(),
+        title: "make contract".to_string(),
+        goal: "draft a service contract".to_string(),
+        plan: vec![
+            "collect contract details".to_string(),
+            "approve plan".to_string(),
+            "draft contract".to_string(),
+            "validate contract".to_string(),
+        ],
+        ..crate::chat::store::TaskContext::default()
+    }));
+
+    let report = agent
+        .stateful_postprocess(
+            &client,
+            "План утверждаю, делай договор",
+            "Перехожу к подготовке текста договора.",
+        )
+        .await;
+    assert_eq!(report.stage, Some(crate::chat::store::TaskStage::Execution));
+    assert_eq!(report.current_step, "draft contract sections");
+    assert_eq!(report.expected_action, "agent_work");
+    assert_eq!(report.stage_transition.expect("transition").accepted, true);
+
+    let report = agent
+        .stateful_postprocess(
+            &client,
+            "Черновик готов?",
+            "Черновик договора составлен, запускаю проверку условий.",
+        )
+        .await;
+    assert_eq!(
+        report.stage,
+        Some(crate::chat::store::TaskStage::Validation)
+    );
+    assert_eq!(report.current_step, "validate contract draft");
+    assert_eq!(report.expected_action, "validation");
+    assert_eq!(report.stage_transition.expect("transition").accepted, true);
+
+    let report = agent
+        .stateful_postprocess(
+            &client,
+            "Проверка норм, завершаем",
+            "Договор подготовлен и проверен.",
+        )
+        .await;
+    assert_eq!(report.stage, Some(crate::chat::store::TaskStage::Done));
+    assert_eq!(report.current_step, "deliver final result");
+    assert_eq!(report.expected_action, "none");
+    assert_eq!(report.stage_transition.expect("transition").accepted, true);
+
+    let task = agent.task_state().expect("task");
+    assert_eq!(task.stage, crate::chat::store::TaskStage::Done);
+    assert_eq!(task.current_step, "deliver final result");
+    assert_eq!(task.expected_action, "none");
+}
+
+#[tokio::test]
+async fn stateful_postprocess_rejects_illegal_stage_jump_but_keeps_step_metadata() {
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec![
+            r#"{"stage":"validation","current_step":"validate before planning","expected_action":"validation","resume_hint":"invalid jump should be rejected"}"#.to_string(),
+        ]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_task_state(Some(crate::chat::store::TaskContext {
+        stage: crate::chat::store::TaskStage::Clarify,
+        current_step: "collect contract details".to_string(),
+        expected_action: "user_input".to_string(),
+        title: "make contract".to_string(),
+        goal: "draft a service contract".to_string(),
+        ..crate::chat::store::TaskContext::default()
+    }));
+
+    let report = agent
+        .stateful_postprocess(
+            &client,
+            "Сделай мне договор",
+            "Уточню стороны договора и предмет работ.",
+        )
+        .await;
+
+    let transition = report.stage_transition.expect("rejected transition");
+    assert_eq!(transition.from, crate::chat::store::TaskStage::Clarify);
+    assert_eq!(transition.to, crate::chat::store::TaskStage::Validation);
+    assert!(!transition.accepted);
+    assert_eq!(report.stage, Some(crate::chat::store::TaskStage::Clarify));
+    assert_eq!(report.current_step, "validate before planning");
+    assert_eq!(report.expected_action, "validation");
+
+    let task = agent.task_state().expect("task");
+    assert_eq!(task.stage, crate::chat::store::TaskStage::Clarify);
+    assert_eq!(task.current_step, "validate before planning");
+    assert_eq!(task.expected_action, "validation");
+
+    let seen = client.seen_messages.lock().unwrap();
+    let state_tracker_request = seen
+        .last()
+        .expect("state tracker request")
+        .iter()
+        .map(|message| message.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        state_tracker_request
+            .contains("Allowed next stages from the current stage: planning, done")
+    );
+}
+
+#[tokio::test]
 async fn sliding_window_sends_only_recent_messages_and_keeps_history() {
     let client = FakeClient {
         replies: std::sync::Mutex::new(vec!["answer".to_string()]),
