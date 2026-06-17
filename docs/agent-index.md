@@ -15,7 +15,7 @@
 | Задача | Читать |
 |---|---|
 | CLI dispatch/flags | `src/cli/README.md`, `src/cli/mod.rs`, `src/cli/args.rs`, нужный `src/cli/commands/*` |
-| Web API handler | `src/web/README.md`, `src/web/mod.rs`, соседний helper |
+| Web API handler | `src/web/README.md`, затем `src/web/mod.rs` или нужный helper (`src/web/agents.rs`, `tokens.rs`, `parameters.rs`) |
 | Web UI | `rtk rg -n "id|function|label" src/web/ui.html`, затем короткий `sed` slice |
 | Chat runtime | `src/chat/README.md`, `src/chat/agent.rs`, `src/chat/memory.rs` |
 | Chat tests | `src/chat/agent_tests.rs`, `src/chat/memory_tests.rs` |
@@ -28,6 +28,8 @@
 | Файл | Как читать |
 |---|---|
 | `src/web/ui.html` | `rtk rg -n "function NAME|id=\"ID\"" src/web/ui.html` |
+| `src/web/mod.rs` | `rtk ast-index outline src/web/mod.rs`; agent/profile management живет в `src/web/agents.rs` |
+| `src/chat/store.rs` | storage API; persisted state types в `src/chat/store_types.rs`, тесты в `src/chat/store_tests.rs` |
 | `src/providers/openai_compatible.rs` | `rtk ast-index outline src/providers/openai_compatible.rs` |
 | `tests/http_mock.rs` | `rtk rg -n "test_name|provider|endpoint" tests/http_mock.rs` |
 | `src/chat/agent_tests.rs` | читать только конкретный тест |

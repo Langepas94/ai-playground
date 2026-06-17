@@ -4,6 +4,9 @@ pub mod history;
 pub mod memory;
 pub mod session;
 pub mod store;
+#[cfg(test)]
+mod store_tests;
+mod store_types;
 pub mod token_accounting;
 
 pub use agent::{

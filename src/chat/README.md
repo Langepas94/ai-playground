@@ -13,6 +13,8 @@
 - `memory_tests.rs` - unit-тесты `AgentMemory`.
 - `token_accounting.rs` - локальная оценка токенов запроса, истории, ответа, стоимости и overflow по context limit.
 - `store.rs` - `LocalSessionStore`: TOON-сессии, context sidecar, индекс последней сессии.
+- `store_types.rs` - persisted DTO/stateful-agent/task/user-profile types used by the store and web API.
+- `store_tests.rs` - unit-тесты `LocalSessionStore` и persisted state types.
 - `history.rs` - сохранение истории в файл.
 - `AGENT_RUNTIME.md` - подробная модель локального agent runtime.
 
@@ -113,11 +115,11 @@ read-only facts block при любой context strategy. `Sticky Facts` отв�
 - Персист: `LocalSessionStore::save_long_term` / `load_long_term` /
   `seed_long_term` (профильный файл). `save_memory` хранит per-session sidecar
   как раньше. Сценарий «новая сессия»: long-term остаётся, short-term пуст
-  (тест `long_term_survives_new_session_short_term_does_not` в `store.rs`).
+  (тест `long_term_survives_new_session_short_term_does_not` в `store_tests.rs`).
 
 ## Stateful-агенты (SavedAgent)
 
-Персистентная сущность агента поверх трёх слоёв памяти (`store.rs`). Память
+Персистентная сущность агента поверх трёх слоёв памяти (`store_types.rs` + storage в `store.rs`). Память
 **заполняется самим агентом**, не вручную: юзер задаёт только домен + инварианты.
 
 - `SavedAgent` — настройки (provider/base_url/model/system_prompt + `domain` +

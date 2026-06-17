@@ -4,7 +4,8 @@
 
 ## Файлы
 
-- `mod.rs` - Axum server, routes, handlers и request/response DTO.
+- `mod.rs` - Axum server, routes, chat/session/stream handlers и shared request/response DTO.
+- `agents.rs` - `/api/agents/manage` и `/api/user-profiles/manage`: action dispatch, DTO и helpers для stateful-агентов, диалогов, задач и reusable user profiles.
 - `tests.rs` - unit-тесты web handlers/DTO/UI string checks.
 - `error.rs` - преобразование `AppError` в HTTP status + JSON error body.
 - `parameters.rs` - web-facing constraints для provider response controls.
