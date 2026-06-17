@@ -136,6 +136,14 @@ read-only facts block при любой context strategy. `Sticky Facts` отв�
 `validation→execution`. Сериализуется как строка (как `MemoryLayer`), чтобы TOON
 хранил её как plain-значение.
 
+`TaskContext.pipeline` задает stage-level pipeline contract: у каждой стадии есть
+`system_prompt`, список `worker_agents` (id/direction/system_prompt), ожидаемый
+`artifact_key` и флаг `requires_human_approval`. Когда стадия рождает artifact,
+`complete_pipeline_stage` детерминированно переводит задачу к следующей стадии или
+ставит `paused=true` и `expected_action=user_input`, если требуется human approval.
+Artifacts сохраняются в `TaskContext.artifacts` и инъектятся в `[memory:working]`
+для main-agent/orchestrator.
+
 Хранение через `LocalSessionStore`: `agent-<id>.agent.toon`, legacy/default
 `*.task.toon`, task-scoped `agent-<id>.task-<task>.toon`,
 `*.profile.toon`, `*.dialogs.toon`, индекс `agents-index.toon` (со стадией). Методы

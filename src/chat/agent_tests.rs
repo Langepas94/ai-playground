@@ -403,6 +403,62 @@ fn task_block_keeps_tracked_task_as_context_not_a_gate() {
     );
 }
 
+#[test]
+fn task_block_injects_pipeline_stage_prompts_workers_and_artifacts() {
+    let block = render_task_block(&crate::chat::store::TaskContext {
+        stage: crate::chat::store::TaskStage::Planning,
+        current_step: "run research workers".to_string(),
+        expected_action: "agent_work".to_string(),
+        pipeline: vec![
+            crate::chat::store::TaskPipelineStage {
+                stage: crate::chat::store::TaskStage::Planning,
+                name: "Research".to_string(),
+                system_prompt: "Research legal context before drafting.".to_string(),
+                artifact_key: "research_conclusion".to_string(),
+                worker_agents: vec![
+                    crate::chat::store::TaskWorkerAgent {
+                        id: "ru-law".to_string(),
+                        direction: "russian_law".to_string(),
+                        system_prompt: "Analyze Russian contract law.".to_string(),
+                    },
+                    crate::chat::store::TaskWorkerAgent {
+                        id: "patent-law".to_string(),
+                        direction: "patent".to_string(),
+                        system_prompt: "Analyze patent/IP constraints.".to_string(),
+                    },
+                ],
+                ..crate::chat::store::TaskPipelineStage::default()
+            },
+            crate::chat::store::TaskPipelineStage {
+                stage: crate::chat::store::TaskStage::Execution,
+                name: "Create".to_string(),
+                system_prompt: "Write the contract from the research artifact.".to_string(),
+                artifact_key: "contract_draft".to_string(),
+                requires_human_approval: true,
+                ..crate::chat::store::TaskPipelineStage::default()
+            },
+        ],
+        artifacts: vec![crate::chat::store::TaskArtifact {
+            stage: crate::chat::store::TaskStage::Planning,
+            key: "research_conclusion".to_string(),
+            value: "Russian law ok; patent risk noted".to_string(),
+        }],
+        ..crate::chat::store::TaskContext::default()
+    });
+
+    assert!(block.contains("Pipeline contract:"));
+    assert!(block.contains("- Research (planning) -> artifact: research_conclusion"));
+    assert!(block.contains("system_prompt: Research legal context before drafting."));
+    assert!(block.contains("ru-law [russian_law] prompt: Analyze Russian contract law."));
+    assert!(block.contains("patent-law [patent] prompt: Analyze patent/IP constraints."));
+    assert!(
+        block
+            .contains("- Create (execution) [requires human approval] -> artifact: contract_draft")
+    );
+    assert!(block.contains("Pipeline artifacts:"));
+    assert!(block.contains("planning:research_conclusion = Russian law ok; patent risk noted"));
+}
+
 #[tokio::test]
 async fn paused_task_resume_context_is_injected_without_reexplaining() {
     let client = FakeClient {
@@ -754,6 +810,116 @@ async fn stateful_postprocess_rejects_illegal_stage_jump_but_keeps_step_metadata
         state_tracker_request
             .contains("Allowed next stages from the current stage: planning, done")
     );
+}
+
+#[tokio::test]
+async fn stateful_postprocess_advances_pipeline_deterministically_from_artifacts() {
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec![
+            r#"{"stage":"validation","current_step":"Validation","expected_action":"agent_work"}"#.to_string(),
+            r#"{"stage":"execution","current_step":"draft contract","expected_action":"agent_work","artifact_key":"contract_draft","artifact":"Draft contract text"}"#.to_string(),
+            r#"{"stage":"execution","current_step":"write creating brief","expected_action":"agent_work","artifact_key":"research_conclusion","artifact":"Russian law ok; patent risk noted"}"#.to_string(),
+        ]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_task_state(Some(crate::chat::store::TaskContext {
+        stage: crate::chat::store::TaskStage::Planning,
+        current_step: "run research workers".to_string(),
+        expected_action: "agent_work".to_string(),
+        pipeline: vec![
+            crate::chat::store::TaskPipelineStage {
+                stage: crate::chat::store::TaskStage::Planning,
+                name: "Research".to_string(),
+                system_prompt: "Run parallel legal research workers.".to_string(),
+                artifact_key: "research_conclusion".to_string(),
+                worker_agents: vec![
+                    crate::chat::store::TaskWorkerAgent {
+                        id: "ru-law".to_string(),
+                        direction: "russian_law".to_string(),
+                        system_prompt: "Analyze Russian contract law.".to_string(),
+                    },
+                    crate::chat::store::TaskWorkerAgent {
+                        id: "patent-law".to_string(),
+                        direction: "patent".to_string(),
+                        system_prompt: "Analyze patent constraints.".to_string(),
+                    },
+                ],
+                ..crate::chat::store::TaskPipelineStage::default()
+            },
+            crate::chat::store::TaskPipelineStage {
+                stage: crate::chat::store::TaskStage::Execution,
+                name: "Create".to_string(),
+                system_prompt: "Create the contract from the research artifact.".to_string(),
+                artifact_key: "contract_draft".to_string(),
+                requires_human_approval: true,
+                ..crate::chat::store::TaskPipelineStage::default()
+            },
+            crate::chat::store::TaskPipelineStage {
+                stage: crate::chat::store::TaskStage::Validation,
+                name: "Validation".to_string(),
+                system_prompt: "Validate the created contract.".to_string(),
+                artifact_key: "validation_report".to_string(),
+                ..crate::chat::store::TaskPipelineStage::default()
+            },
+        ],
+        ..crate::chat::store::TaskContext::default()
+    }));
+
+    let report = agent
+        .stateful_postprocess(
+            &client,
+            "Исследования завершились",
+            "Оба research-агента дали заключения.",
+        )
+        .await;
+    assert_eq!(report.stage, Some(crate::chat::store::TaskStage::Execution));
+    assert_eq!(report.current_step, "Create");
+    assert_eq!(report.expected_action, "agent_work");
+    assert_eq!(report.stage_transition.expect("transition").accepted, true);
+    let task = agent.task_state().expect("task");
+    assert_eq!(task.artifacts[0].key, "research_conclusion");
+    assert_eq!(task.artifacts[0].value, "Russian law ok; patent risk noted");
+
+    let report = agent
+        .stateful_postprocess(
+            &client,
+            "Черновик договора готов",
+            "Создающий агент вернул текст договора.",
+        )
+        .await;
+    assert_eq!(report.stage, Some(crate::chat::store::TaskStage::Execution));
+    assert_eq!(report.current_step, "approve Create artifact");
+    assert_eq!(report.expected_action, "user_input");
+    assert!(report.paused);
+    let task = agent.task_state().expect("task");
+    assert_eq!(task.stage, crate::chat::store::TaskStage::Execution);
+    assert!(task.paused);
+    assert_eq!(task.artifacts[1].key, "contract_draft");
+
+    let report = agent
+        .stateful_postprocess(
+            &client,
+            "Утверждаю черновик, переходи к проверке",
+            "Принято, перехожу к валидации договора.",
+        )
+        .await;
+    assert_eq!(
+        report.stage,
+        Some(crate::chat::store::TaskStage::Validation)
+    );
+    assert_eq!(report.current_step, "Validation");
+    assert_eq!(report.expected_action, "agent_work");
+    assert!(!report.paused);
 }
 
 #[tokio::test]

@@ -20,9 +20,9 @@ use crate::{
     chat::memory::{MemoryConfig, MemoryLayer, MemoryStrategy},
     chat::{
         AgentMemory, AgentProfile, AgentSummary, ChatAgent, LocalSessionStore, ProfileField,
-        SavedAgent, SavedMemoryConfig, StatefulReport, TaskContext, UserProfile,
-        UserProfileBindings, add_request_metrics, available_agents, build_profile_schema,
-        selected_agent, web_session_key,
+        SavedAgent, SavedMemoryConfig, StatefulReport, TaskArtifact, TaskContext,
+        TaskPipelineStage, UserProfile, UserProfileBindings, add_request_metrics, available_agents,
+        build_profile_schema, selected_agent, web_session_key,
     },
     config::ProfileConfig,
     errors::AppError,
@@ -1113,6 +1113,10 @@ struct TaskPayload {
     #[serde(default)]
     plan: Vec<String>,
     #[serde(default)]
+    pipeline: Vec<TaskPipelineStage>,
+    #[serde(default)]
+    artifacts: Vec<TaskArtifact>,
+    #[serde(default)]
     results: Vec<String>,
     #[serde(default)]
     notes: String,
@@ -1129,6 +1133,8 @@ impl TaskPayload {
             title: self.title.trim().to_string(),
             goal: self.goal.trim().to_string(),
             plan: clean_lines(self.plan),
+            pipeline: self.pipeline,
+            artifacts: self.artifacts,
             results: clean_lines(self.results),
             notes: self.notes.trim().to_string(),
             violations: Vec::new(),
