@@ -3224,11 +3224,12 @@
           // Partial response — keep what arrived, finalize streaming bubble
           if (assistantEl) {
             assistantEl.classList.remove('streaming');
+            assistantEl.title = 'Частичный ответ остановлен локально и не сохранён в истории сервера.';
             assistantEl.textContent = accText;
           }
           chatHistory = [...chatHistory, { role: 'assistant', content: accText }];
           renderChatHistory();
-          setStatus('Остановлено', true);
+          setStatus('Остановлено: частичный ответ не сохранён', true);
         } else {
           if (!accText) {
             chatHistory = chatHistory.slice(0, -1);

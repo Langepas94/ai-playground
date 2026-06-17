@@ -19,8 +19,8 @@ use tokio::time::{Duration, sleep};
 use crate::{
     chat::memory::{MemoryConfig, MemoryLayer, MemoryStrategy},
     chat::{
-        AgentMemory, AgentProfile, AgentSummary, ChatAgent, LocalSessionStore, ProfileField,
-        SavedAgent, SavedMemoryConfig, StatefulReport, TaskArtifact, TaskContext,
+        AgentMemory, AgentProfile, AgentSummary, ChatAgent, ConversationSession, LocalSessionStore,
+        ProfileField, SavedAgent, SavedMemoryConfig, StatefulReport, TaskArtifact, TaskContext,
         TaskPipelineStage, UserProfile, UserProfileBindings, add_request_metrics, available_agents,
         build_profile_schema, selected_agent, web_session_key,
     },
@@ -40,7 +40,7 @@ mod parameters;
 mod tokens;
 mod util;
 
-use error::WebError;
+use error::{ApiJson, WebError};
 use parameters::{ParameterConstraintView, parameter_constraints};
 use tokens::{resolve_web_token, token_override_belongs_to_provider, web_token_present};
 use util::{blank_str_to_none, blank_to_none, parse_provider};
@@ -55,13 +55,44 @@ struct AppState {
     prices: LiteLlmPriceCatalog,
 }
 
+struct PreparedWebChat {
+    agent_id: String,
+    profile: ProfileConfig,
+    token: String,
+    prompt: String,
+    session_key: String,
+    session: ConversationSession,
+    agent: ChatAgent,
+}
+
 pub async fn serve(addr: SocketAddr) -> Result<(), AppError> {
     let client = ReqwestProviderClient::new()?;
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
     let sessions = LocalSessionStore::new()?;
     let prices = LiteLlmPriceCatalog::new()?;
     spawn_price_sync_task(client.clone(), prices.clone());
-    let app = Router::new()
+    let app = build_app(AppState {
+        client,
+        secrets,
+        sessions,
+        prices,
+    });
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(|error| AppError::Terminal(error.to_string()))?;
+    println!(
+        "Web UI: http://{}",
+        listener.local_addr().map_err(|error| {
+            AppError::Terminal(format!("could not read listener address: {error}"))
+        })?
+    );
+    axum::serve(listener, app)
+        .await
+        .map_err(|error| AppError::Terminal(error.to_string()))
+}
+
+fn build_app(state: AppState) -> Router {
+    Router::new()
         .route("/", get(index))
         .route("/api/agents", get(agents))
         .route("/api/providers", get(providers))
@@ -80,24 +111,7 @@ pub async fn serve(addr: SocketAddr) -> Result<(), AppError> {
         .route("/api/agents/manage", post(agents_manage))
         .route("/api/user-profiles/manage", post(user_profiles_manage))
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // 50 MB — для вложений
-        .with_state(AppState {
-            client,
-            secrets,
-            sessions,
-            prices,
-        });
-    let listener = TcpListener::bind(addr)
-        .await
-        .map_err(|error| AppError::Terminal(error.to_string()))?;
-    println!(
-        "Web UI: http://{}",
-        listener.local_addr().map_err(|error| {
-            AppError::Terminal(format!("could not read listener address: {error}"))
-        })?
-    );
-    axum::serve(listener, app)
-        .await
-        .map_err(|error| AppError::Terminal(error.to_string()))
+        .with_state(state)
 }
 
 fn spawn_price_sync_task(client: ReqwestProviderClient, prices: LiteLlmPriceCatalog) {
@@ -147,7 +161,7 @@ async fn providers() -> Json<ProvidersResponse> {
 
 async fn models(
     State(state): State<AppState>,
-    Json(request): Json<ModelsRequest>,
+    ApiJson(request): ApiJson<ModelsRequest>,
 ) -> Result<Json<ModelsResponse>, WebError> {
     let profile = request.profile()?;
     validate_base_url(&profile.provider.to_string(), &profile.base_url)?;
@@ -180,7 +194,7 @@ async fn pricing_sync(State(state): State<AppState>) -> Result<Json<PriceCatalog
 
 async fn pricing_resolve(
     State(state): State<AppState>,
-    Json(request): Json<PricingResolveRequest>,
+    ApiJson(request): ApiJson<PricingResolveRequest>,
 ) -> Result<Json<PricingResolveResponse>, WebError> {
     let provider = parse_provider(&request.provider)?;
     let _ = state.prices.sync_if_stale(state.client.http_client()).await;
@@ -195,7 +209,7 @@ async fn pricing_resolve(
 
 async fn token_status(
     State(state): State<AppState>,
-    Json(request): Json<ModelsRequest>,
+    ApiJson(request): ApiJson<ModelsRequest>,
 ) -> Result<Json<TokenStatusResponse>, WebError> {
     let profile = request.profile()?;
     validate_base_url(&profile.provider.to_string(), &profile.base_url)?;
@@ -211,7 +225,7 @@ async fn token_status(
 
 async fn token_save(
     State(state): State<AppState>,
-    Json(request): Json<ModelsRequest>,
+    ApiJson(request): ApiJson<ModelsRequest>,
 ) -> Result<Json<TokenStatusResponse>, WebError> {
     let profile = request.profile()?;
     validate_base_url(&profile.provider.to_string(), &profile.base_url)?;
@@ -228,10 +242,10 @@ async fn token_save(
     Ok(Json(TokenStatusResponse { saved: true }))
 }
 
-async fn chat(
-    State(state): State<AppState>,
-    Json(request): Json<ChatWebRequest>,
-) -> Result<Json<ChatWebResponse>, WebError> {
+async fn prepare_web_chat(
+    state: &AppState,
+    request: &ChatWebRequest,
+) -> Result<PreparedWebChat, WebError> {
     let agent_spec = selected_agent(request.agent_id.as_deref())?;
     let profile = request.profile()?;
     validate_base_url(&profile.provider.to_string(), &profile.base_url)?;
@@ -259,21 +273,20 @@ async fn chat(
     };
     let mut memory = state.sessions.load_memory(&session.id)?;
     state.sessions.seed_long_term(&session_key, &mut memory)?;
-    let control = request.control.clone().into_control();
     let memory_config = request
         .memory
         .clone()
         .unwrap_or_default()
         .into_memory_config();
     let _ = state.prices.sync_if_stale(state.client.http_client()).await;
-    let pricing = web_request_pricing(&request, &state.prices, &profile);
-    let context_limit = web_request_context_limit(&request, &state.prices, &profile);
+    let pricing = web_request_pricing(request, &state.prices, &profile);
+    let context_limit = web_request_context_limit(request, &state.prices, &profile);
     let mut agent = ChatAgent::new(
         profile.clone(),
-        token,
-        request.initial_history(session.messages),
+        token.clone(),
+        request.initial_history(session.messages.clone()),
         memory,
-        control,
+        request.control.clone().into_control(),
         pricing,
         request
             .billing
@@ -295,6 +308,29 @@ async fn chat(
         request.saved_agent_id.as_deref(),
         &mut agent,
     )?;
+    Ok(PreparedWebChat {
+        agent_id: agent_spec.id.to_string(),
+        profile,
+        token,
+        prompt,
+        session_key,
+        session,
+        agent,
+    })
+}
+
+async fn chat(
+    State(state): State<AppState>,
+    ApiJson(request): ApiJson<ChatWebRequest>,
+) -> Result<Json<ChatWebResponse>, WebError> {
+    let PreparedWebChat {
+        agent_id,
+        prompt,
+        session_key,
+        session,
+        mut agent,
+        ..
+    } = prepare_web_chat(&state, &request).await?;
     let (response, provider_debug, mut context_metrics) = agent
         .respond_with_debug_and_context_metrics(&state.client, prompt.clone())
         .await?;
@@ -329,7 +365,7 @@ async fn chat(
     let context_debug =
         build_context_debug(agent.memory(), &agent.memory_config(), agent.history());
     Ok(Json(ChatWebResponse {
-        agent_id: agent_spec.id.to_string(),
+        agent_id,
         session_id: session.id,
         text: response.text,
         finish_reason: response.finish_reason,
@@ -348,71 +384,17 @@ async fn chat(
 
 async fn chat_stream(
     State(state): State<AppState>,
-    Json(request): Json<ChatWebRequest>,
+    ApiJson(request): ApiJson<ChatWebRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, WebError> {
-    let agent_spec = selected_agent(request.agent_id.as_deref())?;
-    let profile = request.profile()?;
-    validate_base_url(&profile.provider.to_string(), &profile.base_url)?;
-    if request.prompt.trim().is_empty() {
-        return Err(AppError::InvalidInput("Prompt is required".to_string()).into());
-    }
-    let prompt = build_web_prompt(&request.prompt, request.attachments.as_deref());
-    let token = resolve_web_token(
-        state.secrets.as_ref(),
-        &profile,
-        &request.token,
-        request.token_provider.as_deref(),
-    )?;
-    let session_key = effective_session_key(
-        request.saved_agent_id.as_deref(),
-        &web_session_key(agent_spec.id, &profile.provider.to_string(), &profile.model),
-    );
-    let session = if request.new_session {
-        state.sessions.create_session()?
-    } else {
-        match request.session_id.as_deref().and_then(blank_str_to_none) {
-            Some(session_id) => state.sessions.load_session(session_id)?,
-            None => state.sessions.load_or_create_latest(&session_key)?,
-        }
-    };
-    let mut memory = state.sessions.load_memory(&session.id)?;
-    state.sessions.seed_long_term(&session_key, &mut memory)?;
-    let control = request.control.clone().into_control();
-    let memory_config = request
-        .memory
-        .clone()
-        .unwrap_or_default()
-        .into_memory_config();
-    let _ = state.prices.sync_if_stale(state.client.http_client()).await;
-    let pricing = web_request_pricing(&request, &state.prices, &profile);
-    let context_limit = web_request_context_limit(&request, &state.prices, &profile);
-    let mut agent = ChatAgent::new(
-        profile.clone(),
-        token.clone(),
-        request.initial_history(session.messages),
-        memory,
-        control,
-        pricing,
-        request
-            .billing
-            .clone()
-            .and_then(WebBilling::into_billing_lookup),
-    );
-    agent.set_memory_config(memory_config);
-    agent.set_context_limit(context_limit);
-    agent.set_topic_store(Some(state.sessions.topic_file_storage(&session.id)?));
-    apply_saved_agent_memory(
-        &state.sessions,
-        request.saved_agent_id.as_deref(),
-        session.id.as_str(),
-        &mut agent,
-    )?;
-    apply_runtime_user_profile(
-        &state.sessions,
-        request.user_profile_id.as_deref(),
-        request.saved_agent_id.as_deref(),
-        &mut agent,
-    )?;
+    let PreparedWebChat {
+        profile,
+        token,
+        prompt,
+        session_key,
+        session,
+        mut agent,
+        ..
+    } = prepare_web_chat(&state, &request).await?;
     let prepared_stream = agent.prepare_stream_request(&state.client, &prompt).await?;
     let session_id = session.id.clone();
     let session_metrics_before = session.metrics.clone();
@@ -554,7 +536,7 @@ fn sse_event_stream(
 
 async fn chat_session(
     State(state): State<AppState>,
-    Json(request): Json<ChatSessionRequest>,
+    ApiJson(request): ApiJson<ChatSessionRequest>,
 ) -> Result<Json<ChatSessionResponse>, WebError> {
     let agent = selected_agent(request.agent_id.as_deref())?;
     let provider = parse_provider(&request.provider)?;
@@ -686,7 +668,7 @@ fn stateful_debug_view(report: &StatefulReport) -> StatefulDebugView {
 
 async fn agents_manage(
     State(state): State<AppState>,
-    Json(request): Json<AgentsManageRequest>,
+    ApiJson(request): ApiJson<AgentsManageRequest>,
 ) -> Result<Json<AgentsManageResponse>, WebError> {
     let mut response = AgentsManageResponse::default();
     match request.action.as_str() {
@@ -1156,7 +1138,7 @@ struct AgentsManageResponse {
 
 async fn user_profiles_manage(
     State(state): State<AppState>,
-    Json(request): Json<UserProfilesManageRequest>,
+    ApiJson(request): ApiJson<UserProfilesManageRequest>,
 ) -> Result<Json<UserProfilesManageResponse>, WebError> {
     let mut response = UserProfilesManageResponse::default();
     match request.action.as_str() {
@@ -1281,7 +1263,7 @@ struct UserProfilesManageResponse {
 
 async fn memory_update(
     State(state): State<AppState>,
-    Json(request): Json<MemoryUpdateRequest>,
+    ApiJson(request): ApiJson<MemoryUpdateRequest>,
 ) -> Result<Json<MemoryUpdateResponse>, WebError> {
     let agent = selected_agent(request.agent_id.as_deref())?;
     let provider = parse_provider(&request.provider)?;

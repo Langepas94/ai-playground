@@ -1,6 +1,11 @@
 use super::*;
 use crate::chat::{TaskArtifact, TaskPipelineStage, TaskStage, TaskWorkerAgent};
 use crate::secrets::MemorySecretStore;
+use axum::{
+    body::{Body, to_bytes},
+    http::{Request, StatusCode, header},
+};
+use tower::ServiceExt;
 
 fn web_profile(provider: ProviderKind) -> ProfileConfig {
     ProfileConfig {
@@ -123,6 +128,168 @@ fn web_test_state(store: LocalSessionStore) -> AppState {
     }
 }
 
+async fn response_json(response: axum::response::Response) -> serde_json::Value {
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read response body");
+    serde_json::from_slice(&body).expect("json response")
+}
+
+#[tokio::test]
+async fn router_json_rejections_use_web_error_shape() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let app = build_app(web_test_state(LocalSessionStore::from_root(
+        dir.path().join("sessions"),
+    )));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/chat")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"provider":"deepseek","base_url":"https://api.deepseek.com","token":"","model":"deepseek-chat","prompt":""}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response.headers().get(header::CONTENT_TYPE).unwrap(),
+        "application/json"
+    );
+    let body = response_json(response).await;
+    assert!(
+        body["error"]
+            .as_str()
+            .expect("error")
+            .contains("Invalid JSON body"),
+        "unexpected body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn router_exposes_documented_web_api_surface() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let app = build_app(web_test_state(LocalSessionStore::from_root(
+        dir.path().join("sessions"),
+    )));
+
+    let providers = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/providers")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("providers");
+    assert_eq!(providers.status(), StatusCode::OK);
+
+    let pricing = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/pricing/status")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("pricing status");
+    assert_eq!(pricing.status(), StatusCode::OK);
+
+    for path in ["/api/agent/session", "/api/chat/session"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"provider":"deepseek","model":"deepseek-chat","new_session":true}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{path} failed: {error}"));
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let body = response_json(response).await;
+        assert!(body["session_id"].as_str().is_some(), "{path}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn user_profiles_manage_roundtrips_over_http_router() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let app = build_app(web_test_state(LocalSessionStore::from_root(
+        dir.path().join("sessions"),
+    )));
+    let profile = serde_json::json!({
+        "id": "chef-short",
+        "display_name": "Chef short",
+        "style_preferences": ["concise"],
+        "language_preferences": ["English"],
+        "custom_instructions": "Prefer culinary examples"
+    });
+
+    let save = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/user-profiles/manage")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"action":"save","profile":profile}).to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("save");
+    assert_eq!(save.status(), StatusCode::OK);
+    let save_body = response_json(save).await;
+    assert_eq!(save_body["profile"]["id"], "chef-short");
+
+    let load = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/user-profiles/manage")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"action":"load","id":"chef-short"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("load");
+    assert_eq!(load.status(), StatusCode::OK);
+    let load_body = response_json(load).await;
+    assert_eq!(load_body["profile"]["display_name"], "Chef short");
+
+    let delete = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/user-profiles/manage")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"action":"delete","id":"chef-short"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("delete");
+    assert_eq!(delete.status(), StatusCode::OK);
+    let delete_body = response_json(delete).await;
+    assert_eq!(
+        delete_body["profiles"].as_array().expect("profiles").len(),
+        0
+    );
+}
+
 #[tokio::test]
 async fn user_profiles_bind_can_clear_active_profile() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -137,7 +304,7 @@ async fn user_profiles_bind_can_clear_active_profile() {
 
     let result = user_profiles_manage(
         State(state),
-        Json(UserProfilesManageRequest {
+        ApiJson(UserProfilesManageRequest {
             action: "bind".to_string(),
             active_profile_id: Some(String::new()),
             id: None,
@@ -493,7 +660,7 @@ async fn agents_manage_can_manually_save_and_bind_dialog_task() {
 
     let result = agents_manage(
         State(state),
-        Json(AgentsManageRequest {
+        ApiJson(AgentsManageRequest {
             action: "task-save".to_string(),
             id: Some("menu-agent".to_string()),
             session_id: Some("menu-dialog".to_string()),
@@ -1177,6 +1344,14 @@ fn web_ui_stream_done_updates_request_metrics_and_debug() {
     assert!(
         INDEX_HTML.contains("setSessionMetrics(data.session_metrics);"),
         "streaming done handler must keep cumulative session metrics visible"
+    );
+}
+
+#[test]
+fn web_ui_stream_abort_labels_partial_response_as_unsaved() {
+    assert!(
+        INDEX_HTML.contains("Остановлено: частичный ответ не сохранён"),
+        "partial stream abort should not look like a fully persisted turn"
     );
 }
 
