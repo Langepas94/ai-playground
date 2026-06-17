@@ -855,7 +855,7 @@ impl ChatAgent {
                 ChatMessage {
                     role: Role::System,
                     content: format!(
-                        "You track a task as a finite state machine. Stages: {options}. Allowed next stages from the current stage: {allowed_options}. Given the latest exchange, decide the formal state the work is in NOW. Reply with JSON {{\"stage\":\"<stage>\",\"current_step\":\"<specific active step>\",\"expected_action\":\"user_input|agent_work|tool_result|validation|none|<short string>\",\"resume_hint\":\"<short continuation hint>\",\"reason\":\"...\"}}. Prefer staying in the current stage unless the exchange clearly moved it through an allowed transition or completed the task."
+                        "You track a task as a finite state machine. Stages: {options}. Allowed next stages from the current stage: {allowed_options}. Given the latest exchange, decide the formal state the work is in NOW. Reply with JSON {{\"stage\":\"<stage>\",\"current_step\":\"<specific active step>\",\"expected_action\":\"user_input|agent_work|tool_result|validation|none|<short string>\",\"resume_hint\":\"<short continuation hint>\",\"artifact_key\":\"<completed pipeline artifact key if any>\",\"artifact\":\"<completed pipeline artifact summary if any>\",\"reason\":\"...\"}}. Prefer staying in the current stage unless the exchange clearly moved it through an allowed transition or completed the task. If a pipeline stage produced its required artifact, include artifact_key and artifact so the deterministic pipeline can advance or pause for human approval."
                     ),
                 },
                 ChatMessage {
@@ -886,6 +886,20 @@ impl ChatAgent {
             if !proposed.resume_hint.trim().is_empty() {
                 task.resume_hint = proposed.resume_hint;
             }
+            if (!proposed.artifact_key.trim().is_empty()
+                || !proposed.artifact_value.trim().is_empty())
+                && let Some(advance) =
+                    task.complete_pipeline_stage(proposed.artifact_key, proposed.artifact_value)
+            {
+                return (
+                    Some(StageTransition {
+                        from: advance.from,
+                        to: advance.to,
+                        accepted: advance.accepted,
+                    }),
+                    Some(response.metrics),
+                );
+            }
         }
 
         if proposed.stage == current {
@@ -913,10 +927,19 @@ impl ChatAgent {
         if task.paused
             && (prompt.contains("resume")
                 || prompt.contains("continue")
+                || prompt.contains("approve")
+                || prompt.contains("approved")
+                || prompt.contains("ok")
+                || prompt.contains("okay")
                 || prompt.contains("продолж")
-                || prompt.contains("возобнов"))
+                || prompt.contains("возобнов")
+                || prompt.contains("утвержд")
+                || prompt.contains("одобря")
+                || prompt.contains("ок"))
         {
-            task.resume();
+            if !task.approve_pipeline_pause() {
+                task.resume();
+            }
             return;
         }
         if !task.paused
@@ -1382,6 +1405,8 @@ struct ProposedTaskState {
     current_step: String,
     expected_action: String,
     resume_hint: String,
+    artifact_key: String,
+    artifact_value: String,
 }
 
 /// Result of one turn's stateful post-processing, surfaced to the debug view.
@@ -1534,6 +1559,19 @@ fn parse_proposed_task_state(text: &str) -> Option<ProposedTaskState> {
             .unwrap_or_default()
             .trim()
             .to_string(),
+        artifact_key: object
+            .get("artifact_key")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+        artifact_value: object
+            .get("artifact")
+            .or_else(|| object.get("artifact_value"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
     })
 }
 
@@ -1632,6 +1670,25 @@ fn render_task_block(task: &super::store::TaskContext) -> String {
     if !plan.is_empty() {
         lines.push(format!("Plan:\n- {}", plan.join("\n- ")));
     }
+    if !task.pipeline.is_empty() {
+        lines.push(render_pipeline_block(task));
+    }
+    let artifacts: Vec<String> = task
+        .artifacts
+        .iter()
+        .filter_map(|artifact| {
+            let key = artifact.key.trim();
+            let value = artifact.value.trim();
+            if key.is_empty() && value.is_empty() {
+                None
+            } else {
+                Some(format!("{}:{} = {}", artifact.stage, key, value))
+            }
+        })
+        .collect();
+    if !artifacts.is_empty() {
+        lines.push(format!("Pipeline artifacts:\n- {}", artifacts.join("\n- ")));
+    }
     let results: Vec<&str> = task
         .results
         .iter()
@@ -1646,6 +1703,61 @@ fn render_task_block(task: &super::store::TaskContext) -> String {
         lines.push(format!("Notes: {notes}"));
     }
     format!("[memory:working] Task state:\n{}", lines.join("\n"))
+}
+
+fn render_pipeline_block(task: &super::store::TaskContext) -> String {
+    let mut lines = Vec::new();
+    for stage in &task.pipeline {
+        let mut line = format!("- {} ({})", stage.name.trim(), stage.stage);
+        if stage.name.trim().is_empty() {
+            line = format!("- {}", stage.stage);
+        }
+        if stage.requires_human_approval {
+            line.push_str(" [requires human approval]");
+        }
+        let artifact_key = stage.artifact_key.trim();
+        if !artifact_key.is_empty() {
+            line.push_str(&format!(" -> artifact: {artifact_key}"));
+        }
+        let system_prompt = stage.system_prompt.trim();
+        if !system_prompt.is_empty() {
+            line.push_str(&format!("\n  system_prompt: {system_prompt}"));
+        }
+        let workers: Vec<String> = stage
+            .worker_agents
+            .iter()
+            .filter_map(|worker| {
+                let id = worker.id.trim();
+                let direction = worker.direction.trim();
+                let prompt = worker.system_prompt.trim();
+                if id.is_empty() && direction.is_empty() && prompt.is_empty() {
+                    None
+                } else {
+                    Some(format!(
+                        "{} [{}] prompt: {}",
+                        id.if_empty("worker"),
+                        direction.if_empty("general"),
+                        prompt
+                    ))
+                }
+            })
+            .collect();
+        if !workers.is_empty() {
+            line.push_str(&format!("\n  workers:\n  - {}", workers.join("\n  - ")));
+        }
+        lines.push(line);
+    }
+    format!("Pipeline contract:\n{}", lines.join("\n"))
+}
+
+trait IfEmpty {
+    fn if_empty<'a>(&'a self, fallback: &'a str) -> &'a str;
+}
+
+impl IfEmpty for str {
+    fn if_empty<'a>(&'a self, fallback: &'a str) -> &'a str {
+        if self.is_empty() { fallback } else { self }
+    }
 }
 
 fn task_resume_hint(task: &super::store::TaskContext, user_prompt: &str, answer: &str) -> String {

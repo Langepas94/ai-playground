@@ -1,5 +1,5 @@
 use super::*;
-use crate::chat::TaskStage;
+use crate::chat::{TaskArtifact, TaskPipelineStage, TaskStage, TaskWorkerAgent};
 use crate::secrets::MemorySecretStore;
 
 fn web_profile(provider: ProviderKind) -> ProfileConfig {
@@ -507,6 +507,23 @@ async fn agents_manage_can_manually_save_and_bind_dialog_task() {
                 title: "menu backlog".to_string(),
                 goal: "build potato-first delivery menu".to_string(),
                 plan: vec!["draft sections".to_string(), "price combos".to_string()],
+                pipeline: vec![TaskPipelineStage {
+                    stage: TaskStage::Planning,
+                    name: "Research".to_string(),
+                    system_prompt: "Research menu constraints.".to_string(),
+                    artifact_key: "menu_research".to_string(),
+                    worker_agents: vec![TaskWorkerAgent {
+                        id: "pricing".to_string(),
+                        direction: "pricing".to_string(),
+                        system_prompt: "Analyze combo pricing.".to_string(),
+                    }],
+                    ..TaskPipelineStage::default()
+                }],
+                artifacts: vec![TaskArtifact {
+                    stage: TaskStage::Planning,
+                    key: "menu_research".to_string(),
+                    value: "potato-first menu is viable".to_string(),
+                }],
                 results: vec!["approved brand: 34 Картошки".to_string()],
                 notes: "manual note from owner".to_string(),
             }),
@@ -535,6 +552,10 @@ async fn agents_manage_can_manually_save_and_bind_dialog_task() {
     let task = agent.task_state().expect("task state");
     assert_eq!(task.goal, "build potato-first delivery menu");
     assert_eq!(task.notes, "manual note from owner");
+    assert_eq!(task.pipeline.len(), 1);
+    assert_eq!(task.pipeline[0].system_prompt, "Research menu constraints.");
+    assert_eq!(task.pipeline[0].worker_agents[0].direction, "pricing");
+    assert_eq!(task.artifacts[0].key, "menu_research");
 }
 
 #[tokio::test]

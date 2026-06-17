@@ -242,6 +242,10 @@ pub struct TaskContext {
     /// The approved plan (one entry per step).
     #[serde(default)]
     pub plan: Vec<String>,
+    #[serde(default)]
+    pub pipeline: Vec<TaskPipelineStage>,
+    #[serde(default)]
+    pub artifacts: Vec<TaskArtifact>,
     /// Results / outputs accumulated as stages complete.
     #[serde(default)]
     pub results: Vec<String>,
@@ -252,6 +256,50 @@ pub struct TaskContext {
     /// loop). Cleared once a clean response passes.
     #[serde(default)]
     pub violations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskPipelineStage {
+    #[serde(default)]
+    pub stage: TaskStage,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub system_prompt: String,
+    #[serde(default)]
+    pub worker_agents: Vec<TaskWorkerAgent>,
+    #[serde(default)]
+    pub artifact_key: String,
+    #[serde(default)]
+    pub requires_human_approval: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskWorkerAgent {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub direction: String,
+    #[serde(default)]
+    pub system_prompt: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskArtifact {
+    #[serde(default)]
+    pub stage: TaskStage,
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PipelineAdvance {
+    pub from: TaskStage,
+    pub to: TaskStage,
+    pub accepted: bool,
+    pub paused_for_human: bool,
 }
 
 impl TaskContext {
@@ -267,6 +315,8 @@ impl TaskContext {
             && self.goal.trim().is_empty()
             && self.notes.trim().is_empty()
             && self.plan.iter().all(|step| step.trim().is_empty())
+            && self.pipeline.is_empty()
+            && self.artifacts.is_empty()
             && self.results.iter().all(|item| item.trim().is_empty())
     }
 
@@ -290,6 +340,41 @@ impl TaskContext {
         true
     }
 
+    pub fn approve_pipeline_pause(&mut self) -> bool {
+        if !self.paused {
+            return false;
+        }
+        let current = self.stage;
+        let Some(active_index) = self
+            .pipeline
+            .iter()
+            .position(|stage| stage.stage == current && stage.requires_human_approval)
+        else {
+            return self.resume();
+        };
+        let next = self
+            .pipeline
+            .get(active_index + 1)
+            .map(|stage| stage.stage)
+            .unwrap_or(TaskStage::Done);
+        if !current.can_transition(next) {
+            return false;
+        }
+        self.stage = next;
+        self.paused = false;
+        if let Some(next_stage) = self.active_pipeline_stage() {
+            let label = pipeline_stage_label(next_stage);
+            self.current_step = label.clone();
+            self.expected_action = "agent_work".to_string();
+            self.resume_hint = format!("Run {label} stage after human approval");
+        } else {
+            self.current_step = "complete task".to_string();
+            self.expected_action = "none".to_string();
+            self.resume_hint = "Pipeline completed after human approval".to_string();
+        }
+        true
+    }
+
     pub fn set_progress(
         &mut self,
         current_step: impl Into<String>,
@@ -303,6 +388,99 @@ impl TaskContext {
         if !expected_action.trim().is_empty() {
             self.expected_action = expected_action;
         }
+    }
+
+    pub fn active_pipeline_stage(&self) -> Option<&TaskPipelineStage> {
+        self.pipeline.iter().find(|stage| stage.stage == self.stage)
+    }
+
+    pub fn complete_pipeline_stage(
+        &mut self,
+        artifact_key: impl Into<String>,
+        artifact_value: impl Into<String>,
+    ) -> Option<PipelineAdvance> {
+        let current = self.stage;
+        let active_index = self
+            .pipeline
+            .iter()
+            .position(|stage| stage.stage == current)?;
+        let active = self.pipeline[active_index].clone();
+        let key = artifact_key.into();
+        let value = artifact_value.into();
+        if !key.trim().is_empty() || !value.trim().is_empty() {
+            self.artifacts.push(TaskArtifact {
+                stage: current,
+                key: if key.trim().is_empty() {
+                    active.artifact_key.clone()
+                } else {
+                    key
+                },
+                value,
+            });
+        }
+
+        if active.requires_human_approval {
+            self.paused = true;
+            self.current_step = format!("approve {} artifact", pipeline_stage_label(&active));
+            self.expected_action = "user_input".to_string();
+            self.resume_hint = format!(
+                "Review {} artifact before moving past {}",
+                active.artifact_key.trim().if_empty("stage output"),
+                pipeline_stage_label(&active)
+            );
+            return Some(PipelineAdvance {
+                from: current,
+                to: current,
+                accepted: true,
+                paused_for_human: true,
+            });
+        }
+
+        let next = self
+            .pipeline
+            .get(active_index + 1)
+            .map(|stage| stage.stage)
+            .unwrap_or(TaskStage::Done);
+        let accepted = current.can_transition(next);
+        if accepted {
+            self.stage = next;
+            self.paused = false;
+            if let Some(next_stage) = self.active_pipeline_stage() {
+                let label = pipeline_stage_label(next_stage);
+                self.current_step = label.clone();
+                self.expected_action = "agent_work".to_string();
+                self.resume_hint = format!("Run {label} stage");
+            } else {
+                self.current_step = "complete task".to_string();
+                self.expected_action = "none".to_string();
+                self.resume_hint = "Pipeline completed".to_string();
+            }
+        }
+        Some(PipelineAdvance {
+            from: current,
+            to: next,
+            accepted,
+            paused_for_human: false,
+        })
+    }
+}
+
+fn pipeline_stage_label(stage: &TaskPipelineStage) -> String {
+    let name = stage.name.trim();
+    if name.is_empty() {
+        stage.stage.to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+trait IfEmpty {
+    fn if_empty<'a>(&'a self, fallback: &'a str) -> &'a str;
+}
+
+impl IfEmpty for str {
+    fn if_empty<'a>(&'a self, fallback: &'a str) -> &'a str {
+        if self.is_empty() { fallback } else { self }
     }
 }
 
@@ -1888,6 +2066,83 @@ mod tests {
         };
         assert!(!done.pause("already complete"));
         assert!(!done.paused);
+    }
+
+    #[test]
+    fn pipeline_stage_artifact_drives_deterministic_transition_or_human_pause() {
+        let mut task = TaskContext {
+            stage: TaskStage::Planning,
+            current_step: "run research workers".to_string(),
+            expected_action: "agent_work".to_string(),
+            pipeline: vec![
+                TaskPipelineStage {
+                    stage: TaskStage::Planning,
+                    name: "Research".to_string(),
+                    system_prompt: "Research legal context before drafting.".to_string(),
+                    artifact_key: "research_conclusion".to_string(),
+                    worker_agents: vec![
+                        TaskWorkerAgent {
+                            id: "ru-law".to_string(),
+                            direction: "russian_law".to_string(),
+                            system_prompt: "Analyze Russian contract law.".to_string(),
+                        },
+                        TaskWorkerAgent {
+                            id: "patent-law".to_string(),
+                            direction: "patent".to_string(),
+                            system_prompt: "Analyze patent/IP constraints.".to_string(),
+                        },
+                    ],
+                    ..TaskPipelineStage::default()
+                },
+                TaskPipelineStage {
+                    stage: TaskStage::Execution,
+                    name: "Create".to_string(),
+                    system_prompt: "Create the contract from approved research.".to_string(),
+                    artifact_key: "contract_draft".to_string(),
+                    requires_human_approval: true,
+                    ..TaskPipelineStage::default()
+                },
+                TaskPipelineStage {
+                    stage: TaskStage::Validation,
+                    name: "Validation".to_string(),
+                    system_prompt: "Validate the contract against requirements.".to_string(),
+                    artifact_key: "validation_report".to_string(),
+                    ..TaskPipelineStage::default()
+                },
+            ],
+            ..TaskContext::default()
+        };
+
+        let advance = task
+            .complete_pipeline_stage("research_conclusion", "Russian law ok; patent risk noted")
+            .expect("research stage");
+        assert_eq!(advance.from, TaskStage::Planning);
+        assert_eq!(advance.to, TaskStage::Execution);
+        assert!(advance.accepted);
+        assert!(!advance.paused_for_human);
+        assert_eq!(task.stage, TaskStage::Execution);
+        assert_eq!(task.current_step, "Create");
+        assert_eq!(task.expected_action, "agent_work");
+        assert_eq!(task.artifacts.len(), 1);
+
+        let advance = task
+            .complete_pipeline_stage("contract_draft", "Draft contract text")
+            .expect("create stage");
+        assert_eq!(advance.from, TaskStage::Execution);
+        assert_eq!(advance.to, TaskStage::Execution);
+        assert!(advance.accepted);
+        assert!(advance.paused_for_human);
+        assert_eq!(task.stage, TaskStage::Execution);
+        assert!(task.paused);
+        assert_eq!(task.current_step, "approve Create artifact");
+        assert_eq!(task.expected_action, "user_input");
+        assert!(task.resume_hint.contains("Review contract_draft artifact"));
+
+        assert!(task.approve_pipeline_pause());
+        assert_eq!(task.stage, TaskStage::Validation);
+        assert!(!task.paused);
+        assert_eq!(task.current_step, "Validation");
+        assert_eq!(task.expected_action, "agent_work");
     }
 
     #[test]
