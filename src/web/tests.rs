@@ -441,6 +441,10 @@ async fn agents_manage_can_manually_save_and_bind_dialog_task() {
             task_id: Some("menu".to_string()),
             task: Some(TaskPayload {
                 stage: "execution".to_string(),
+                current_step: "draft delivery sections".to_string(),
+                expected_action: "agent_work".to_string(),
+                paused: false,
+                resume_hint: "continue menu backlog".to_string(),
                 title: "menu backlog".to_string(),
                 goal: "build potato-first delivery menu".to_string(),
                 plan: vec!["draft sections".to_string(), "price combos".to_string()],

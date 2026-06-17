@@ -179,9 +179,9 @@ impl TaskStage {
     /// Stages reachable from `self`. Empty for the terminal stage.
     pub fn allowed_next(self) -> &'static [TaskStage] {
         match self {
-            TaskStage::Clarify => &[TaskStage::Planning],
-            TaskStage::Planning => &[TaskStage::Execution],
-            TaskStage::Execution => &[TaskStage::Validation, TaskStage::Planning],
+            TaskStage::Clarify => &[TaskStage::Planning, TaskStage::Done],
+            TaskStage::Planning => &[TaskStage::Execution, TaskStage::Validation, TaskStage::Done],
+            TaskStage::Execution => &[TaskStage::Validation, TaskStage::Planning, TaskStage::Done],
             TaskStage::Validation => &[TaskStage::Done, TaskStage::Execution],
             TaskStage::Done => &[],
         }
@@ -228,6 +228,14 @@ pub struct TaskContext {
     #[serde(default)]
     pub stage: TaskStage,
     #[serde(default)]
+    pub current_step: String,
+    #[serde(default)]
+    pub expected_action: String,
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
+    pub resume_hint: String,
+    #[serde(default)]
     pub title: String,
     #[serde(default)]
     pub goal: String,
@@ -251,11 +259,50 @@ impl TaskContext {
     /// default entry stage.
     pub fn is_empty(&self) -> bool {
         self.stage == TaskStage::Clarify
+            && self.current_step.trim().is_empty()
+            && self.expected_action.trim().is_empty()
+            && !self.paused
+            && self.resume_hint.trim().is_empty()
             && self.title.trim().is_empty()
             && self.goal.trim().is_empty()
             && self.notes.trim().is_empty()
             && self.plan.iter().all(|step| step.trim().is_empty())
             && self.results.iter().all(|item| item.trim().is_empty())
+    }
+
+    pub fn pause(&mut self, resume_hint: impl Into<String>) -> bool {
+        if self.stage == TaskStage::Done {
+            return false;
+        }
+        self.paused = true;
+        let hint = resume_hint.into();
+        if !hint.trim().is_empty() {
+            self.resume_hint = hint;
+        }
+        true
+    }
+
+    pub fn resume(&mut self) -> bool {
+        if !self.paused {
+            return false;
+        }
+        self.paused = false;
+        true
+    }
+
+    pub fn set_progress(
+        &mut self,
+        current_step: impl Into<String>,
+        expected_action: impl Into<String>,
+    ) {
+        let current_step = current_step.into();
+        if !current_step.trim().is_empty() {
+            self.current_step = current_step;
+        }
+        let expected_action = expected_action.into();
+        if !expected_action.trim().is_empty() {
+            self.expected_action = expected_action;
+        }
     }
 }
 
@@ -1593,6 +1640,10 @@ mod tests {
         // Working (task + stage) + long-term (profile) layers.
         let task = TaskContext {
             stage: TaskStage::Planning,
+            current_step: "draft the storage model".to_string(),
+            expected_action: "agent_work".to_string(),
+            paused: true,
+            resume_hint: "continue from TaskContext serialization".to_string(),
             title: "ship agents".to_string(),
             goal: "persist settings".to_string(),
             plan: vec!["design".to_string(), "build".to_string()],
@@ -1620,6 +1671,13 @@ mod tests {
         let loaded_task = store.load_task("a1").expect("task");
         assert_eq!(loaded_task.title, "ship agents");
         assert_eq!(loaded_task.stage, TaskStage::Planning);
+        assert_eq!(loaded_task.current_step, "draft the storage model");
+        assert_eq!(loaded_task.expected_action, "agent_work");
+        assert!(loaded_task.paused);
+        assert_eq!(
+            loaded_task.resume_hint,
+            "continue from TaskContext serialization"
+        );
         let loaded_profile = store.load_profile("a1").expect("profile");
         assert_eq!(loaded_profile.fields[0].value, "Rust");
         assert!(loaded_profile.pending_required().is_empty());
@@ -1771,8 +1829,12 @@ mod tests {
     fn task_stage_transitions_enforced() {
         // Legal forward transitions.
         assert!(TaskStage::Clarify.can_transition(TaskStage::Planning));
+        assert!(TaskStage::Clarify.can_transition(TaskStage::Done));
         assert!(TaskStage::Planning.can_transition(TaskStage::Execution));
+        assert!(TaskStage::Planning.can_transition(TaskStage::Validation));
+        assert!(TaskStage::Planning.can_transition(TaskStage::Done));
         assert!(TaskStage::Execution.can_transition(TaskStage::Validation));
+        assert!(TaskStage::Execution.can_transition(TaskStage::Done));
         assert!(TaskStage::Validation.can_transition(TaskStage::Done));
         // Legal back-transitions.
         assert!(TaskStage::Execution.can_transition(TaskStage::Planning));
@@ -1781,11 +1843,51 @@ mod tests {
         assert!(TaskStage::Planning.can_transition(TaskStage::Planning));
         // Illegal jumps are rejected.
         assert!(!TaskStage::Clarify.can_transition(TaskStage::Execution));
-        assert!(!TaskStage::Planning.can_transition(TaskStage::Done));
         assert!(!TaskStage::Done.can_transition(TaskStage::Planning));
+        assert!(TaskStage::Done.allowed_next().is_empty());
         // Round-trips through its string form.
         assert_eq!("execution".parse(), Ok(TaskStage::Execution));
         assert_eq!(TaskStage::Validation.to_string(), "validation");
+    }
+
+    #[test]
+    fn task_context_pause_resume_preserves_formal_state() {
+        for stage in [
+            TaskStage::Clarify,
+            TaskStage::Planning,
+            TaskStage::Execution,
+            TaskStage::Validation,
+        ] {
+            let mut task = TaskContext {
+                stage,
+                current_step: "run validation checks".to_string(),
+                expected_action: "agent_work".to_string(),
+                ..TaskContext::default()
+            };
+
+            assert!(task.pause("continue from cargo test failure analysis"));
+            assert_eq!(task.stage, stage);
+            assert!(task.paused);
+            assert_eq!(task.current_step, "run validation checks");
+            assert_eq!(task.expected_action, "agent_work");
+            assert_eq!(
+                task.resume_hint,
+                "continue from cargo test failure analysis"
+            );
+
+            assert!(task.resume());
+            assert!(!task.paused);
+            assert_eq!(task.stage, stage);
+            assert_eq!(task.current_step, "run validation checks");
+            assert_eq!(task.expected_action, "agent_work");
+        }
+
+        let mut done = TaskContext {
+            stage: TaskStage::Done,
+            ..TaskContext::default()
+        };
+        assert!(!done.pause("already complete"));
+        assert!(!done.paused);
     }
 
     #[test]

@@ -668,6 +668,10 @@ async fn run_and_persist_stateful(
 fn stateful_debug_view(report: &StatefulReport) -> StatefulDebugView {
     StatefulDebugView {
         stage: report.stage.map(|stage| stage.to_string()),
+        current_step: report.current_step.clone(),
+        expected_action: report.expected_action.clone(),
+        paused: report.paused,
+        resume_hint: report.resume_hint.clone(),
         pending_questions: report.pending_questions.clone(),
         violations: report.violations.clone(),
         stage_transition: report
@@ -1095,6 +1099,14 @@ struct TaskPayload {
     #[serde(default)]
     stage: String,
     #[serde(default)]
+    current_step: String,
+    #[serde(default)]
+    expected_action: String,
+    #[serde(default)]
+    paused: bool,
+    #[serde(default)]
+    resume_hint: String,
+    #[serde(default)]
     title: String,
     #[serde(default)]
     goal: String,
@@ -1110,6 +1122,10 @@ impl TaskPayload {
     fn into_task_context(self) -> TaskContext {
         TaskContext {
             stage: self.stage.parse().unwrap_or_default(),
+            current_step: self.current_step.trim().to_string(),
+            expected_action: self.expected_action.trim().to_string(),
+            paused: self.paused,
+            resume_hint: self.resume_hint.trim().to_string(),
             title: self.title.trim().to_string(),
             goal: self.goal.trim().to_string(),
             plan: clean_lines(self.plan),
@@ -1830,6 +1846,10 @@ struct ChatDebugView {
 #[derive(Debug, Clone, Default, Serialize)]
 struct StatefulDebugView {
     stage: Option<String>,
+    current_step: String,
+    expected_action: String,
+    paused: bool,
+    resume_hint: String,
     pending_questions: Vec<String>,
     violations: Vec<String>,
     stage_transition: Option<StageTransitionView>,
