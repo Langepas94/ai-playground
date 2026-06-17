@@ -466,6 +466,77 @@ async fn paused_task_resume_context_is_injected_without_reexplaining() {
 }
 
 #[tokio::test]
+async fn restored_task_state_is_injected_into_new_agent_request() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("sessions");
+    let store = crate::chat::store::LocalSessionStore::from_root(root.clone());
+    store
+        .save_session(
+            "agent:app-agent",
+            "planning-window",
+            &[ChatMessage {
+                role: Role::User,
+                content: "Хочу создать приложение".to_string(),
+            }],
+        )
+        .expect("save session");
+    store
+        .save_dialog_task(
+            "app-agent",
+            "planning-window",
+            &crate::chat::store::TaskContext {
+                stage: crate::chat::store::TaskStage::Execution,
+                current_step: "create application shell".to_string(),
+                expected_action: "agent_work".to_string(),
+                paused: true,
+                resume_hint: "name and plan approved; continue implementation".to_string(),
+                title: "create application".to_string(),
+                goal: "build the approved application".to_string(),
+                ..crate::chat::store::TaskContext::default()
+            },
+        )
+        .expect("save task");
+
+    let restarted_store = crate::chat::store::LocalSessionStore::from_root(root);
+    let restored_task = restarted_store
+        .load_dialog_task("app-agent", "any-window")
+        .expect("load shared task");
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec!["Continuing implementation.".to_string()]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_task_state(Some(restored_task));
+
+    agent
+        .respond(&client, "Продолжай".to_string())
+        .await
+        .expect("respond");
+
+    let seen = client.seen_messages.lock().unwrap();
+    let joined = seen[0]
+        .iter()
+        .map(|message| message.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("Stage: execution"));
+    assert!(joined.contains("Paused: true"));
+    assert!(joined.contains("Current step: create application shell"));
+    assert!(joined.contains("Expected action: agent_work"));
+    assert!(joined.contains("Resume hint: name and plan approved; continue implementation"));
+    assert!(joined.contains("do not ask them to restate the task"));
+}
+
+#[tokio::test]
 async fn stateful_postprocess_seeds_task_goal_from_first_prompt() {
     let client = FakeClient {
         replies: std::sync::Mutex::new(vec![
