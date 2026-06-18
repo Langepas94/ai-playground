@@ -1,6 +1,6 @@
 [package]
 name = "ai-playground"
-version = "1.22.1"
+version = "1.22.2"
 edition = "2024"
 
 [workspace]
