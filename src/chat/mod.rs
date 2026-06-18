@@ -7,6 +7,7 @@ pub mod store;
 #[cfg(test)]
 mod store_tests;
 mod store_types;
+pub mod swarm;
 pub mod token_accounting;
 
 pub use agent::{
@@ -24,6 +25,10 @@ pub use store::{
     SavedAgent, SavedMemoryConfig, TaskArtifact, TaskContext, TaskPipelineStage, TaskStage,
     TaskWorkerAgent, TopicFileStorage, UserProfile, UserProfileBindings, add_request_metrics,
     agent_id_from_key, session_key, unix_now, web_session_key,
+};
+pub use swarm::{
+    ResolvedSubAgent, ResolvedSwarm, SubAgentConfig, SubAgentRole, SwarmConfig, SwarmReport,
+    SwarmRunRecord, resolve_swarm,
 };
 pub use token_accounting::{
     ContextStatus, TokenCostEstimate, TokenEstimate, TokenGrowthReport, TokenGrowthRow,

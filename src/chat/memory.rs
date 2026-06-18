@@ -162,7 +162,7 @@ pub struct MemoryConfig {
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
-            strategy: MemoryStrategy::Summary,
+            strategy: MemoryStrategy::StickyFacts,
             recent_messages: DEFAULT_RECENT_MESSAGES,
             summarize_after_messages: DEFAULT_SUMMARIZE_AFTER_MESSAGES,
             summary_chunk_messages: DEFAULT_SUMMARY_CHUNK_MESSAGES,

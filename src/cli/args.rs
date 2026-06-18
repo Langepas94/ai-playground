@@ -463,7 +463,7 @@ pub struct MemoryArgs {
     #[arg(
         long,
         value_enum,
-        default_value_t = CliMemoryStrategy::Summary,
+        default_value_t = CliMemoryStrategy::StickyFacts,
         help = "How the local agent sends chat history to the provider"
     )]
     pub memory_strategy: CliMemoryStrategy,

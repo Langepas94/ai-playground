@@ -18,6 +18,7 @@
 | Web API handler | `src/web/README.md`, затем `src/web/mod.rs` или нужный helper (`src/web/agents.rs`, `tokens.rs`, `parameters.rs`) |
 | Web UI | `rtk rg -n "id|function|label" src/web/ui.html`, затем короткий `sed` slice |
 | Chat runtime | `src/chat/README.md`, `src/chat/agent.rs`, `src/chat/memory.rs` |
+| Рой агентов (trait SubAgent + детерминированный оркестратор + PromptBuilder; 4 stage-агента + general + memory/summary/topic/profile/invariant) | `src/chat/swarm/orchestrator.rs`, `swarm/prompt_builder.rs`, `swarm/agent.rs`, `swarm/agents/*`, `swarm/{config,runtime}.rs`; секция «Рой агентов» в `src/chat/README.md` |
 | Chat tests | `src/chat/agent_tests.rs`, `src/chat/memory_tests.rs` |
 | Provider payload/debug/billing | `src/providers/README.md`, `src/providers/openai_compatible.rs` |
 | Config/secrets/errors | `src/config.rs`, `src/secrets.rs`, `src/errors.rs` |
