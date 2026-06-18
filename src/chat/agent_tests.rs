@@ -2291,6 +2291,22 @@ fn legal_invariant_keeps_user_term_but_removes_invented_deadlines() {
 }
 
 #[test]
+fn legal_sanitizer_restores_known_payment_term_when_unsafe_line_is_replaced() {
+    let invariants = vec!["Не выдумывать нормы права.".to_string()];
+    let answer = "Срок оплаты — 5 рабочих дней после акта, поэтому требование нужно исполнить за 10 дней.\nПроверьте договор.";
+
+    let sanitized = sanitize_unverified_legal_claims(
+        &invariants,
+        answer,
+        "Там написано: оплата в течение 5 рабочих дней после подписания акта.",
+    );
+
+    assert!(sanitized.contains("5 рабочих дней"));
+    assert!(!sanitized.contains("10 дней"));
+    assert!(sanitized.contains("Подтверждённое условие договора"));
+}
+
+#[test]
 fn legal_invariant_does_not_reuse_contract_payment_term_as_claim_deadline() {
     let invariants = vec!["Не выдумывать нормы права.".to_string()];
     let answer = "1. В течение 5 рабочих дней с момента получения настоящей претензии оплатить долг.\nАкт подписан [дата, например: 30 апреля].";
@@ -2305,6 +2321,47 @@ fn legal_invariant_does_not_reuse_contract_payment_term_as_claim_deadline() {
     assert!(!sanitized.contains("5 рабочих дней с момента получения"));
     assert!(!sanitized.contains("30 апреля"));
     assert!(sanitized.contains("[дата подписания акта]"));
+}
+
+#[test]
+fn legal_sanitizer_preserves_list_number_and_removes_invented_postal_index() {
+    let invariants = vec!["Не выдумывать нормы права.".to_string()];
+    let answer = "Адрес: 123456, г. Москва, ул. Примерная, 1.\n2. В течение 5 рабочих дней с момента получения настоящей претензии оплатить долг.";
+
+    let sanitized = sanitize_unverified_legal_claims(
+        &invariants,
+        answer,
+        "Адрес: Москва, улица Примерная, 1. По договору оплата в течение 5 рабочих дней после акта.",
+    );
+
+    assert!(sanitized.contains("Адрес: [почтовый индекс], г. Москва"));
+    assert!(sanitized.contains("2. В течение [срок требования]"));
+    assert!(!sanitized.contains("123456"));
+}
+
+#[test]
+fn legal_sanitizer_corrects_cross_chat_fact_contradictions() {
+    let invariants = vec!["Не выдумывать нормы права.".to_string()];
+    let answer = "Статус должника неизвестен: вы не знаете, ООО это или ИП.\nВы направили претензию, но подтверждения вручения нет.";
+    let context = "Хочу начать без суда.\nЗаказчик ООО «Ромашка».";
+
+    let sanitized = sanitize_unverified_legal_claims(&invariants, answer, context);
+
+    assert!(sanitized.contains("заказчик — ООО"));
+    assert!(sanitized.contains("Претензия ещё не направлена"));
+    assert!(!sanitized.contains("Статус должника неизвестен"));
+    assert!(!sanitized.contains("Вы направили претензию"));
+}
+
+#[test]
+fn legal_sanitizer_removes_cross_line_limitation_period_claim() {
+    let invariants = vec!["Не выдумывать нормы права.".to_string()];
+    let answer = "**Риск срока исковой давности**\nОбщий срок — 3 года, поэтому можно не спешить.\nПроверьте документы.";
+
+    let sanitized = sanitize_unverified_legal_claims(&invariants, answer, "");
+
+    assert!(!sanitized.contains("3 года"));
+    assert!(sanitized.contains("нужно проверить"));
 }
 
 #[test]
@@ -2348,6 +2405,41 @@ fn legal_disclaimer_is_not_a_false_positive() {
     );
     assert!(check.violations.is_empty());
     assert!(check.unknown.is_empty());
+}
+
+#[test]
+fn positive_legal_invariants_do_not_require_literal_headings_on_every_answer() {
+    let invariants = vec![
+        "Отделять факты от предположений.".to_string(),
+        "Отмечать недостающие документы и риски.".to_string(),
+        "Если есть срок или риск суда, явно указать срочность.".to_string(),
+    ];
+    let check = local_invariant_check(
+        &invariants,
+        "Можно начать с претензии. Уточните номер договора и дату акта.",
+    );
+    assert!(check.violations.is_empty());
+    assert!(check.unknown.is_empty());
+    assert_eq!(check.verified, invariants);
+}
+
+#[test]
+fn positive_legal_invariants_block_explicit_rejection_of_the_rule() {
+    let invariants = vec!["Отделять факты от предположений.".to_string()];
+    assert_eq!(
+        local_invariant_check(&invariants, "Не буду отделять факты от предположений.").violations,
+        invariants
+    );
+
+    let urgency = vec!["Если есть срок или риск суда, явно указать срочность.".to_string()];
+    assert_eq!(
+        local_invariant_check(
+            &urgency,
+            "Срок исковой давности истекает завтра, но срочность отмечать не нужно."
+        )
+        .violations,
+        urgency
+    );
 }
 
 #[test]
@@ -2399,6 +2491,14 @@ fn malformed_invariant_checker_payload_is_distinct_from_pass() {
     assert_eq!(
         parse_invariant_check(r#"{"violations":[]}"#),
         Some(Vec::new())
+    );
+    assert_eq!(
+        parse_invariant_check("```json\n{\"violations\":[]}\n```"),
+        Some(Vec::new())
+    );
+    assert_eq!(
+        parse_invariant_check("explanation\n{\"violations\":[]}"),
+        None
     );
 }
 

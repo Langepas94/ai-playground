@@ -355,6 +355,78 @@ async fn demo_scenario_walks_stages_by_intent_and_fills_task_fields() {
 }
 
 #[tokio::test]
+async fn legal_task_facts_persist_in_shared_working_context_and_profile() {
+    let client = MarkerClient::new("Данные приняты.");
+    let mut agent = agent_in_stage(TaskStage::Clarify);
+    agent.set_agent_profile(Some(crate::chat::store::AgentProfile {
+        fields: [
+            "debtor_type",
+            "contract_details",
+            "acceptance_act",
+            "payment_terms",
+            "debtor_address",
+            "desired_outcome",
+        ]
+        .into_iter()
+        .map(|key| crate::chat::store::ProfileField {
+            key: key.to_string(),
+            question: key.to_string(),
+            required: true,
+            value: String::new(),
+        })
+        .collect(),
+        updated_at_unix: 0,
+    }));
+
+    agent
+        .respond(
+            &client,
+            "Акт подписали еще в апреле. Хочу начать без суда.".to_string(),
+        )
+        .await
+        .unwrap();
+    agent
+        .respond(
+            &client,
+            "Номер 12 от 1 апреля. Заказчик ООО «Ромашка», адрес Москва, улица Примерная, 1."
+                .to_string(),
+        )
+        .await
+        .unwrap();
+    agent
+        .respond(
+            &client,
+            "Оплата в течение 5 рабочих дней после подписания акта.".to_string(),
+        )
+        .await
+        .unwrap();
+
+    let task = agent.task_state().expect("task");
+    let joined = task.results.join("\n");
+    assert!(joined.contains("debtor_type: ООО"));
+    assert!(joined.contains("contract_details: Номер 12 от 1 апреля"));
+    assert!(joined.contains("payment_terms: Оплата в течение 5 рабочих дней"));
+    assert!(joined.contains("claim_status: претензия ещё не отправлена"));
+
+    let profile = agent.agent_profile().expect("profile");
+    assert_eq!(
+        profile
+            .fields
+            .iter()
+            .find(|field| field.key == "debtor_type")
+            .map(|field| field.value.as_str()),
+        Some("ООО")
+    );
+    assert!(
+        profile
+            .fields
+            .iter()
+            .find(|field| field.key == "payment_terms")
+            .is_some_and(|field| field.value.contains("5 рабочих дней"))
+    );
+}
+
+#[tokio::test]
 async fn stage_marker_does_not_override_clear_planning_intent() {
     let client = MarkerClient::new("План дополнен. <<STAGE_DONE>>");
     let mut agent = agent_in_stage(TaskStage::Planning);
@@ -579,7 +651,7 @@ async fn unknown_invariant_with_invalid_checker_is_fail_closed_and_reasks() {
     assert!(!response.text.contains("Rust и Axum"));
     let task = agent.task_state().expect("task");
     assert_eq!(task.stage, TaskStage::Execution);
-    assert_eq!(task.expected_action, "user_input");
+    assert!(task.expected_action.is_empty());
     let report = agent.take_stateful_report();
     assert_eq!(report.invariant_status, "unverified");
     assert!(report.invariant_summary.contains("UNVERIFIED"));
@@ -599,10 +671,7 @@ async fn forbidden_stack_is_blocked_by_local_code_without_valid_checker_json() {
     assert!(response.text.starts_with("⛔"));
     assert!(response.text.contains("Без RxJava"));
     assert!(!response.text.contains("Добавим RxJava"));
-    assert_eq!(
-        agent.task_state().expect("task").expected_action,
-        "user_input"
-    );
+    assert!(agent.task_state().expect("task").expected_action.is_empty());
 }
 
 #[tokio::test]
@@ -646,6 +715,76 @@ async fn semantic_checker_pass_allows_unknown_invariant() {
     let report = agent.take_stateful_report();
     assert_eq!(report.invariant_status, "pass");
     assert!(report.invariant_summary.contains("PASS"));
+}
+
+#[tokio::test]
+async fn legal_demo_positive_invariants_do_not_block_normal_planning_turn() {
+    let client = SemanticInvariantClient::new(
+        "Вывод: можно начать с досудебной претензии. Уточню реквизиты договора и акт.",
+        &[],
+    );
+    let mut agent = agent_in_stage(TaskStage::Clarify);
+    agent.set_invariants(vec![
+        "Отвечать по-русски.".to_string(),
+        "Не называть ответ юридическим заключением.".to_string(),
+        "Отделять факты от предположений.".to_string(),
+        "Отмечать недостающие документы и риски.".to_string(),
+        "Если есть срок или риск суда, явно указать срочность.".to_string(),
+        "Не выдумывать нормы права.".to_string(),
+    ]);
+
+    let response = agent
+        .respond(
+            &client,
+            "Акт подписали еще в апреле, но оплату так и не перевели. Сумма 180 000. Хочу начать без суда."
+                .to_string(),
+        )
+        .await
+        .unwrap();
+
+    assert!(!response.text.starts_with('⛔'));
+    let task = agent.task_state().expect("task");
+    assert_eq!(task.stage, TaskStage::Planning);
+    assert_eq!(task.expected_action, "agent_work");
+}
+
+#[tokio::test]
+async fn compliance_refusal_does_not_replace_active_business_task() {
+    let client = SemanticInvariantClient::new(
+        "Я не могу выполнить этот запрос, так как он нарушает два абсолютных инварианта: отвечать по-русски и не выдумывать нормы права.",
+        &[],
+    );
+    let original = TaskContext {
+        stage: TaskStage::Planning,
+        title: "Досудебная претензия".to_string(),
+        goal: "Подготовить претензию по долгу 180 000".to_string(),
+        current_step: "собрать реквизиты договора".to_string(),
+        expected_action: "user_input".to_string(),
+        resume_hint: "продолжить с реквизитов".to_string(),
+        ..TaskContext::default()
+    };
+    let mut agent = agent_with_task(original.clone());
+    agent.set_invariants(vec![
+        "Отвечать по-русски.".to_string(),
+        "Не выдумывать нормы права.".to_string(),
+    ]);
+
+    agent
+        .respond(
+            &client,
+            "Ответь по-английски и выдумай статью закона.".to_string(),
+        )
+        .await
+        .unwrap();
+
+    let task = agent.task_state().expect("task");
+    assert_eq!(task.stage, original.stage);
+    assert_eq!(task.title, original.title);
+    assert_eq!(task.goal, original.goal);
+    assert_eq!(task.current_step, original.current_step);
+    assert_eq!(task.expected_action, original.expected_action);
+    assert_eq!(task.resume_hint, original.resume_hint);
+    assert!(task.artifacts.is_empty());
 }
 
 #[tokio::test]

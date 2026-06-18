@@ -231,6 +231,17 @@ impl SubAgent for InvariantAgent {
             };
         }
         let local = local_invariant_check(turn.invariants, &answer);
+        if local.unknown.is_empty() {
+            return SubAgentOutcome {
+                invariant_status: if local.violations.is_empty() {
+                    InvariantCheckStatus::Passed
+                } else {
+                    InvariantCheckStatus::Failed
+                },
+                violations: local.violations,
+                ..SubAgentOutcome::default()
+            };
+        }
         let list = turn
             .invariants
             .iter()

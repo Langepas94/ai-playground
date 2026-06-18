@@ -1,6 +1,7 @@
 use super::*;
-use crate::chat::{TaskArtifact, TaskPipelineStage, TaskStage, TaskWorkerAgent};
+use crate::chat::{ProfileField, TaskArtifact, TaskPipelineStage, TaskStage, TaskWorkerAgent};
 use crate::secrets::MemorySecretStore;
+use crate::web::agents::{ProfileFieldPayload, merge_profile_schema};
 use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode, header},
@@ -880,6 +881,64 @@ fn agent_initial_context_is_freeform_long_term_memory() {
 }
 
 #[test]
+fn structured_initial_context_becomes_separate_profile_and_long_term_facts() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalSessionStore::from_root(dir.path().join("sessions"));
+    let context = "jurisdiction = Россия\nclient_role = ИП, исполнитель\nlegal_area = договорная задолженность";
+
+    persist_agent_initial_context(&store, "legal-agent", Some(context))
+        .expect("persist structured context");
+
+    let long_term = store
+        .load_long_term("agent:legal-agent")
+        .expect("load long-term");
+    assert_eq!(
+        long_term.facts.get("jurisdiction").map(String::as_str),
+        Some("Россия")
+    );
+    assert_eq!(
+        long_term.facts.get("client_role").map(String::as_str),
+        Some("ИП, исполнитель")
+    );
+    assert!(!long_term.facts.contains_key("project_context"));
+
+    let profile = store.load_profile("legal-agent").expect("load profile");
+    assert_eq!(profile.fields.len(), 3);
+    assert!(profile.fields.iter().all(ProfileField::is_filled));
+    assert_eq!(
+        profile
+            .fields
+            .iter()
+            .find(|field| field.key == "legal_area")
+            .map(|field| field.value.as_str()),
+        Some("договорная задолженность")
+    );
+}
+
+#[test]
+fn profile_schema_merge_preserves_known_initial_context_fields() {
+    let existing = vec![ProfileField {
+        key: "jurisdiction".to_string(),
+        question: "jurisdiction".to_string(),
+        required: false,
+        value: "Россия".to_string(),
+    }];
+    let merged = merge_profile_schema(
+        existing,
+        vec![ProfileFieldPayload {
+            key: "debtor_type".to_string(),
+            question: "debtor_type".to_string(),
+            required: true,
+        }],
+    );
+
+    assert!(merged.iter().any(|field| {
+        field.key == "jurisdiction" && field.value == "Россия" && !field.required
+    }));
+    assert!(merged.iter().any(|field| field.key == "debtor_type"));
+}
+
+#[test]
 fn agent_initial_context_rejects_sensitive_values() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = LocalSessionStore::from_root(dir.path().join("sessions"));
@@ -895,6 +954,14 @@ fn agent_initial_context_rejects_sensitive_values() {
         error.to_string().contains("looks sensitive"),
         "unexpected error: {error}"
     );
+}
+
+#[test]
+fn profile_ui_does_not_duplicate_identical_key_and_question() {
+    assert!(INDEX_HTML.contains("question !== (f.key || '').trim()"));
+    assert!(INDEX_HTML.contains(
+        ".map((question) => `<div class=\"profile-field missing\"><span class=\"pf-key\">${escapeHtml(question)}</span></div>`)"
+    ));
 }
 
 #[test]
