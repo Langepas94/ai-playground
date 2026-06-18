@@ -5,7 +5,7 @@ use crate::{
     chat::memory::{MemoryConfig, MemoryLayer},
     chat::{
         AgentMemory, AgentProfile, AgentSummary, LocalSessionStore, ProfileField, SavedAgent,
-        SavedMemoryConfig, TaskArtifact, TaskContext, TaskPipelineStage, UserProfile,
+        SavedMemoryConfig, SwarmConfig, TaskArtifact, TaskContext, TaskPipelineStage, UserProfile,
         UserProfileBindings, build_profile_schema,
     },
     config::ProfileConfig,
@@ -45,6 +45,7 @@ pub(super) async fn agents_manage(
                 }
             };
             response.profile = Some(state.sessions.load_profile(&id)?);
+            response.long_term_facts = load_agent_long_term_facts(&state.sessions, &id)?;
         }
         "save" => {
             let payload = request
@@ -83,6 +84,7 @@ pub(super) async fn agents_manage(
                     .to_string(),
                 invariants: clean_lines(payload.invariants.clone().unwrap_or_default()),
                 memory: saved_memory_from_web(payload.memory.clone().unwrap_or_default()),
+                swarm: crate::chat::SwarmConfig::defaults(),
                 created_at_unix,
                 updated_at_unix: crate::chat::unix_now(),
             };
@@ -94,7 +96,27 @@ pub(super) async fn agents_manage(
             )?;
             // Persist the interview schema (long-term layer) if the UI sent one,
             // preserving any values already elicited for matching keys.
-            if let Some(schema) = payload.profile_schema.clone() {
+            // Schema source: explicit LLM-built schema if sent, otherwise the
+            // raw "что уточнить" seed fields become required interview fields
+            // deterministically (DEMO-003: seed list must create the schema).
+            let schema = payload.profile_schema.clone().or_else(|| {
+                let seeds = clean_lines(payload.seed_fields.clone().unwrap_or_default());
+                if seeds.is_empty() {
+                    None
+                } else {
+                    Some(
+                        seeds
+                            .into_iter()
+                            .map(|key| ProfileFieldPayload {
+                                key: key.clone(),
+                                question: key,
+                                required: true,
+                            })
+                            .collect(),
+                    )
+                }
+            });
+            if let Some(schema) = schema {
                 let mut profile = state.sessions.load_profile(&id)?;
                 profile.fields = merge_profile_schema(profile.fields, schema);
                 profile.updated_at_unix = crate::chat::unix_now();
@@ -104,6 +126,7 @@ pub(super) async fn agents_manage(
                 response.profile = Some(state.sessions.load_profile(&id)?);
             }
             response.task = Some(state.sessions.load_task(&id)?);
+            response.long_term_facts = load_agent_long_term_facts(&state.sessions, &id)?;
             response.agent = Some(saved);
         }
         "delete" => {
@@ -222,11 +245,53 @@ pub(super) async fn agents_manage(
             response.task_id = task_id.clone();
             response.task = Some(saved_task);
         }
+        "swarm-load" => {
+            let id = require_agent_id(request.id.as_deref())?;
+            let agent = state
+                .sessions
+                .load_agent(&id)?
+                .ok_or_else(|| AppError::InvalidInput(format!("Unknown agent: {id}")))?;
+            response.swarm = Some(agent.swarm.normalized());
+        }
+        "swarm-save" => {
+            let id = require_agent_id(request.id.as_deref())?;
+            let swarm = request
+                .swarm
+                .ok_or_else(|| AppError::InvalidInput("Swarm payload is required".to_string()))?
+                .normalized();
+            validate_swarm(&swarm)?;
+            let mut agent = state
+                .sessions
+                .load_agent(&id)?
+                .ok_or_else(|| AppError::InvalidInput(format!("Unknown agent: {id}")))?;
+            agent.swarm = swarm;
+            agent.updated_at_unix = crate::chat::unix_now();
+            state.sessions.save_agent(&agent)?;
+            response.swarm = Some(agent.swarm.clone());
+            response.agent = Some(agent);
+        }
         other => {
             return Err(AppError::InvalidInput(format!("Unknown agent action: {other}")).into());
         }
     }
     Ok(Json(response))
+}
+
+/// Validate a swarm config: any sub-agent overriding the provider must name a
+/// known provider, and any explicit base_url must be well-formed.
+fn validate_swarm(swarm: &SwarmConfig) -> Result<(), AppError> {
+    for agent in &swarm.agents {
+        let provider = agent.provider.trim();
+        if provider.is_empty() {
+            continue;
+        }
+        let kind = parse_provider(provider)?;
+        let base_url = agent.base_url.trim();
+        if !base_url.is_empty() {
+            validate_base_url(&kind.to_string(), base_url)?;
+        }
+    }
+    Ok(())
 }
 
 /// Build a `ProfileConfig` from an agent payload (for the schema-builder call).
@@ -292,6 +357,23 @@ pub(super) fn persist_agent_initial_context(
         MemoryLayer::LongTerm,
     );
     sessions.save_long_term(&profile_key, &memory)
+}
+
+fn load_agent_long_term_facts(
+    sessions: &LocalSessionStore,
+    agent_id: &str,
+) -> Result<Vec<MemoryFactPayload>, AppError> {
+    let profile_key = format!("agent:{agent_id}");
+    Ok(sessions
+        .load_long_term(&profile_key)?
+        .facts
+        .into_iter()
+        .map(|(key, value)| MemoryFactPayload {
+            key,
+            value,
+            layer: MemoryLayer::LongTerm.to_string(),
+        })
+        .collect())
 }
 
 /// Merge a freshly-built/edited schema into the stored profile, carrying over any
@@ -383,6 +465,9 @@ pub(super) struct AgentsManageRequest {
     pub(super) task_id: Option<String>,
     #[serde(default)]
     pub(super) task: Option<TaskPayload>,
+    /// Swarm config, used by `swarm-save`.
+    #[serde(default)]
+    pub(super) swarm: Option<SwarmConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -484,8 +569,19 @@ pub(super) struct AgentsManageResponse {
     #[serde(default)]
     pub(super) task_id: String,
     pub(super) profile: Option<AgentProfile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) long_term_facts: Vec<MemoryFactPayload>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(super) dialogs: Vec<crate::chat::DialogMeta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) swarm: Option<SwarmConfig>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct MemoryFactPayload {
+    pub(super) key: String,
+    pub(super) value: String,
+    pub(super) layer: String,
 }
 
 pub(super) async fn user_profiles_manage(

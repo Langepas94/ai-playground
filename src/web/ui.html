@@ -155,6 +155,15 @@
       font-size: 12px;
       line-height: 1.35;
     }
+    .swarm-group-title {
+      margin: 12px 0 4px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+    }
+    .swarm-role-title { font-weight: 600; }
     input, select, textarea, button {
       font: inherit;
     }
@@ -667,6 +676,7 @@
       border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px 10px;
       background: #f8fafc; font-size: 13px; white-space: pre-wrap; min-height: 18px;
     }
+    .task-state-grid { display: grid; gap: 10px; }
     .stage-flow { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
     .stage-step {
       font-size: 12px; padding: 3px 9px; border-radius: 999px;
@@ -952,6 +962,7 @@
           <button class="tab-button" type="button" data-tab="aprofile">Профиль</button>
           <button class="tab-button" type="button" data-tab="task">Задача</button>
           <button class="tab-button" type="button" data-tab="invariants">Инварианты</button>
+          <button class="tab-button" type="button" data-tab="swarm">Рой</button>
           <button class="tab-button" type="button" data-tab="params">Параметры</button>
           <button class="tab-button" type="button" data-tab="metrics">Метрики</button>
           <button class="tab-button" type="button" data-tab="debug">Debug</button>
@@ -1038,34 +1049,35 @@
           <div class="group">
             <h2>🔵 Задача (рабочая память)</h2>
             <div class="field-help">
-              Рабочую задачу можно вести автоматически или руками. Task id привязывает текущий чат к отдельному task-файлу; несколько чатов могут использовать один task id. Идёт в каждый запрос блоком <code>[memory:working]</code>.
-            </div>
-            <label>Task id<input id="taskIdInput" spellcheck="false" placeholder="default / menu / naming"></label>
-            <div class="actions">
-              <button id="taskLoad" class="secondary" type="button">Загрузить task</button>
-              <button id="taskSave" type="button">Сохранить task</button>
+              Рабочую задачу ведёт обязательный task-агент роя. Это состояние идёт в prompt как <code>[memory:working]</code>; клиент его видит, но не двигает руками.
             </div>
             <div class="model-meta-row">
               <span class="model-meta-label">Стадия:</span>
               <span id="taskStageBadge" class="context-badge">—</span>
             </div>
             <div id="taskStageFlow" class="stage-flow"></div>
-            <label>Стадия<select id="taskStageSelect">
-              <option value="clarify">clarify</option>
-              <option value="planning">planning</option>
-              <option value="execution">execution</option>
-              <option value="validation">validation</option>
-              <option value="done">done</option>
-            </select></label>
-            <label>Текущий шаг<input id="taskCurrentStepInput" spellcheck="false" placeholder="что делаем сейчас"></label>
-            <label>Ожидаемое действие<input id="taskExpectedActionInput" spellcheck="false" placeholder="user_input / agent_work / validation / none"></label>
-            <label class="stream-toggle"><input id="taskPausedInput" type="checkbox"> Пауза</label>
-            <label>Подсказка для продолжения<textarea id="taskResumeHintInput" rows="2" placeholder="с чего продолжить без повторного объяснения"></textarea></label>
-            <label>Название<input id="taskTitleInput" spellcheck="false"></label>
-            <label>Цель<textarea id="taskGoalInput" rows="3"></textarea></label>
-            <label>План<textarea id="taskPlanInput" rows="5" placeholder="по одному пункту на строку"></textarea></label>
-            <label>Результаты<textarea id="taskResultsInput" rows="5" placeholder="по одному результату на строку"></textarea></label>
-            <label>Заметки<textarea id="taskNotesInput" rows="4"></textarea></label>
+            <div class="task-state-grid">
+              <div>
+                <div class="field-title">Текущий шаг</div>
+                <div id="taskCurrentStepView" class="readonly-box">—</div>
+              </div>
+              <div>
+                <div class="field-title">Ожидаемое действие</div>
+                <div id="taskExpectedActionView" class="readonly-box">—</div>
+              </div>
+              <div>
+                <div class="field-title">Подсказка для продолжения</div>
+                <div id="taskResumeHintView" class="readonly-box">—</div>
+              </div>
+              <div>
+                <div class="field-title">Название</div>
+                <div id="taskTitleView" class="readonly-box">—</div>
+              </div>
+              <div>
+                <div class="field-title">Цель</div>
+                <div id="taskGoalView" class="readonly-box">—</div>
+              </div>
+            </div>
             <div id="taskTransitionLine" class="field-help"></div>
             <div id="taskStatusLine" class="field-help"></div>
           </div>
@@ -1083,6 +1095,28 @@
             </div>
             <div id="invariantsStatusLine" class="field-help"></div>
             <div id="violationsView" class="field-help"></div>
+          </div>
+        </div>
+
+        <div id="tab-swarm" class="inspector-pane">
+          <div class="group">
+            <h2>Рой агентов</h2>
+            <div class="field-help">
+              Ты видишь одно окно чата, но под капотом работает рой. Детерминированный
+              оркестратор (код, не LLM) на каждом ходу маршрутизирует работу: выбирает
+              ответчика по текущей стадии задачи (Planning → Execution → Validation → Done),
+              прогоняет проверку инвариантов с retry и переключает стадии по жёсткой таблице
+              переходов. Сервисные агенты (память, саммари, темы, профиль) обслуживают ход.
+              Все агенты обязательны — их нельзя отключить, можно только задать свою модель и
+              промпт. Пусто в provider/model = наследовать от основного агента; пусто в
+              промпте = промпт роли по умолчанию.
+            </div>
+            <div class="field-help"><b>Оркестратор:</b> детерминированный конечный автомат в коде. Переходы между этапами решает код по таблице allowed_next, а не модель.</div>
+            <div id="swarmRows"></div>
+            <div class="actions">
+              <button id="swarmSave" class="secondary" type="button">Сохранить рой</button>
+            </div>
+            <div id="swarmStatusLine" class="field-help"></div>
           </div>
         </div>
 
@@ -1104,11 +1138,11 @@
                   <select id="memoryStrategy">
                     <option value="summary">Summary</option>
                     <option value="sliding-window">Sliding Window</option>
-                    <option value="sticky-facts">Sticky Facts</option>
+                    <option value="sticky-facts" selected>Sticky Facts</option>
                     <option value="branching">Branching</option>
                     <option value="scoped-branches">Scoped Branches</option>
                   </select>
-                  <span id="memoryStrategyHelp" class="field-help">Summary + последние N raw сообщений. Старое сжимается отдельным запросом.</span>
+                  <span id="memoryStrategyHelp" class="field-help">Facts + последние N сообщений. Facts обновляются из явных целей, ограничений, предпочтений и решений.</span>
                 </label>
                 <label>
                   <span id="memoryRecentTitle" class="field-title">Raw сообщений рядом с summary</span>
@@ -1404,6 +1438,9 @@
       document.querySelectorAll('.inspector-pane').forEach((pane) => {
         pane.classList.toggle('active', pane.id === `tab-${name}`);
       });
+      if (name === 'swarm') {
+        loadSwarm();
+      }
     }
 
     function numberValue(id) {
@@ -1879,7 +1916,6 @@
       if (!panel) return;
       if (!layers) {
         panel.textContent = 'Контекст еще не собран.';
-        renderProfileLongTermFacts(null);
         return;
       }
       const st = layers.short_term || {};
@@ -2289,7 +2325,7 @@
     function applyAgentMemoryToForm(memory) {
       if (!memory) return;
       const set = (id, value) => { if (value !== undefined && value !== null) $(id).value = value; };
-      set('memoryStrategy', memory.strategy);
+      set('memoryStrategy', memory.strategy || 'sticky-facts');
       set('memoryRecentMessages', memory.recent_messages);
       set('memorySummarizeAfterMessages', memory.summarize_after_messages);
       set('memorySummaryChunkMessages', memory.summary_chunk_messages);
@@ -2302,12 +2338,9 @@
       $('memoryStrategy').dispatchEvent(new Event('change', { bubbles: true }));
     }
 
-    function applyTransportDefaultsForAgent(agent) {
-      if (!agent || agent.provider !== 'deepseek') return;
-      if (localStorage.getItem('ai_stream_mode') === null) {
-        $('streamMode').checked = false;
-        localStorage.setItem('ai_stream_mode', 'off');
-      }
+    function applyTransportDefaultsForAgent(_agent) {
+      // Streaming is the default for every provider, including DeepSeek:
+      // users see useful text while post-turn profile/state agents finish.
     }
 
     // ---- Workspace panes -------------------------------------------------
@@ -2393,61 +2426,15 @@
       task = task || {};
       const stage = task.stage || 'clarify';
       $('taskStageBadge').textContent = stage;
-      $('taskStageSelect').value = TASK_STAGES.includes(stage) ? stage : 'clarify';
       renderStageFlow(stage);
-      $('taskCurrentStepInput').value = task.current_step || '';
-      $('taskExpectedActionInput').value = task.expected_action || '';
-      $('taskPausedInput').checked = !!task.paused;
-      $('taskResumeHintInput').value = task.resume_hint || '';
-      $('taskTitleInput').value = task.title || '';
-      $('taskGoalInput').value = task.goal || '';
-      $('taskPlanInput').value = listToLines(task.plan);
-      $('taskResultsInput').value = listToLines(task.results);
-      $('taskNotesInput').value = task.notes || '';
-    }
-
-    function taskPayloadFromForm() {
-      return {
-        stage: $('taskStageSelect').value,
-        current_step: $('taskCurrentStepInput').value.trim(),
-        expected_action: $('taskExpectedActionInput').value.trim(),
-        paused: $('taskPausedInput').checked,
-        resume_hint: $('taskResumeHintInput').value.trim(),
-        title: $('taskTitleInput').value.trim(),
-        goal: $('taskGoalInput').value.trim(),
-        plan: lineToList('taskPlanInput'),
-        results: lineToList('taskResultsInput'),
-        notes: $('taskNotesInput').value.trim(),
-      };
-    }
-
-    async function loadTaskFromForm() {
-      if (!activeAgentId) { $('taskStatusLine').textContent = 'Сначала войди в агента.'; return; }
-      const taskId = $('taskIdInput').value.trim() || 'default';
-      try {
-        const data = await agentsManage({ action: 'task-load', id: activeAgentId, session_id: chatSessionId || null, task_id: taskId });
-        activeTaskId = data.task_id || taskId;
-        $('taskIdInput').value = activeTaskId;
-        renderTaskPane(data.task);
-        $('taskStatusLine').textContent = `Task '${activeTaskId}' загружен и привязан к текущему чату.`;
-      } catch (error) {
-        $('taskStatusLine').textContent = 'Ошибка загрузки task: ' + error.message;
-      }
-    }
-
-    async function saveTaskFromForm() {
-      if (!activeAgentId) { $('taskStatusLine').textContent = 'Сначала войди в агента.'; return; }
-      const taskId = $('taskIdInput').value.trim() || 'default';
-      try {
-        const data = await agentsManage({ action: 'task-save', id: activeAgentId, session_id: chatSessionId || null, task_id: taskId, task: taskPayloadFromForm() });
-        activeTaskId = data.task_id || taskId;
-        $('taskIdInput').value = activeTaskId;
-        renderTaskPane(data.task);
-        setActiveAgentChip($('activeAgentName').textContent, data.task?.stage || 'clarify');
-        $('taskStatusLine').textContent = `Task '${activeTaskId}' сохранён.`;
-      } catch (error) {
-        $('taskStatusLine').textContent = 'Ошибка сохранения task: ' + error.message;
-      }
+      $('taskCurrentStepView').textContent = task.current_step || '—';
+      $('taskExpectedActionView').textContent = task.expected_action || '—';
+      $('taskResumeHintView').textContent = task.resume_hint || '—';
+      $('taskTitleView').textContent = task.title || '—';
+      $('taskGoalView').textContent = task.goal || '—';
+      $('taskStatusLine').textContent = task.paused
+        ? 'Задача поставлена на паузу task-агентом.'
+        : 'Состояние обновляется автоматически task-агентом роя.';
     }
 
     function renderInvariants(list) {
@@ -2460,14 +2447,17 @@
       if (!state) return;
       if (state.stage) {
         $('taskStageBadge').textContent = state.stage;
-        $('taskStageSelect').value = TASK_STAGES.includes(state.stage) ? state.stage : 'clarify';
         renderStageFlow(state.stage);
         setActiveAgentChip($('activeAgentName').textContent, state.stage);
       }
-      if (state.current_step !== undefined) $('taskCurrentStepInput').value = state.current_step || '';
-      if (state.expected_action !== undefined) $('taskExpectedActionInput').value = state.expected_action || '';
-      if (state.paused !== undefined) $('taskPausedInput').checked = !!state.paused;
-      if (state.resume_hint !== undefined) $('taskResumeHintInput').value = state.resume_hint || '';
+      if (state.current_step !== undefined) $('taskCurrentStepView').textContent = state.current_step || '—';
+      if (state.expected_action !== undefined) $('taskExpectedActionView').textContent = state.expected_action || '—';
+      if (state.resume_hint !== undefined) $('taskResumeHintView').textContent = state.resume_hint || '—';
+      if (state.paused !== undefined) {
+        $('taskStatusLine').textContent = state.paused
+          ? 'Задача поставлена на паузу task-агентом.'
+          : 'Состояние обновляется автоматически task-агентом роя.';
+      }
       if (state.stage_transition) {
         const t = state.stage_transition;
         $('taskTransitionLine').textContent = t.accepted
@@ -2508,8 +2498,8 @@
         applyTransportDefaultsForAgent(agent);
         renderProfileAgentContext(agent);
         renderProfilePane(data.profile);
+        renderProfileLongTermFacts(data.long_term_facts || []);
         activeTaskId = data.task_id || 'default';
-        $('taskIdInput').value = activeTaskId;
         renderTaskPane(data.task);
         renderInvariants(agent.invariants);
         setActiveAgentChip(agent.name, (data.task && data.task.stage) || 'clarify');
@@ -2537,7 +2527,6 @@
         renderProfileAgentContext(data.agent);
         renderProfilePane(data.profile);
         activeTaskId = data.task_id || activeTaskId || 'default';
-        $('taskIdInput').value = activeTaskId;
         renderTaskPane(data.task);
         setActiveAgentChip($('activeAgentName').textContent, (data.task && data.task.stage) || 'clarify');
       } catch (_) { /* non-fatal */ }
@@ -2649,6 +2638,84 @@
         $('invariantsStatusLine').textContent = 'Инварианты сохранены.';
       } catch (error) {
         $('invariantsStatusLine').textContent = 'Ошибка: ' + error.message;
+      }
+    }
+
+    const SWARM_ROLES = [
+      { role: 'planning', group: 'Этапы задачи', label: 'Planning', hint: 'Собирает требования и утверждает план (сюда сворачивается Clarify).' },
+      { role: 'execution', group: 'Этапы задачи', label: 'Execution', hint: 'Пишет код / создаёт артефакты в рамках текущего шага.' },
+      { role: 'validation', group: 'Этапы задачи', label: 'Validation', hint: 'Тесты, ревью, соответствие плану.' },
+      { role: 'done', group: 'Этапы задачи', label: 'Done', hint: 'Фиксирует итог. Терминальная стадия.' },
+      { role: 'general', group: 'Ответчик', label: 'General', hint: 'Дефолтный ответчик для обычного чата без задачи.' },
+      { role: 'memory', group: 'Сервисные', label: 'Память', hint: 'Извлекает факты и обновляет долговременную память на любой стратегии.' },
+      { role: 'summary', group: 'Сервисные', label: 'Саммари', hint: 'Сжимает старую историю в summary.' },
+      { role: 'topic', group: 'Сервисные', label: 'Темы', hint: 'LLM-классификатор тем для scoped-branches.' },
+      { role: 'profile', group: 'Сервисные', label: 'Профиль', hint: 'Заполняет интервью-профиль агента из диалога.' },
+      { role: 'invariant', group: 'Сервисные', label: 'Инварианты', hint: 'Проверяет ответ против инвариантов (Pass/Fail → retry).' },
+    ];
+
+    function renderSwarmRows(config) {
+      const container = $('swarmRows');
+      const byRole = new Map((config?.agents || []).map((agent) => [agent.role, agent]));
+      let lastGroup = null;
+      container.innerHTML = SWARM_ROLES.map((meta) => {
+        const agent = byRole.get(meta.role) || { provider: '', base_url: '', model: '', system_prompt: '' };
+        let header = '';
+        if (meta.group !== lastGroup) {
+          lastGroup = meta.group;
+          header = `<div class="swarm-group-title">${escapeHtml(meta.group)}</div>`;
+        }
+        return `${header}
+          <details class="panel" data-role="${meta.role}">
+            <summary>
+              <span class="swarm-role-title">${escapeHtml(meta.label)}</span>
+            </summary>
+            <div class="panel-body">
+              <div class="field-help">${escapeHtml(meta.hint)}</div>
+              <label>Provider (пусто = как у агента)<input class="swarm-provider" spellcheck="false" value="${escapeHtml(agent.provider || '')}" placeholder="openai-compatible / deepseek / openrouter ..."></label>
+              <label>Base URL<input class="swarm-base-url" spellcheck="false" value="${escapeHtml(agent.base_url || '')}" placeholder="пусто = как у агента"></label>
+              <label>Model<input class="swarm-model" spellcheck="false" value="${escapeHtml(agent.model || '')}" placeholder="пусто = как у агента"></label>
+              <label>System prompt<textarea class="swarm-prompt" rows="3" placeholder="пусто = промпт роли по умолчанию">${escapeHtml(agent.system_prompt || '')}</textarea></label>
+            </div>
+          </details>`;
+      }).join('');
+    }
+
+    async function loadSwarm() {
+      if (!activeAgentId) {
+        $('swarmRows').innerHTML = '';
+        $('swarmStatusLine').textContent = 'Рой настраивается для сохранённого агента. Сначала войди в агента.';
+        return;
+      }
+      try {
+        const data = await agentsManage({ action: 'swarm-load', id: activeAgentId });
+        renderSwarmRows(data.swarm);
+        $('swarmStatusLine').textContent = '';
+      } catch (error) {
+        $('swarmStatusLine').textContent = 'Ошибка: ' + error.message;
+      }
+    }
+
+    function collectSwarmPayload() {
+      const agents = Array.from($('swarmRows').querySelectorAll('details[data-role]')).map((row) => ({
+        role: row.dataset.role,
+        enabled: true,
+        provider: row.querySelector('.swarm-provider').value.trim(),
+        base_url: row.querySelector('.swarm-base-url').value.trim(),
+        model: row.querySelector('.swarm-model').value.trim(),
+        system_prompt: row.querySelector('.swarm-prompt').value,
+      }));
+      return { agents };
+    }
+
+    async function saveSwarm() {
+      if (!activeAgentId) { $('swarmStatusLine').textContent = 'Сначала войди в агента.'; return; }
+      try {
+        const data = await agentsManage({ action: 'swarm-save', id: activeAgentId, swarm: collectSwarmPayload() });
+        renderSwarmRows(data.swarm);
+        $('swarmStatusLine').textContent = 'Рой сохранён.';
+      } catch (error) {
+        $('swarmStatusLine').textContent = 'Ошибка: ' + error.message;
       }
     }
 
@@ -3172,6 +3239,19 @@
 
     let activeAbortController = null;
 
+    function parseSseEventBlock(block) {
+      let type = '';
+      const data = [];
+      for (const line of block.replaceAll('\r\n', '\n').split('\n')) {
+        if (line.startsWith('event:')) {
+          type = line.slice(6).trim();
+        } else if (line.startsWith('data:')) {
+          data.push(line.slice(5).replace(/^ /, ''));
+        }
+      }
+      return type ? { type, data: data.join('\n') } : null;
+    }
+
     async function sendPrompt() {
       if (!$('streamMode').checked) {
         return sendPromptFull();
@@ -3236,50 +3316,51 @@
         let sseBuffer = '';
         let gotDoneEvent = false;
 
+        const handleSseEvent = (parsed) => {
+          if (!parsed) return;
+          const eventType = parsed.type;
+          const eventData = parsed.data;
+          if (eventType === 'token') {
+            lastTokenAt = Date.now();
+            accText += eventData;
+            updateStreamingMessage(assistantEl, accText);
+          } else if (eventType === 'done') {
+            gotDoneEvent = true;
+            const data = JSON.parse(eventData);
+            chatSessionId = data.session_id || chatSessionId;
+            forceNewSession = false;
+            if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
+            chatHistory = data.messages || chatHistory;
+            updateActiveBranchFromResponse(chatSessionId, chatHistory);
+            restoreSystemPromptFromHistory(chatHistory);
+            renderChatHistory(); // финальный рендер с метаданными
+            setMetrics(data.metrics, data.context_metrics);
+            setSessionMetrics(data.session_metrics);
+            setDebug(data.debug);
+            setContextDebug(data.context_debug);
+            renderAgentState(data.agent_state);
+            refreshAgentPanes();
+            refreshDialogs();
+            setStatus('Готово');
+          } else if (eventType === 'error') {
+            throw new Error(eventData);
+          }
+        };
+
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          sseBuffer += decoder.decode(value, { stream: true });
-          const lines = sseBuffer.split('\n');
-          sseBuffer = lines.pop(); // последняя неполная строка
-
-          let eventType = null;
-          let eventData = null;
-          for (const line of lines) {
-            if (line.startsWith('event: ')) {
-              eventType = line.slice(7).trim();
-            } else if (line.startsWith('data: ')) {
-              eventData = line.slice(6);
-            } else if (line === '' && eventType && eventData !== null) {
-              if (eventType === 'token') {
-                lastTokenAt = Date.now();
-                accText += eventData;
-                updateStreamingMessage(assistantEl, accText);
-              } else if (eventType === 'done') {
-                gotDoneEvent = true;
-                const data = JSON.parse(eventData);
-                chatSessionId = data.session_id || chatSessionId;
-                forceNewSession = false;
-                if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
-                chatHistory = data.messages || chatHistory;
-                updateActiveBranchFromResponse(chatSessionId, chatHistory);
-                restoreSystemPromptFromHistory(chatHistory);
-                renderChatHistory(); // финальный рендер с метаданными
-                setMetrics(data.metrics, data.context_metrics);
-                setSessionMetrics(data.session_metrics);
-                setDebug(data.debug);
-                setContextDebug(data.context_debug);
-                renderAgentState(data.agent_state);
-                refreshAgentPanes();
-                refreshDialogs();
-                setStatus('Готово');
-              } else if (eventType === 'error') {
-                throw new Error(eventData);
-              }
-              eventType = null;
-              eventData = null;
-            }
+          sseBuffer += decoder.decode(value, { stream: true }).replaceAll('\r\n', '\n');
+          let boundary;
+          while ((boundary = sseBuffer.indexOf('\n\n')) !== -1) {
+            const block = sseBuffer.slice(0, boundary);
+            sseBuffer = sseBuffer.slice(boundary + 2);
+            handleSseEvent(parseSseEventBlock(block));
           }
+        }
+        sseBuffer += decoder.decode();
+        if (sseBuffer.trim()) {
+          handleSseEvent(parseSseEventBlock(sseBuffer));
         }
         if (!gotDoneEvent && accText && assistantEl) {
           assistantEl.classList.remove('streaming');
@@ -3501,10 +3582,9 @@
     $('gateSchemaAdd').addEventListener('click', () => addSchemaRow());
     $('gateCreate').addEventListener('click', createAgentFromGate);
     $('invariantsSave').addEventListener('click', saveInvariants);
+    $('swarmSave').addEventListener('click', saveSwarm);
     $('profileAgentContextSave').addEventListener('click', saveAgentContextFromProfile);
     $('dialogNew').addEventListener('click', newDialog);
-    $('taskLoad').addEventListener('click', loadTaskFromForm);
-    $('taskSave').addEventListener('click', saveTaskFromForm);
     $('userProfileSelect').addEventListener('change', () => {
       activeUserProfileId = $('userProfileSelect').value || '';
       loadSelectedUserProfileIntoForm();

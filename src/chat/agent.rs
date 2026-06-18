@@ -7,21 +7,12 @@ use crate::{
     },
 };
 
-use super::memory::{
-    AgentMemory, MemoryConfig, MemoryLayer, MemoryStrategy, TopicRouteDecision,
-    format_messages_for_summary, looks_sensitive,
-};
+use super::memory::{AgentMemory, MemoryConfig, MemoryLayer, MemoryStrategy, TopicRouteDecision};
 use super::store::{ProfileField, TaskStage, TopicFileStorage};
-use super::token_accounting::{TokenEstimate, estimate_exchange, estimate_messages_tokens};
-use tokio::time::{Duration, timeout};
+use super::swarm::{ResolvedSwarm, SwarmOrchestrator, SwarmReport, SwarmTurn};
+use super::token_accounting::{TokenEstimate, estimate_exchange};
 
 pub const LOCAL_SESSION_AGENT_ID: &str = "local-session-agent";
-const MEMORY_COMPACT_TIMEOUT: Duration = Duration::from_secs(30);
-const MEMORY_FACTS_EXTRACT_TIMEOUT: Duration = Duration::from_secs(20);
-const TOPIC_CLASSIFIER_TIMEOUT: Duration = Duration::from_secs(20);
-const STATEFUL_STEP_TIMEOUT: Duration = Duration::from_secs(20);
-const PREFLIGHT_COMPACT_TIMEOUT: Duration = Duration::from_secs(60);
-const MAX_PREFLIGHT_SUMMARY_PASSES: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgentDescriptor {
@@ -51,24 +42,6 @@ pub fn selected_agent(agent_id: Option<&str>) -> Result<&'static AgentDescriptor
         .iter()
         .find(|agent| agent.id == id)
         .ok_or_else(|| AppError::InvalidInput(format!("Unsupported agent: {id}")))
-}
-
-#[derive(Debug)]
-enum PromptIngest {
-    Continue(Option<RequestMetrics>),
-    TopicNotFound {
-        metrics: Option<RequestMetrics>,
-        message: String,
-    },
-}
-
-impl PromptIngest {
-    fn into_parts(self) -> (Option<RequestMetrics>, Option<String>) {
-        match self {
-            Self::Continue(metrics) => (metrics, None),
-            Self::TopicNotFound { metrics, message } => (metrics, Some(message)),
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -104,6 +77,14 @@ pub struct ChatAgent {
     /// Reusable user preferences selected at runtime. This is intentionally
     /// separate from the agent definition and never changes tools/capabilities.
     user_profile: Option<super::store::UserProfile>,
+    /// Resolved mandatory swarm: 4 stage responders + general + memory/summary/
+    /// topic/profile/invariant, each with its own provider/model/prompt.
+    swarm: ResolvedSwarm,
+    /// Stateful report from the most recent orchestrated turn (stage, transition,
+    /// violations, pending questions), surfaced to the web layer.
+    last_stateful: StatefulReport,
+    /// Swarm activity report from the most recent turn, for the UI swarm panel.
+    last_swarm_report: SwarmReport,
 }
 
 impl ChatAgent {
@@ -116,6 +97,7 @@ impl ChatAgent {
         pricing: Option<ModelPricing>,
         billing: Option<BillingLookup>,
     ) -> Self {
+        let swarm = ResolvedSwarm::inherit_all(&profile, &token);
         Self {
             profile,
             token,
@@ -132,7 +114,54 @@ impl ChatAgent {
             invariants: Vec::new(),
             domain: String::new(),
             user_profile: None,
+            swarm,
+            last_stateful: StatefulReport::default(),
+            last_swarm_report: SwarmReport::default(),
         }
+    }
+
+    /// Take the stateful report (stage, transition, violations, pending
+    /// questions) produced by the most recent orchestrated turn.
+    pub fn take_stateful_report(&mut self) -> StatefulReport {
+        std::mem::take(&mut self.last_stateful)
+    }
+
+    /// Swarm activity report from the most recent turn (per-agent runs).
+    pub fn swarm_report(&self) -> &SwarmReport {
+        &self.last_swarm_report
+    }
+
+    /// Build the per-turn `SwarmTurn` context and run the deterministic
+    /// orchestrator. Stores the stateful + swarm reports for the caller and
+    /// returns the user-facing response, provider debug and auxiliary metrics.
+    async fn orchestrate(
+        &mut self,
+        client: &dyn ProviderClient,
+        prompt: &str,
+    ) -> Result<(ChatResponse, ProviderExchangeDebug, Option<RequestMetrics>), AppError> {
+        let orchestrator = SwarmOrchestrator::new();
+        let (response, stateful, debug, aux, report) = {
+            let mut turn = self.build_turn(client, prompt);
+            let (response, mut stateful) = orchestrator.run_turn(&mut turn).await?;
+            // Auxiliary metrics are already folded into `response.metrics`; null
+            // them on the stateful report so the web layer does not double-count.
+            stateful.metrics = None;
+            let debug = turn
+                .captured_debug
+                .take()
+                .unwrap_or_else(local_provider_debug);
+            let aux = turn.aux_metrics.take();
+            (response, stateful, debug, aux, turn.report)
+        };
+        self.last_stateful = stateful;
+        self.last_swarm_report = report;
+        Ok((response, debug, aux))
+    }
+
+    /// Install a resolved mandatory swarm (per-role provider/model/prompt).
+    /// Callers build it from a persisted `SwarmConfig` via `resolve_swarm`.
+    pub fn set_swarm(&mut self, swarm: ResolvedSwarm) {
+        self.swarm = swarm;
     }
 
     pub fn history(&self) -> &[ChatMessage] {
@@ -216,18 +245,10 @@ impl ChatAgent {
         self.control = control;
     }
 
-    /// Record user prompt + assistant response into history after streaming completes.
+    /// Record the streamed user prompt + assistant answer into history. The rest
+    /// of the turn (service agents, FSM, topic persist) runs in `finalize_stream`.
     pub fn record_stream_response(&mut self, prompt: String, answer: String) {
-        self.commit_turn(prompt.clone(), answer.clone());
-        self.apply_context_storage_policy();
-        let _ = self.update_active_topic_file(&prompt, &answer);
-    }
-
-    pub async fn compact_memory(
-        &mut self,
-        client: &dyn ProviderClient,
-    ) -> Option<crate::providers::RequestMetrics> {
-        self.refresh_memory_with_timeout(client).await
+        self.commit_turn(prompt, answer);
     }
 
     pub async fn respond(
@@ -235,33 +256,7 @@ impl ChatAgent {
         client: &dyn ProviderClient,
         prompt: String,
     ) -> Result<ChatResponse, AppError> {
-        let (mut context_metrics, topic_not_found) =
-            self.ingest_user_prompt(client, &prompt).await?.into_parts();
-        if let Some(message) = topic_not_found {
-            self.commit_turn(prompt, message.clone());
-            return Ok(local_chat_response(message, context_metrics));
-        }
-        context_metrics = merge_optional_metrics(
-            context_metrics,
-            self.precompact_before_request(client, &prompt).await,
-        );
-        let response = client
-            .chat_completion(
-                &self.profile,
-                &self.token,
-                self.request_with_user_prompt(prompt.clone()),
-            )
-            .await?;
-        self.commit_turn(prompt.clone(), response.text.clone());
-        self.apply_context_storage_policy();
-        self.update_active_topic_file(prompt.as_str(), response.text.as_str())?;
-        let mut response = response;
-        if let Some(metrics) = context_metrics {
-            response.metrics = crate::chat::add_request_metrics(&response.metrics, &metrics);
-        }
-        if let Some(metrics) = self.refresh_memory_with_timeout(client).await {
-            response.metrics = crate::chat::add_request_metrics(&response.metrics, &metrics);
-        }
+        let (response, _debug, _aux) = self.orchestrate(client, &prompt).await?;
         Ok(response)
     }
 
@@ -288,39 +283,7 @@ impl ChatAgent {
         ),
         AppError,
     > {
-        let (mut context_metrics, topic_not_found) =
-            self.ingest_user_prompt(client, &prompt).await?.into_parts();
-        if let Some(message) = topic_not_found {
-            self.commit_turn(prompt, message.clone());
-            let response = local_chat_response(message, context_metrics.clone());
-            return Ok((response, local_provider_debug(), context_metrics));
-        }
-        context_metrics = merge_optional_metrics(
-            context_metrics,
-            self.precompact_before_request(client, &prompt).await,
-        );
-        let (response, debug) = client
-            .chat_completion_with_debug(
-                &self.profile,
-                &self.token,
-                self.request_with_user_prompt(prompt.clone()),
-            )
-            .await?;
-        self.commit_turn(prompt.clone(), response.text.clone());
-        self.apply_context_storage_policy();
-        self.update_active_topic_file(prompt.as_str(), response.text.as_str())?;
-        let mut response = response;
-        if let Some(metrics) = &context_metrics {
-            response.metrics = crate::chat::add_request_metrics(&response.metrics, metrics);
-        }
-        if let Some(metrics) = self.refresh_memory_with_timeout(client).await {
-            context_metrics = Some(match context_metrics {
-                Some(current) => crate::chat::add_request_metrics(&current, &metrics),
-                None => metrics.clone(),
-            });
-            response.metrics = crate::chat::add_request_metrics(&response.metrics, &metrics);
-        }
-        Ok((response, debug, context_metrics))
+        self.orchestrate(client, &prompt).await
     }
 
     pub async fn prepare_stream_request(
@@ -328,27 +291,87 @@ impl ChatAgent {
         client: &dyn ProviderClient,
         prompt: &str,
     ) -> Result<PreparedStreamRequest, AppError> {
-        let (mut context_metrics, topic_not_found) = self
-            .ingest_user_prompt(client, prompt)
-            .await
-            .map(PromptIngest::into_parts)?;
-        if let Some(message) = topic_not_found {
-            self.commit_turn(prompt.to_string(), message.clone());
-            return Ok(PreparedStreamRequest {
-                request: None,
-                context_metrics: context_metrics.clone(),
-                local_response: Some(local_chat_response(message, context_metrics)),
-            });
-        }
-        context_metrics = merge_optional_metrics(
-            context_metrics,
-            self.precompact_before_request(client, prompt).await,
-        );
-        Ok(PreparedStreamRequest {
-            request: Some(self.request_with_user_prompt(prompt.to_string())),
-            context_metrics,
-            local_response: None,
+        let orchestrator = SwarmOrchestrator::new();
+        let prep = {
+            let mut turn = self.build_turn(client, prompt);
+            let prep = orchestrator.stream_prepare(&mut turn).await?;
+            let report = turn.report;
+            (prep, report)
+        };
+        let (prep, report) = prep;
+        self.last_swarm_report = report;
+        Ok(match prep {
+            super::swarm::orchestrator::StreamPrep::Request(request, context_metrics) => {
+                PreparedStreamRequest {
+                    request: Some(request),
+                    context_metrics,
+                    local_response: None,
+                }
+            }
+            super::swarm::orchestrator::StreamPrep::Local(response, context_metrics) => {
+                PreparedStreamRequest {
+                    request: None,
+                    context_metrics,
+                    local_response: Some(response),
+                }
+            }
         })
+    }
+
+    /// Finish a streamed turn: strip the stage marker, commit the cleaned answer,
+    /// advance the FSM deterministically, run post service agents + invariant
+    /// check, persist topic state, store the stateful report. Returns the cleaned
+    /// answer (marker removed) plus auxiliary token metrics.
+    pub async fn finalize_stream(
+        &mut self,
+        client: &dyn ProviderClient,
+        prompt: &str,
+        raw_answer: &str,
+    ) -> (String, Option<RequestMetrics>) {
+        let orchestrator = SwarmOrchestrator::new();
+        let (stateful, aux, clean, report) = {
+            let mut turn = self.build_turn(client, prompt);
+            let (stateful, aux, clean) = orchestrator
+                .stream_finalize(&mut turn, prompt, raw_answer)
+                .await;
+            (stateful, aux, clean, turn.report)
+        };
+        self.last_stateful = stateful;
+        self.last_swarm_report = report;
+        (clean, aux)
+    }
+
+    /// Construct a `SwarmTurn` borrowing this agent's fields for one turn.
+    fn build_turn<'a>(
+        &'a mut self,
+        client: &'a dyn ProviderClient,
+        prompt: &'a str,
+    ) -> SwarmTurn<'a> {
+        SwarmTurn {
+            client,
+            roster: &self.swarm,
+            main_profile: &self.profile,
+            main_token: &self.token,
+            control: &self.control,
+            pricing: &self.pricing,
+            billing: &self.billing,
+            context_limit: self.context_limit,
+            topic_store: self.topic_store.as_ref(),
+            memory_config: &mut self.memory_config,
+            memory: &mut self.memory,
+            history: &mut self.history,
+            task: &mut self.task_state,
+            agent_profile: &mut self.agent_profile,
+            user_profile: &self.user_profile,
+            invariants: &self.invariants,
+            domain: &self.domain,
+            prompt,
+            pending_answer: None,
+            retry_violations: Vec::new(),
+            aux_metrics: None,
+            captured_debug: None,
+            report: SwarmReport::default(),
+        }
     }
 
     pub fn control(&self) -> &ResponseControl {
@@ -375,8 +398,10 @@ impl ChatAgent {
     /// the provider sees the agent's state up front.
     fn inject_memory_layers(&self, messages: &mut Vec<ChatMessage>) {
         let mut blocks = Vec::new();
+        let mut seen_profile_context = Vec::new();
 
         if !self.domain.is_empty() {
+            remember_context_value(&mut seen_profile_context, &self.domain);
             blocks.push(ChatMessage {
                 role: Role::System,
                 content: format!(
@@ -389,6 +414,7 @@ impl ChatAgent {
         if let Some(profile) = self.agent_profile.as_ref()
             && let Some(block) = render_profile_block(profile)
         {
+            remember_agent_profile_context(&mut seen_profile_context, profile);
             blocks.push(ChatMessage {
                 role: Role::System,
                 content: block,
@@ -412,6 +438,9 @@ impl ChatAgent {
         }
 
         if !self.invariants.is_empty() {
+            for invariant in &self.invariants {
+                remember_context_value(&mut seen_profile_context, invariant);
+            }
             blocks.push(ChatMessage {
                 role: Role::System,
                 content: format!(
@@ -422,7 +451,7 @@ impl ChatAgent {
         }
 
         if let Some(profile) = self.user_profile.as_ref()
-            && let Some(block) = render_user_profile_block(profile)
+            && let Some(block) = render_user_profile_block(profile, &seen_profile_context)
         {
             blocks.push(ChatMessage {
                 role: Role::System,
@@ -478,746 +507,30 @@ impl ChatAgent {
         self.memory
             .record_turn_branch(user_index, assistant_index, &self.memory_config);
     }
-
-    async fn ingest_user_prompt(
-        &mut self,
-        client: &dyn ProviderClient,
-        prompt: &str,
-    ) -> Result<PromptIngest, AppError> {
-        match self.memory_config.strategy {
-            MemoryStrategy::StickyFacts => {
-                return Ok(PromptIngest::Continue(
-                    self.update_sticky_facts(client, prompt).await,
-                ));
-            }
-            MemoryStrategy::ScopedBranches if self.memory_config.topic_file_routing => {
-                return self.route_topic_file(client, prompt).await;
-            }
-            MemoryStrategy::ScopedBranches if self.memory_config.scoped_auto_route => {
-                let branch = self.memory.select_scoped_topic(
-                    prompt,
-                    &self.history,
-                    &self.memory_config.active_branch,
-                );
-                self.memory_config.active_branch = branch;
-            }
-            _ => {}
-        }
-        Ok(PromptIngest::Continue(None))
-    }
-
-    async fn route_topic_file(
-        &mut self,
-        client: &dyn ProviderClient,
-        prompt: &str,
-    ) -> Result<PromptIngest, AppError> {
-        self.memory
-            .ensure_topic_catalog_from_branches(&self.history, &self.memory_config.active_branch);
-        if self.memory.topic_catalog.is_empty() {
-            if self.memory_config.topic_auto_create {
-                let topic_id = self.memory.select_scoped_topic(
-                    prompt,
-                    &self.history,
-                    &self.memory_config.active_branch,
-                );
-                self.activate_topic_file(topic_id.as_str(), prompt)?;
-                return Ok(PromptIngest::Continue(None));
-            }
-            return Ok(PromptIngest::TopicNotFound {
-                metrics: None,
-                message: topic_not_found_message("topic catalog is empty"),
-            });
-        }
-
-        let classifier_prompt = self.memory_config.topic_classifier_prompt.trim();
-        let classifier_prompt = if classifier_prompt.is_empty() {
-            super::memory::DEFAULT_TOPIC_CLASSIFIER_PROMPT
-        } else {
-            classifier_prompt
-        };
-        let request = ChatRequest {
-            model: self.profile.model.clone(),
-            messages: vec![
-                ChatMessage {
-                    role: Role::System,
-                    content: classifier_prompt.to_string(),
-                },
-                ChatMessage {
-                    role: Role::User,
-                    content: format!(
-                        "{}\n\nLatest user message:\n{prompt}\n\nReturn the JSON route decision only.",
-                        self.memory.compact_topic_catalog()
-                    ),
-                },
-            ],
-            control: topic_classifier_control(),
-            pricing: self.pricing.clone(),
-            billing: self.billing.clone(),
-        };
-        let result = timeout(
-            TOPIC_CLASSIFIER_TIMEOUT,
-            client.chat_completion(&self.profile, &self.token, request),
-        )
-        .await;
-        let Ok(Ok(response)) = result else {
-            return Ok(PromptIngest::TopicNotFound {
-                metrics: None,
-                message: topic_not_found_message("classifier did not return a route"),
-            });
-        };
-        let metrics = Some(response.metrics);
-        let decision =
-            parse_topic_route_decision(response.text.as_str()).unwrap_or(TopicRouteDecision {
-                found: false,
-                topic_id: None,
-                confidence: 0.0,
-                reason: "classifier response was not valid JSON".to_string(),
-            });
-        self.memory.last_topic_route = Some(decision.clone());
-        if decision.found
-            && let Some(topic_id) = decision.topic_id.as_deref()
-            && self.memory.topic_catalog.contains_key(topic_id)
-        {
-            self.activate_topic_file(topic_id, prompt)?;
-            return Ok(PromptIngest::Continue(metrics));
-        }
-
-        if self.memory_config.topic_auto_create {
-            let topic_id = self.memory.select_scoped_topic(
-                prompt,
-                &self.history,
-                &self.memory_config.active_branch,
-            );
-            self.activate_topic_file(topic_id.as_str(), prompt)?;
-            return Ok(PromptIngest::Continue(metrics));
-        }
-
-        Ok(PromptIngest::TopicNotFound {
-            metrics,
-            message: topic_not_found_message(&decision.reason),
-        })
-    }
-
-    fn activate_topic_file(&mut self, topic_id: &str, prompt: &str) -> Result<(), AppError> {
-        let topic_id = topic_id.trim();
-        if topic_id.is_empty() {
-            return Ok(());
-        }
-        self.memory_config.active_branch = topic_id.to_string();
-        let loaded = self
-            .topic_store
-            .as_ref()
-            .map(|store| store.load_topic_file(topic_id))
-            .transpose()?
-            .flatten();
-        let topic_file = loaded.unwrap_or_else(|| {
-            let config = self.memory_config.clone();
-            self.memory
-                .topic_file_from_branch_history(topic_id, prompt, &self.history, &config)
-        });
-        self.memory.active_topic_file = Some(topic_file);
-        Ok(())
-    }
-
-    fn update_active_topic_file(&mut self, prompt: &str, answer: &str) -> Result<(), AppError> {
-        if self.memory_config.strategy != MemoryStrategy::ScopedBranches
-            || !self.memory_config.topic_file_routing
-        {
-            return Ok(());
-        }
-        self.memory.update_active_topic_file(prompt, answer);
-        if let (Some(store), Some(topic_file)) = (
-            self.topic_store.as_ref(),
-            self.memory.active_topic_file.as_ref(),
-        ) {
-            store.save_topic_file(topic_file)?;
-        }
-        Ok(())
-    }
-
-    async fn update_sticky_facts(
-        &mut self,
-        client: &dyn ProviderClient,
-        prompt: &str,
-    ) -> Option<RequestMetrics> {
-        let extraction_prompt = self.memory_config.facts_extraction_prompt.trim();
-        if extraction_prompt.is_empty() {
-            self.memory.update_facts_from_user_message(prompt);
-            return None;
-        }
-        let existing_facts =
-            serde_json::to_string(&self.memory.facts).unwrap_or_else(|_| "{}".to_string());
-        let request = ChatRequest {
-            model: self.profile.model.clone(),
-            messages: vec![
-                ChatMessage {
-                    role: Role::System,
-                    content: extraction_prompt.to_string(),
-                },
-                ChatMessage {
-                    role: Role::User,
-                    content: format!(
-                        "Existing facts JSON:\n{existing_facts}\n\nLatest user message:\n{prompt}\n\nReturn JSON object with fact updates only."
-                    ),
-                },
-            ],
-            control: memory_facts_extraction_control(),
-            pricing: self.pricing.clone(),
-            billing: self.billing.clone(),
-        };
-        let result = timeout(
-            MEMORY_FACTS_EXTRACT_TIMEOUT,
-            client.chat_completion(&self.profile, &self.token, request),
-        )
-        .await;
-        let Ok(Ok(response)) = result else {
-            self.memory.update_facts_from_user_message(prompt);
-            return None;
-        };
-        if let Some(facts) = parse_extracted_facts(response.text.as_str()) {
-            if facts.is_empty() {
-                return Some(response.metrics);
-            }
-            self.memory.merge_extracted_facts_with_layers(
-                facts
-                    .into_iter()
-                    .map(|fact| (fact.key, fact.value, fact.layer)),
-            );
-        } else {
-            self.memory.update_facts_from_user_message(prompt);
-        }
-        Some(response.metrics)
-    }
-
-    /// Run the stateful post-processing for one completed turn: fill profile
-    /// fields from the user's message, advance the task-stage FSM, and check the
-    /// response against the invariants. Each step is gated on the relevant data
-    /// being configured, so an ad-hoc (non-agent) chat pays nothing here. Returns
-    /// a report for the debug view. Internal state (profile, task stage,
-    /// violations) is mutated in place; the web layer persists it afterwards.
-    pub async fn stateful_postprocess(
-        &mut self,
-        client: &dyn ProviderClient,
-        user_prompt: &str,
-        answer: &str,
-    ) -> StatefulReport {
-        let mut report = StatefulReport::default();
-
-        if self.agent_profile.is_some()
-            && let Some(metrics) = self.fill_profile_from_message(client, user_prompt).await
-        {
-            report.metrics = Some(metrics);
-        }
-        if let Some(profile) = self.agent_profile.as_ref() {
-            report.pending_questions = profile
-                .pending_required()
-                .into_iter()
-                .map(|field| {
-                    let question = field.question.trim();
-                    if question.is_empty() {
-                        field.key.clone()
-                    } else {
-                        question.to_string()
-                    }
-                })
-                .collect();
-        }
-
-        if self.task_state.is_some() {
-            self.capture_task_progress(user_prompt, answer);
-            self.apply_pause_resume_intent(user_prompt, answer);
-            let (transition, metrics) = self.advance_task_state(client, user_prompt, answer).await;
-            if let Some(task) = self.task_state.as_ref() {
-                report.stage = Some(task.stage);
-                report.current_step = task.current_step.clone();
-                report.expected_action = task.expected_action.clone();
-                report.paused = task.paused;
-                report.resume_hint = task.resume_hint.clone();
-            }
-            report.stage_transition = transition;
-            report.metrics = merge_optional_metrics(report.metrics, metrics);
-        }
-
-        if !self.invariants.is_empty() {
-            let (violations, metrics) = self.check_invariants(client, answer).await;
-            report.violations = violations.clone();
-            report.metrics = merge_optional_metrics(report.metrics, metrics);
-            if let Some(task) = self.task_state.as_mut() {
-                task.violations = violations;
-            }
-        }
-
-        report
-    }
-
-    /// LLM extraction guided by the profile schema: map the user's latest message
-    /// onto known field keys and store any values it reveals.
-    async fn fill_profile_from_message(
-        &mut self,
-        client: &dyn ProviderClient,
-        user_prompt: &str,
-    ) -> Option<RequestMetrics> {
-        let profile = self.agent_profile.as_ref()?;
-        if profile.fields.is_empty() {
-            return None;
-        }
-        let schema = profile
-            .fields
-            .iter()
-            .map(|field| format!("- {} (question: {})", field.key, field.question.trim()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let request = ChatRequest {
-            model: self.profile.model.clone(),
-            messages: vec![
-                ChatMessage {
-                    role: Role::System,
-                    content: "You extract profile field values from a user message. Only return values the user actually stated. Reply with a JSON object mapping field keys to string values; omit fields not mentioned. No prose.".to_string(),
-                },
-                ChatMessage {
-                    role: Role::User,
-                    content: format!(
-                        "Profile fields:\n{schema}\n\nUser message:\n{user_prompt}\n\nReturn JSON of {{key: value}} for fields the user just provided."
-                    ),
-                },
-            ],
-            control: memory_facts_extraction_control(),
-            pricing: self.pricing.clone(),
-            billing: self.billing.clone(),
-        };
-        let result = timeout(
-            STATEFUL_STEP_TIMEOUT,
-            client.chat_completion(&self.profile, &self.token, request),
-        )
-        .await;
-        let Ok(Ok(response)) = result else {
-            return None;
-        };
-        let updates = parse_profile_updates(response.text.as_str());
-        if let Some(profile) = self.agent_profile.as_mut() {
-            let mut changed = false;
-            for (key, value) in updates {
-                if value.trim().is_empty() || looks_sensitive(&value) {
-                    continue;
-                }
-                if let Some(field) = profile.fields.iter_mut().find(|field| field.key == key) {
-                    field.value = value.trim().to_string();
-                    changed = true;
-                }
-            }
-            if changed {
-                profile.updated_at_unix = crate::chat::unix_now();
-            }
-        }
-        Some(response.metrics)
-    }
-
-    /// Ask the model which formal state best fits the dialog now, then apply it
-    /// only if the task-state FSM allows the transition. Illegal stage proposals
-    /// are rejected, but step/action metadata can still be refreshed.
-    async fn advance_task_state(
-        &mut self,
-        client: &dyn ProviderClient,
-        user_prompt: &str,
-        answer: &str,
-    ) -> (Option<StageTransition>, Option<RequestMetrics>) {
-        let (current, paused, current_step, expected_action, resume_hint, has_pipeline) =
-            match self.task_state.as_ref() {
-                Some(task) => (
-                    task.stage,
-                    task.paused,
-                    task.current_step.clone(),
-                    task.expected_action.clone(),
-                    task.resume_hint.clone(),
-                    !task.pipeline.is_empty(),
-                ),
-                None => return (None, None),
-            };
-        if paused {
-            return (None, None);
-        }
-        let allowed = current.allowed_next();
-        if allowed.is_empty() {
-            return (None, None);
-        }
-        let options = TaskStage::ORDERED
-            .iter()
-            .map(TaskStage::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let allowed_options = allowed
-            .iter()
-            .map(TaskStage::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let request = ChatRequest {
-            model: self.profile.model.clone(),
-            messages: vec![
-                ChatMessage {
-                    role: Role::System,
-                    content: format!(
-                        "You track a task as a finite state machine. Stages: {options}. Allowed next stages from the current stage: {allowed_options}. Given the latest exchange, decide the formal state the work is in NOW. Reply with JSON {{\"stage\":\"<stage>\",\"current_step\":\"<specific active step>\",\"expected_action\":\"user_input|agent_work|tool_result|validation|none|<short string>\",\"resume_hint\":\"<short continuation hint>\",\"artifact_key\":\"<completed pipeline artifact key if any>\",\"artifact\":\"<completed pipeline artifact summary if any>\",\"reason\":\"...\"}}. Prefer staying in the current stage unless the exchange clearly moved it through an allowed transition or completed the task. If a pipeline stage produced its required artifact, include artifact_key and artifact so the deterministic pipeline can advance or pause for human approval."
-                    ),
-                },
-                ChatMessage {
-                    role: Role::User,
-                    content: format!(
-                        "Current state:\nstage: {current}\ncurrent_step: {current_step}\nexpected_action: {expected_action}\npaused: false\nresume_hint: {resume_hint}\n\nUser:\n{user_prompt}\n\nAssistant:\n{answer}"
-                    ),
-                },
-            ],
-            control: topic_classifier_control(),
-            pricing: self.pricing.clone(),
-            billing: self.billing.clone(),
-        };
-        let deterministic = if has_pipeline {
-            None
-        } else {
-            infer_task_state_from_exchange(current, user_prompt, answer)
-        };
-        let result = timeout(
-            STATEFUL_STEP_TIMEOUT,
-            client.chat_completion(&self.profile, &self.token, request),
-        )
-        .await;
-        let (proposed, metrics) = match result {
-            Ok(Ok(response)) => {
-                let parsed = parse_proposed_task_state(response.text.as_str());
-                let proposed = match (parsed, deterministic) {
-                    (Some(parsed), Some(deterministic))
-                        if parsed.stage == current
-                            && parsed.artifact_key.trim().is_empty()
-                            && parsed.artifact_value.trim().is_empty() =>
-                    {
-                        deterministic
-                    }
-                    (Some(parsed), _) => parsed,
-                    (None, Some(deterministic)) => deterministic,
-                    (None, None) => return (None, Some(response.metrics)),
-                };
-                (proposed, Some(response.metrics))
-            }
-            _ => match deterministic {
-                Some(proposed) => (proposed, None),
-                None => return (None, None),
-            },
-        };
-
-        if let Some(task) = self.task_state.as_mut() {
-            task.set_progress(proposed.current_step, proposed.expected_action);
-            if !proposed.resume_hint.trim().is_empty() {
-                task.resume_hint = proposed.resume_hint;
-            }
-            if (!proposed.artifact_key.trim().is_empty()
-                || !proposed.artifact_value.trim().is_empty())
-                && let Some(advance) =
-                    task.complete_pipeline_stage(proposed.artifact_key, proposed.artifact_value)
-            {
-                return (
-                    Some(StageTransition {
-                        from: advance.from,
-                        to: advance.to,
-                        accepted: advance.accepted,
-                    }),
-                    metrics,
-                );
-            }
-        }
-
-        if proposed.stage == current {
-            return (None, metrics);
-        }
-        let accepted = current.can_transition(proposed.stage);
-        if accepted && let Some(task) = self.task_state.as_mut() {
-            task.stage = proposed.stage;
-        }
-        (
-            Some(StageTransition {
-                from: current,
-                to: proposed.stage,
-                accepted,
-            }),
-            metrics,
-        )
-    }
-
-    fn apply_pause_resume_intent(&mut self, user_prompt: &str, answer: &str) {
-        let Some(task) = self.task_state.as_mut() else {
-            return;
-        };
-        let prompt = user_prompt.trim().to_lowercase();
-        if task.paused
-            && (prompt.contains("resume")
-                || prompt.contains("continue")
-                || prompt.contains("approve")
-                || prompt.contains("approved")
-                || prompt.contains("ok")
-                || prompt.contains("okay")
-                || prompt.contains("продолж")
-                || prompt.contains("возобнов")
-                || prompt.contains("утвержд")
-                || prompt.contains("одобря")
-                || prompt.contains("ок")
-                || paused_user_supplied_next_info(&prompt))
-        {
-            if !task.approve_pipeline_pause() {
-                task.resume();
-            }
-            return;
-        }
-        if !task.paused
-            && (prompt.contains("pause")
-                || prompt.contains("paused")
-                || prompt.contains("пауз")
-                || prompt.contains("поставь на паузу")
-                || prompt.contains("приостанов")
-                || prompt.contains("останов")
-                || prompt.contains("вернусь позже")
-                || prompt.contains("потом продолжим"))
-        {
-            let hint = task_resume_hint(task, user_prompt, answer);
-            task.pause(hint);
-        }
-    }
-
-    fn capture_task_progress(&mut self, user_prompt: &str, answer: &str) {
-        let Some(task) = self.task_state.as_mut() else {
-            return;
-        };
-        let prompt = user_prompt.trim();
-        if prompt.is_empty() {
-            return;
-        }
-        if task.goal.trim().is_empty() {
-            task.goal = prompt.to_string();
-        }
-        if task.title.trim().is_empty() {
-            task.title = task_title_from_prompt(prompt);
-        }
-        if let Some(decision) = task_decision_from_exchange(prompt, answer)
-            && !task.results.iter().any(|item| item == &decision)
-        {
-            task.results.push(decision);
-        }
-    }
-
-    /// Validate the response against the invariants in code (via a cheap LLM
-    /// check). Returns the list of violated invariants (empty = clean).
-    async fn check_invariants(
-        &self,
-        client: &dyn ProviderClient,
-        answer: &str,
-    ) -> (Vec<String>, Option<RequestMetrics>) {
-        if self.invariants.is_empty() {
-            return (Vec::new(), None);
-        }
-        let list = self
-            .invariants
-            .iter()
-            .enumerate()
-            .map(|(index, line)| format!("{}. {line}", index + 1))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let request = ChatRequest {
-            model: self.profile.model.clone(),
-            messages: vec![
-                ChatMessage {
-                    role: Role::System,
-                    content: "You are a strict invariant checker. Return ONLY constraints the assistant response CLEARLY and CONCRETELY breaks — e.g. it recommends or produces something a constraint forbids. Asking questions, clarifying, planning, or simply not mentioning a constraint is NOT a violation. When in doubt, return nothing. Reply with JSON {\"violations\":[\"<exact constraint text>\", ...]}; empty array if the response is fine. No prose.".to_string(),
-                },
-                ChatMessage {
-                    role: Role::User,
-                    content: format!("Constraints:\n{list}\n\nAssistant response:\n{answer}\n\nWhich constraints (if any) does this response actually violate?"),
-                },
-            ],
-            control: topic_classifier_control(),
-            pricing: self.pricing.clone(),
-            billing: self.billing.clone(),
-        };
-        let result = timeout(
-            STATEFUL_STEP_TIMEOUT,
-            client.chat_completion(&self.profile, &self.token, request),
-        )
-        .await;
-        let Ok(Ok(response)) = result else {
-            return (Vec::new(), None);
-        };
-        (
-            parse_invariant_violations(response.text.as_str()),
-            Some(response.metrics),
-        )
-    }
-
-    fn apply_context_storage_policy(&mut self) {
-        self.memory
-            .apply_scoped_branch_storage_policy(&mut self.history, &self.memory_config);
-    }
-
-    async fn refresh_memory_with_timeout(
-        &mut self,
-        client: &dyn ProviderClient,
-    ) -> Option<crate::providers::RequestMetrics> {
-        timeout(MEMORY_COMPACT_TIMEOUT, self.refresh_memory(client))
-            .await
-            .ok()
-            .flatten()
-    }
-
-    async fn refresh_memory(
-        &mut self,
-        client: &dyn ProviderClient,
-    ) -> Option<crate::providers::RequestMetrics> {
-        let range = self
-            .memory
-            .next_summary_range(&self.history, &self.memory_config)?;
-        self.compact_history_range(client, range).await
-    }
-
-    async fn precompact_before_request(
-        &mut self,
-        client: &dyn ProviderClient,
-        prompt: &str,
-    ) -> Option<crate::providers::RequestMetrics> {
-        if self.memory_config.strategy != MemoryStrategy::Summary {
-            return None;
-        }
-        timeout(
-            PREFLIGHT_COMPACT_TIMEOUT,
-            self.precompact_for_context_pressure(client, prompt),
-        )
-        .await
-        .ok()
-        .flatten()
-    }
-
-    async fn precompact_for_context_pressure(
-        &mut self,
-        client: &dyn ProviderClient,
-        prompt: &str,
-    ) -> Option<crate::providers::RequestMetrics> {
-        let threshold = self.preflight_summary_threshold()?;
-        let mut accumulated = None;
-        let mut previous_tokens = None;
-
-        for _ in 0..MAX_PREFLIGHT_SUMMARY_PASSES {
-            let request = self.request_with_user_prompt(prompt.to_string());
-            let request_tokens = estimate_messages_tokens(&request.messages);
-            if request_tokens < threshold {
-                break;
-            }
-            if previous_tokens.is_some_and(|tokens| request_tokens >= tokens) {
-                break;
-            }
-            let range = self.memory.next_summary_range_for_pressure(
-                &self.history,
-                &self.memory_config,
-                self.memory_config.recent_messages,
-            )?;
-            let metrics = self.compact_history_range(client, range).await?;
-            accumulated = Some(match accumulated {
-                Some(current) => crate::chat::add_request_metrics(&current, &metrics),
-                None => metrics,
-            });
-            previous_tokens = Some(request_tokens);
-        }
-
-        accumulated
-    }
-
-    fn preflight_summary_threshold(&self) -> Option<u32> {
-        let context_limit = self.context_limit?;
-        let reserved_output = self
-            .control
-            .max_completion_tokens
-            .or(self.control.max_tokens)
-            .unwrap_or(0);
-        let available_input = context_limit.saturating_sub(reserved_output);
-        if available_input == 0 {
-            return None;
-        }
-        Some(
-            available_input
-                .saturating_mul(u32::from(self.memory_config.summarize_at_context_percent))
-                / 100,
-        )
-    }
-
-    async fn compact_history_range(
-        &mut self,
-        client: &dyn ProviderClient,
-        range: std::ops::Range<usize>,
-    ) -> Option<crate::providers::RequestMetrics> {
-        let messages_to_summarize = format_messages_for_summary(&self.history[range.clone()]);
-        if messages_to_summarize.trim().is_empty() {
-            self.memory.summarized_message_count = range.end;
-            return None;
-        }
-        let previous_summary = self
-            .memory
-            .session_summary
-            .as_deref()
-            .unwrap_or("No previous summary.");
-        let summary_prompt = self.memory_config.summary_prompt.trim();
-        let summary_prompt = if summary_prompt.is_empty() {
-            super::memory::DEFAULT_SUMMARY_PROMPT
-        } else {
-            summary_prompt
-        };
-        let summary_request = ChatRequest {
-            model: self.profile.model.clone(),
-            messages: vec![
-                ChatMessage {
-                    role: Role::System,
-                    content: summary_prompt.to_string(),
-                },
-                ChatMessage {
-                    role: Role::User,
-                    content: format!(
-                        "Previous memory summary:\n{previous_summary}\n\nNew chat fragment to merge:\n{messages_to_summarize}\n\nReturn the updated memory summary."
-                    ),
-                },
-            ],
-            control: memory_summary_control(),
-            pricing: self.pricing.clone(),
-            billing: self.billing.clone(),
-        };
-        if let Ok(response) = client
-            .chat_completion(&self.profile, &self.token, summary_request)
-            .await
-        {
-            let summary = response.text.trim();
-            if !summary.is_empty() {
-                self.memory.session_summary = Some(summary.to_string());
-                self.memory.summarized_message_count = range.end;
-                return Some(response.metrics);
-            }
-        }
-        None
-    }
 }
 
-fn memory_summary_control() -> ResponseControl {
+pub(crate) fn memory_summary_control() -> ResponseControl {
     let mut control = ResponseControl::uncontrolled();
     control.temperature = Some(0.2);
     control.max_tokens = Some(700);
     control
 }
 
-fn memory_facts_extraction_control() -> ResponseControl {
+pub(crate) fn memory_facts_extraction_control() -> ResponseControl {
     let mut control = ResponseControl::uncontrolled();
     control.temperature = Some(0.0);
     control.max_tokens = Some(500);
     control
 }
 
-fn topic_classifier_control() -> ResponseControl {
+pub(crate) fn topic_classifier_control() -> ResponseControl {
     let mut control = ResponseControl::uncontrolled();
     control.temperature = Some(0.0);
     control.max_tokens = Some(250);
     control
 }
 
-fn parse_topic_route_decision(text: &str) -> Option<TopicRouteDecision> {
+pub(crate) fn parse_topic_route_decision(text: &str) -> Option<TopicRouteDecision> {
     let value: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
     let object = value.as_object()?;
     let found = object.get("found")?.as_bool()?;
@@ -1245,7 +558,7 @@ fn parse_topic_route_decision(text: &str) -> Option<TopicRouteDecision> {
     })
 }
 
-fn topic_not_found_message(reason: &str) -> String {
+pub(crate) fn topic_not_found_message(reason: &str) -> String {
     let reason = reason.trim();
     if reason.is_empty() {
         "Не нашёл подходящий topic-файл для этого сообщения. Контекст другой темы не подгружал."
@@ -1257,7 +570,7 @@ fn topic_not_found_message(reason: &str) -> String {
     }
 }
 
-fn local_chat_response(text: String, metrics: Option<RequestMetrics>) -> ChatResponse {
+pub(crate) fn local_chat_response(text: String, metrics: Option<RequestMetrics>) -> ChatResponse {
     ChatResponse {
         text,
         finish_reason: Some("topic_not_found".to_string()),
@@ -1265,7 +578,7 @@ fn local_chat_response(text: String, metrics: Option<RequestMetrics>) -> ChatRes
     }
 }
 
-fn local_provider_debug() -> ProviderExchangeDebug {
+pub(crate) fn local_provider_debug() -> ProviderExchangeDebug {
     ProviderExchangeDebug {
         request: crate::providers::HttpDebugRequest {
             method: "LOCAL".to_string(),
@@ -1297,7 +610,7 @@ pub(crate) struct ExtractedFact {
 /// * `[{"key","value","layer"}]` — bare array.
 /// * `{"key":{"value":"...","layer":"..."}}` — object of rich entries.
 /// * `{"key":"value"}` — legacy flat object (no layer → default routing).
-fn parse_extracted_facts(text: &str) -> Option<Vec<ExtractedFact>> {
+pub(crate) fn parse_extracted_facts(text: &str) -> Option<Vec<ExtractedFact>> {
     let value: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
     let entries = match &value {
         serde_json::Value::Array(items) => return Some(facts_from_entry_array(items)),
@@ -1372,7 +685,7 @@ fn parse_fact_layer(value: &serde_json::Value) -> Option<MemoryLayer> {
     value.as_str()?.parse::<MemoryLayer>().ok()
 }
 
-fn task_title_from_prompt(prompt: &str) -> String {
+pub(crate) fn task_title_from_prompt(prompt: &str) -> String {
     let cleaned = prompt
         .lines()
         .map(str::trim)
@@ -1391,7 +704,7 @@ fn task_title_from_prompt(prompt: &str) -> String {
     title
 }
 
-fn task_decision_from_exchange(user_prompt: &str, answer: &str) -> Option<String> {
+pub(crate) fn task_decision_from_exchange(user_prompt: &str, answer: &str) -> Option<String> {
     let user_lower = user_prompt.to_lowercase();
     let answer_lower = answer.to_lowercase();
     let is_approval = ["утверждаем", "самое то", "выбор сделан", "останавливаемся"]
@@ -1417,11 +730,28 @@ fn task_decision_from_exchange(user_prompt: &str, answer: &str) -> Option<String
     Some(format!("Approved decision: {candidate}"))
 }
 
-fn infer_task_state_from_exchange(
+fn contains_any_agent(value: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| value.contains(needle))
+}
+
+/// Deterministic task-state inferred from one exchange (keyword-based, no LLM).
+/// Used by the orchestrator to keep stage + progress fields tracking the user's
+/// actual request.
+#[derive(Debug, Clone)]
+pub(crate) struct InferredTaskState {
+    pub(crate) stage: TaskStage,
+    pub(crate) current_step: String,
+    pub(crate) expected_action: String,
+    pub(crate) resume_hint: String,
+}
+
+/// Map the latest exchange to a task stage + progress fields by intent keywords.
+/// Returns `None` when nothing clearly indicates a stage.
+pub(crate) fn infer_task_state_from_exchange(
     current: TaskStage,
     user_prompt: &str,
     answer: &str,
-) -> Option<ProposedTaskState> {
+) -> Option<InferredTaskState> {
     let user = user_prompt.to_lowercase();
     let combined = format!("{user}\n{}", answer.to_lowercase());
     let wants_done = contains_any_agent(
@@ -1433,6 +763,7 @@ fn infer_task_state_from_exchange(
             "готово",
             "следующие действия",
             "что готово",
+            "что отправ",
             "final",
             "summary",
             "done",
@@ -1444,6 +775,7 @@ fn infer_task_state_from_exchange(
             "проверь",
             "провер",
             "риски",
+            "слабые места",
             "не хватает",
             "нельзя утверждать",
             "валидац",
@@ -1457,6 +789,8 @@ fn infer_task_state_from_exchange(
             "составь",
             "подготовь",
             "напиши",
+            "набросать",
+            "набросай",
             "черновик",
             "шаблон",
             "сформируй",
@@ -1512,47 +846,41 @@ fn infer_task_state_from_exchange(
 
     let (current_step, expected_action, resume_hint) = match stage {
         TaskStage::Clarify => (
-            "уточнить недостающие факты".to_string(),
-            "user_input".to_string(),
-            "продолжить с уточнения фактов задачи".to_string(),
+            "уточнить недостающие факты",
+            "user_input",
+            "продолжить с уточнения фактов задачи",
         ),
         TaskStage::Planning => (
-            "составить план действий и список нужных документов".to_string(),
-            "agent_work".to_string(),
-            "продолжить с плана и недостающих данных".to_string(),
+            "составить план действий и список нужных документов",
+            "agent_work",
+            "продолжить с плана и недостающих данных",
         ),
         TaskStage::Execution => (
-            "подготовить рабочий черновик результата".to_string(),
-            "agent_work".to_string(),
-            "продолжить с подготовки черновика".to_string(),
+            "подготовить рабочий черновик результата",
+            "agent_work",
+            "продолжить с подготовки черновика",
         ),
         TaskStage::Validation => (
-            "проверить риски, пробелы и ограничения".to_string(),
-            "validation".to_string(),
-            "продолжить с проверки рисков и недостающих данных".to_string(),
+            "проверить риски, пробелы и ограничения",
+            "validation",
+            "продолжить с проверки рисков и недостающих данных",
         ),
         TaskStage::Done => (
-            "зафиксировать итог и следующие действия".to_string(),
-            "none".to_string(),
-            "задача завершена".to_string(),
+            "зафиксировать итог и следующие действия",
+            "none",
+            "задача завершена",
         ),
     };
 
-    Some(ProposedTaskState {
+    Some(InferredTaskState {
         stage,
-        current_step,
-        expected_action,
-        resume_hint,
-        artifact_key: String::new(),
-        artifact_value: String::new(),
+        current_step: current_step.to_string(),
+        expected_action: expected_action.to_string(),
+        resume_hint: resume_hint.to_string(),
     })
 }
 
-fn contains_any_agent(value: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| value.contains(needle))
-}
-
-fn paused_user_supplied_next_info(prompt: &str) -> bool {
+pub(crate) fn paused_user_supplied_next_info(prompt: &str) -> bool {
     contains_any_agent(
         prompt,
         &[
@@ -1578,16 +906,6 @@ pub struct StageTransition {
     pub from: TaskStage,
     pub to: TaskStage,
     pub accepted: bool,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct ProposedTaskState {
-    stage: TaskStage,
-    current_step: String,
-    expected_action: String,
-    resume_hint: String,
-    artifact_key: String,
-    artifact_value: String,
 }
 
 /// Result of one turn's stateful post-processing, surfaced to the debug view.
@@ -1707,7 +1025,7 @@ fn parse_profile_schema(text: &str) -> Vec<ProfileField> {
 }
 
 /// Parse `{key: value}` profile updates from the fill-extraction response.
-fn parse_profile_updates(text: &str) -> Vec<(String, String)> {
+pub(crate) fn parse_profile_updates(text: &str) -> Vec<(String, String)> {
     let Some(serde_json::Value::Object(map)) = extract_json_value(text) else {
         return Vec::new();
     };
@@ -1716,48 +1034,8 @@ fn parse_profile_updates(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-fn parse_proposed_task_state(text: &str) -> Option<ProposedTaskState> {
-    let value = extract_json_value(text)?;
-    let object = value.as_object()?;
-    let stage = object.get("stage")?.as_str()?.parse().ok()?;
-    Some(ProposedTaskState {
-        stage,
-        current_step: object
-            .get("current_step")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default()
-            .trim()
-            .to_string(),
-        expected_action: object
-            .get("expected_action")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default()
-            .trim()
-            .to_string(),
-        resume_hint: object
-            .get("resume_hint")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default()
-            .trim()
-            .to_string(),
-        artifact_key: object
-            .get("artifact_key")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default()
-            .trim()
-            .to_string(),
-        artifact_value: object
-            .get("artifact")
-            .or_else(|| object.get("artifact_value"))
-            .and_then(|value| value.as_str())
-            .unwrap_or_default()
-            .trim()
-            .to_string(),
-    })
-}
-
 /// Parse `{"violations":[...]}` into a list of violated-constraint strings.
-fn parse_invariant_violations(text: &str) -> Vec<String> {
+pub(crate) fn parse_invariant_violations(text: &str) -> Vec<String> {
     let Some(value) = extract_json_value(text) else {
         return Vec::new();
     };
@@ -1777,6 +1055,178 @@ fn parse_invariant_violations(text: &str) -> Vec<String> {
         .filter(|item| !item.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+pub(crate) fn local_invariant_violations(invariants: &[String], answer: &str) -> Vec<String> {
+    let answer_lower = answer.to_lowercase();
+    let has_legal_citation = contains_any_agent(
+        &answer_lower,
+        &["ст.", "статья", "гк рф", "апк рф", "фз", "коап", "ук рф"],
+    );
+    let has_fact_assumption_split =
+        answer_lower.contains("факт") && answer_lower.contains("предполож");
+    let has_risk_and_documents = answer_lower.contains("риск")
+        && (answer_lower.contains("документ")
+            || answer_lower.contains("недоста")
+            || answer_lower.contains("не хватает"));
+    let has_urgency = answer_lower.contains("сроч") || answer_lower.contains("не затяг");
+    let has_cyrillic = answer_lower.chars().any(|ch| matches!(ch, 'а'..='я' | 'ё'));
+    invariants
+        .iter()
+        .filter_map(|invariant| {
+            let normalized = invariant.to_lowercase();
+            let violated =
+                (normalized.contains("отвечать") && normalized.contains("рус") && !has_cyrillic)
+                    || (normalized.contains("не выдумывать")
+                        && normalized.contains("норм")
+                        && has_legal_citation)
+                    || (normalized.contains("отделять факты")
+                        && normalized.contains("предполож")
+                        && !has_fact_assumption_split)
+                    || (normalized.contains("недоста")
+                        && normalized.contains("риск")
+                        && !has_risk_and_documents)
+                    || (normalized.contains("сроч")
+                        && normalized.contains("риск")
+                        && answer_lower.contains("суд")
+                        && !has_urgency)
+                    || (normalized.contains("не называть")
+                        && normalized.contains("юридическим заключением")
+                        && answer_lower.contains("юридическое заключение"));
+            violated.then(|| invariant.clone())
+        })
+        .collect()
+}
+
+/// Last-resort guard for legal-agent answers. If a model keeps asserting an
+/// unverified legal rule after bounded retries, replace the unsafe line with a
+/// transparent verification note instead of returning the violation.
+pub(crate) fn sanitize_unverified_legal_claims(
+    invariants: &[String],
+    answer: &str,
+    known_user_context: &str,
+) -> String {
+    let requires_verified_norms = invariants.iter().any(|invariant| {
+        let normalized = invariant.to_lowercase();
+        normalized.contains("не выдумывать") && normalized.contains("норм")
+    });
+    if !requires_verified_norms {
+        return answer.to_string();
+    }
+
+    let mut sanitized = answer.to_string();
+    for year in unverified_years(answer, known_user_context) {
+        sanitized = sanitized.replace(&year, "[год]");
+    }
+
+    let mut replaced = false;
+    let mut lines = Vec::new();
+    for line in sanitized.lines() {
+        let lower = line.to_lowercase();
+        let has_unknown_number = numeric_tokens(&lower)
+            .into_iter()
+            .any(|number| !known_user_context.contains(&number));
+        if lower.contains("с момента получения")
+            && lower.contains("претензи")
+            && lower.chars().any(|ch| ch.is_ascii_digit())
+        {
+            lines.push(
+                "1. В течение [срок требования] с момента получения настоящей претензии перечислить задолженность по указанным реквизитам."
+                    .to_string(),
+            );
+            continue;
+        }
+        if lower.contains("акт")
+            && lower.contains("например")
+            && lower.chars().any(|ch| ch.is_ascii_digit())
+        {
+            lines
+                .push("Акт приёма-передачи подписан сторонами [дата подписания акта].".to_string());
+            continue;
+        }
+        let has_citation = contains_any_agent(
+            &lower,
+            &["ст.", "статья", "гк рф", "апк рф", "фз", "коап", "ук рф"],
+        );
+        let has_unverified_legal_number = (lower.contains("госпошлин")
+            || lower.contains("судебн") && lower.contains("приказ")
+            || lower.contains("срок хранения")
+            || lower.contains("срок исковой")
+            || lower.contains("досудебн") && lower.contains("обязател")
+            || lower.contains("срок") && lower.contains("дн")
+            || lower.contains("процент") && lower.contains("ставк")
+            || lower.contains("требован") && lower.contains("дн")
+            || lower.contains("потреб") && lower.contains("дн")
+            || lower.contains("оплатить") && lower.contains("дн")
+            || lower.contains("обычно") && lower.contains("дн")
+            || lower.contains("производств")
+            || lower.contains("подсудн"))
+            && has_unknown_number;
+        let has_unverified_legal_absolute =
+            (lower.contains("досудебн") || lower.contains("претензи") || lower.contains("суд"))
+                && (lower.contains("обязател")
+                    || lower.contains("оставит иск")
+                    || lower.contains("оставить иск")
+                    || lower.contains("без рассмотрения")
+                    || lower.contains("откаж")
+                    || lower.contains("не сможете")
+                    || lower.contains("только ценн")
+                    || lower.contains("только заказн"));
+        let has_unverified_timeline = lower.contains("год-полтора")
+            || lower.contains("полтора год")
+            || ((lower.contains("месяц") || lower.contains(" лет")) && has_unknown_number);
+        if has_citation
+            || has_unverified_legal_number
+            || has_unverified_legal_absolute
+            || has_unverified_timeline
+        {
+            if !replaced {
+                lines.push(
+                    "Применимую норму права, порядок взыскания и суммы санкций нужно проверить по договору и актуальной редакции закона."
+                        .to_string(),
+                );
+                replaced = true;
+            }
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    lines.join("\n")
+}
+
+fn numeric_tokens(value: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut digits = String::new();
+    for ch in value.chars().chain(std::iter::once(' ')) {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+        } else if !digits.is_empty() {
+            values.push(std::mem::take(&mut digits));
+        }
+    }
+    values
+}
+
+fn unverified_years(answer: &str, known_user_context: &str) -> Vec<String> {
+    let mut years = Vec::new();
+    let mut digits = String::new();
+    for ch in answer.chars().chain(std::iter::once(' ')) {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+            continue;
+        }
+        if digits.len() == 4
+            && digits
+                .parse::<u16>()
+                .is_ok_and(|year| (1900..=2100).contains(&year))
+            && !known_user_context.contains(&digits)
+            && !years.contains(&digits)
+        {
+            years.push(digits.clone());
+        }
+        digits.clear();
+    }
+    years
 }
 
 /// Best-effort JSON extraction: parse directly, else grab the first `{...}` or
@@ -1803,11 +1253,15 @@ fn extract_json_value(text: &str) -> Option<serde_json::Value> {
 /// Render the working-memory task block: stage FSM + plan as read-only context.
 /// Stage order is bookkeeping for the tracked task, not a gate on adjacent user
 /// requests in the same agent.
-fn render_task_block(task: &super::store::TaskContext) -> String {
+pub(crate) fn render_task_block(task: &super::store::TaskContext) -> String {
     let mut lines = vec![format!("Stage: {}", task.stage)];
     lines.push(format!("Paused: {}", task.paused));
     lines.push(
-        "Use this as background for the tracked task. Do not force the user to finish this task before helping with a new or adjacent request; start or continue the requested thread and keep this state as context."
+        "Use this as authoritative working memory for the tracked task. Treat fragmentary follow-up messages as continuation of this task unless the user clearly starts an unrelated one."
+            .to_string(),
+    );
+    lines.push(
+        "Process rules: work only inside the current stage/current step, do not skip stages, and let the task sub-agent advance the FSM only after the current stage output is actually produced."
             .to_string(),
     );
     if task.paused {
@@ -1941,7 +1395,11 @@ impl IfEmpty for str {
     }
 }
 
-fn task_resume_hint(task: &super::store::TaskContext, user_prompt: &str, answer: &str) -> String {
+pub(crate) fn task_resume_hint(
+    task: &super::store::TaskContext,
+    user_prompt: &str,
+    answer: &str,
+) -> String {
     let mut parts = Vec::new();
     if !task.current_step.trim().is_empty() {
         parts.push(format!("step={}", task.current_step.trim()));
@@ -1971,7 +1429,7 @@ fn task_resume_hint(task: &super::store::TaskContext, user_prompt: &str, answer:
 
 /// Render the long-term profile block: filled fields plus an explicit instruction
 /// to interview the user for any missing required fields.
-fn render_profile_block(profile: &super::store::AgentProfile) -> Option<String> {
+pub(crate) fn render_profile_block(profile: &super::store::AgentProfile) -> Option<String> {
     let filled: Vec<String> = profile
         .fields
         .iter()
@@ -2006,30 +1464,45 @@ fn render_profile_block(profile: &super::store::AgentProfile) -> Option<String> 
     Some(block)
 }
 
-fn render_user_profile_block(profile: &super::store::UserProfile) -> Option<String> {
+pub(crate) fn render_user_profile_block(
+    profile: &super::store::UserProfile,
+    seen_context: &[String],
+) -> Option<String> {
     let mut lines = Vec::new();
     let name = profile.display_name.trim();
-    if !name.is_empty() {
+    if !name.is_empty() && !context_value_seen(seen_context, name) {
         lines.push(format!("Profile: {name}"));
     }
-    push_profile_list(&mut lines, "Style preferences", &profile.style_preferences);
+    push_profile_list(
+        &mut lines,
+        "Style preferences",
+        &profile.style_preferences,
+        seen_context,
+    );
     push_profile_list(
         &mut lines,
         "Format preferences",
         &profile.format_preferences,
+        seen_context,
     );
-    push_profile_list(&mut lines, "User constraints", &profile.constraints);
+    push_profile_list(
+        &mut lines,
+        "User constraints",
+        &profile.constraints,
+        seen_context,
+    );
     push_profile_list(
         &mut lines,
         "Language preferences",
         &profile.language_preferences,
+        seen_context,
     );
     let response_length = profile.response_length.trim();
-    if !response_length.is_empty() {
+    if !response_length.is_empty() && !context_value_seen(seen_context, response_length) {
         lines.push(format!("Response length: {response_length}"));
     }
     let custom = profile.custom_instructions.trim();
-    if !custom.is_empty() {
+    if !custom.is_empty() && !context_value_seen(seen_context, custom) {
         lines.push(format!("Custom instructions: {custom}"));
     }
     if lines.is_empty() {
@@ -2045,15 +1518,51 @@ fn render_user_profile_block(profile: &super::store::UserProfile) -> Option<Stri
     ))
 }
 
-fn push_profile_list(lines: &mut Vec<String>, label: &str, values: &[String]) {
+fn push_profile_list(
+    lines: &mut Vec<String>,
+    label: &str,
+    values: &[String],
+    seen_context: &[String],
+) {
     let values: Vec<&str> = values
         .iter()
         .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.is_empty() && !context_value_seen(seen_context, value))
         .collect();
     if !values.is_empty() {
         lines.push(format!("{label}:\n- {}", values.join("\n- ")));
     }
+}
+
+pub(crate) fn remember_agent_profile_context(
+    seen: &mut Vec<String>,
+    profile: &super::store::AgentProfile,
+) {
+    for field in profile.fields.iter().filter(|field| field.is_filled()) {
+        remember_context_value(seen, &field.value);
+        remember_context_value(seen, &format!("{}: {}", field.key, field.value.trim()));
+    }
+}
+
+pub(crate) fn remember_context_value(seen: &mut Vec<String>, value: &str) {
+    let normalized = normalize_context_value(value);
+    if !normalized.is_empty() && !seen.iter().any(|item| item == &normalized) {
+        seen.push(normalized);
+    }
+}
+
+fn context_value_seen(seen: &[String], value: &str) -> bool {
+    let normalized = normalize_context_value(value);
+    !normalized.is_empty() && seen.iter().any(|item| item == &normalized)
+}
+
+fn normalize_context_value(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_matches(['-', '*', ':', ';', '.', ',', ' '])
+        .to_lowercase()
 }
 
 fn fact_value_to_string(value: &serde_json::Value) -> Option<String> {
@@ -2073,7 +1582,7 @@ fn fact_value_to_string(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn merge_optional_metrics(
+pub(crate) fn merge_optional_metrics(
     current: Option<RequestMetrics>,
     next: Option<RequestMetrics>,
 ) -> Option<RequestMetrics> {

@@ -1,6 +1,6 @@
 [package]
 name = "aiteach"
-version = "1.18.8"
+version = "1.21.1"
 edition = "2024"
 
 [[bin]]

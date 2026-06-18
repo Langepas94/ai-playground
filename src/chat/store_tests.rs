@@ -326,12 +326,8 @@ fn user_profile_resolution_priority_is_explicit_agent_default_then_active() {
 fn task_stage_transitions_enforced() {
     // Legal forward transitions.
     assert!(TaskStage::Clarify.can_transition(TaskStage::Planning));
-    assert!(TaskStage::Clarify.can_transition(TaskStage::Done));
     assert!(TaskStage::Planning.can_transition(TaskStage::Execution));
-    assert!(TaskStage::Planning.can_transition(TaskStage::Validation));
-    assert!(TaskStage::Planning.can_transition(TaskStage::Done));
     assert!(TaskStage::Execution.can_transition(TaskStage::Validation));
-    assert!(TaskStage::Execution.can_transition(TaskStage::Done));
     assert!(TaskStage::Validation.can_transition(TaskStage::Done));
     // Legal back-transitions.
     assert!(TaskStage::Execution.can_transition(TaskStage::Planning));
@@ -340,6 +336,10 @@ fn task_stage_transitions_enforced() {
     assert!(TaskStage::Planning.can_transition(TaskStage::Planning));
     // Illegal jumps are rejected.
     assert!(!TaskStage::Clarify.can_transition(TaskStage::Execution));
+    assert!(!TaskStage::Clarify.can_transition(TaskStage::Done));
+    assert!(!TaskStage::Planning.can_transition(TaskStage::Validation));
+    assert!(!TaskStage::Planning.can_transition(TaskStage::Done));
+    assert!(!TaskStage::Execution.can_transition(TaskStage::Done));
     assert!(!TaskStage::Done.can_transition(TaskStage::Planning));
     assert!(TaskStage::Done.allowed_next().is_empty());
     // Round-trips through its string form.

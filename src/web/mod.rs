@@ -20,9 +20,10 @@ use crate::{
     chat::memory::{MemoryConfig, MemoryLayer, MemoryStrategy},
     chat::{
         AgentMemory, ChatAgent, ConversationSession, LocalSessionStore, StatefulReport,
-        add_request_metrics, available_agents, selected_agent, web_session_key,
+        SwarmConfig, add_request_metrics, available_agents, resolve_swarm, selected_agent,
+        web_session_key,
     },
-    config::ProfileConfig,
+    config::{AppConfig, ProfileConfig},
     errors::AppError,
     pricing::{LiteLlmPriceCatalog, PriceCatalogStatus, PricingResolution},
     providers::{
@@ -307,6 +308,9 @@ async fn prepare_web_chat(
         request.saved_agent_id.as_deref(),
         session.id.as_str(),
         &mut agent,
+        &profile,
+        &token,
+        state.secrets.as_ref(),
     )?;
     apply_runtime_user_profile(
         &state.sessions,
@@ -456,16 +460,43 @@ async fn chat_stream(
 
     tokio::spawn(async move {
         let tx_token = tx.clone();
+        // Filter the stage-completion marker out of the live token stream: hold
+        // back the trailing partial line (the marker is emitted on its own last
+        // line), splitting only on '\n' so we never cut a multibyte char. The
+        // held-back tail is flushed (marker-stripped) once the stream ends.
+        let pending = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let marker = crate::chat::swarm::agents::STAGE_DONE_MARKER;
+        let pending_cb = pending.clone();
         let result = client
             .stream_chat_completion_with_debug(&profile, &token, chat_request, move |chunk| {
-                let _ = tx_token.send(chunk.to_string());
+                let mut buf = pending_cb.lock().expect("stream buffer");
+                buf.push_str(chunk);
+                if let Some(nl) = buf.rfind('\n') {
+                    let mut flush: String = buf.drain(..=nl).collect();
+                    if let Some(i) = flush.find(marker) {
+                        flush.replace_range(i..i + marker.len(), "");
+                    }
+                    let _ = tx_token.send(flush);
+                }
             })
             .await;
+        // Flush the final partial line, stripped of the marker.
+        {
+            let mut buf = pending.lock().expect("stream buffer");
+            if let Some(i) = buf.find(marker) {
+                buf.replace_range(i..i + marker.len(), "");
+            }
+            if !buf.is_empty() {
+                let _ = tx.send(std::mem::take(&mut buf));
+            }
+        }
         match result {
             Ok((response, provider_debug)) => {
-                let assistant_text = response.text.clone();
-                agent.record_stream_response(prompt.clone(), assistant_text.clone());
-                // Stateful post-processing on the completed turn.
+                // Finalize through the swarm: strips marker, commits the cleaned
+                // answer, advances the FSM, runs post agents. Returns clean text.
+                let (assistant_text, _stream_aux) = agent
+                    .finalize_stream(&client, &prompt, &response.text)
+                    .await;
                 let (agent_state, stateful_metrics) = run_and_persist_stateful(
                     &sessions,
                     saved_agent_id.as_deref(),
@@ -595,15 +626,32 @@ fn apply_saved_agent_memory(
     saved_agent_id: Option<&str>,
     session_id: &str,
     agent: &mut ChatAgent,
+    profile: &ProfileConfig,
+    token: &str,
+    secrets: &dyn SecretStore,
 ) -> Result<(), AppError> {
+    // Plain chats (no saved agent) still get the all-on/inherit swarm, so the
+    // Memory sub-agent keeps long-term memory fresh on every strategy.
+    let mut swarm_config = SwarmConfig::defaults();
     if let Some(id) = saved_agent_id.and_then(blank_str_to_none) {
         agent.set_task_state(Some(store.load_dialog_task(id, session_id)?));
         agent.set_agent_profile(Some(store.load_profile(id)?));
         if let Some(saved) = store.load_agent(id)? {
             agent.set_invariants(saved.invariants);
             agent.set_domain(saved.domain);
+            swarm_config = saved.swarm.normalized();
         }
     }
+    // Web has no persisted AppConfig; cross-provider sub-agent tokens are
+    // resolved from the keyring and fall back to the main token otherwise.
+    let resolved = resolve_swarm(
+        profile,
+        token,
+        &swarm_config,
+        &AppConfig::default(),
+        secrets,
+    );
+    agent.set_swarm(resolved);
     Ok(())
 }
 
@@ -637,12 +685,13 @@ async fn run_and_persist_stateful(
     Option<StatefulDebugView>,
     Option<crate::providers::RequestMetrics>,
 ) {
+    let _ = (client, user_prompt, answer);
     let Some(id) = saved_agent_id.and_then(blank_str_to_none) else {
         return (None, None);
     };
-    let report = agent
-        .stateful_postprocess(client, user_prompt, answer)
-        .await;
+    // The swarm orchestrator already ran the stateful turn (deterministic stage
+    // advance + invariant retry + profile fill). Read its report; do not re-run.
+    let report = agent.take_stateful_report();
     if let Some(task) = agent.task_state() {
         let _ = store.save_dialog_task(id, session_id, task);
     }
@@ -1044,10 +1093,11 @@ impl WebMemoryConfig {
         MemoryConfig {
             strategy: match self.strategy.as_deref() {
                 Some("summary") => MemoryStrategy::Summary,
+                Some("sliding-window") => MemoryStrategy::SlidingWindow,
                 Some("sticky-facts") => MemoryStrategy::StickyFacts,
                 Some("branching") => MemoryStrategy::Branching,
                 Some("scoped-branches") => MemoryStrategy::ScopedBranches,
-                _ => MemoryStrategy::SlidingWindow,
+                _ => defaults.strategy,
             },
             recent_messages: self.recent_messages.unwrap_or(defaults.recent_messages),
             summarize_after_messages: self

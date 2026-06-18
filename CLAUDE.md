@@ -20,7 +20,9 @@ rtk cargo fmt
 rtk cargo test
 ```
 
-- New task -> new branch.
+- If the current branch is `dev` or `main`, create a new branch before changing code or project files.
+- If the current branch is neither `dev` nor `main`, continue working in it and do not create another branch.
+- For builds, tests, diagnostics, reviews, and demo runs without changes, stay on the current branch.
 - Do not commit/merge without successful build.
 - Before committing user-visible changes, bump versions in both `Cargo.toml` files and `Cargo.lock`.
 - Version rule: patch for fixes/small internals, minor for compatible CLI/API features, major for breaking changes.

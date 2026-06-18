@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::chat::swarm::SwarmConfig;
 use crate::providers::{ChatMessage, Role};
 
 /// Profile-shared long-term facts. Persisted separately from the per-session
@@ -42,6 +43,11 @@ pub struct SavedAgent {
     pub invariants: Vec<String>,
     #[serde(default)]
     pub memory: SavedMemoryConfig,
+    /// Per-agent mandatory swarm: each logical chain (memory, summary, task,
+    /// ...) as a first-class sub-agent with its own model + prompt. Defaults to
+    /// all-on/inherit so old agents keep working.
+    #[serde(default = "SwarmConfig::defaults")]
+    pub swarm: SwarmConfig,
     #[serde(default)]
     pub created_at_unix: u64,
     #[serde(default)]
@@ -166,9 +172,9 @@ impl TaskStage {
     /// Stages reachable from `self`. Empty for the terminal stage.
     pub fn allowed_next(self) -> &'static [TaskStage] {
         match self {
-            TaskStage::Clarify => &[TaskStage::Planning, TaskStage::Done],
-            TaskStage::Planning => &[TaskStage::Execution, TaskStage::Validation, TaskStage::Done],
-            TaskStage::Execution => &[TaskStage::Validation, TaskStage::Planning, TaskStage::Done],
+            TaskStage::Clarify => &[TaskStage::Planning],
+            TaskStage::Planning => &[TaskStage::Execution],
+            TaskStage::Execution => &[TaskStage::Validation, TaskStage::Planning],
             TaskStage::Validation => &[TaskStage::Done, TaskStage::Execution],
             TaskStage::Done => &[],
         }

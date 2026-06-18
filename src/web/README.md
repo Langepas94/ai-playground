@@ -30,7 +30,7 @@
 | `POST` | `/api/chat` | Отправить prompt через `ChatAgent` |
 | `POST` | `/api/agent/chat/stream` | Streaming-ответ через SSE (`token`/`done`/`error`) |
 | `POST` | `/api/memory/update` | Ручное управление слоями памяти (set/delete/clear-layer), без provider-запроса |
-| `POST` | `/api/agents/manage` | Stateful-агенты + диалоги (list/load/save/delete/build-schema/dialogs/dialog-rename/dialog-delete) |
+| `POST` | `/api/agents/manage` | Stateful-агенты + диалоги + рой (list/load/save/delete/build-schema/dialogs/dialog-rename/dialog-delete/task-load/task-save/swarm-load/swarm-save) |
 | `POST` | `/api/user-profiles/manage` | Reusable user profiles: list/load/save/delete/bind |
 
 `/api/agent/session` и `/api/agent/chat` сохранены как совместимые aliases для
@@ -73,9 +73,21 @@
 `POST /api/agents/manage` (`agents_manage`, action-dispatch): `list` / `load`
 (agent+task+profile) / `save` (upsert + project info/инварианты + схема профиля с переносом
 значений) / `delete` / `build-schema` (LLM-генерация интервью из домена; нужен
-provider+token). Хранение — `LocalSessionStore`: `agent-<id>.agent.toon`,
-`agent-<id>.task-<task>.toon`, `*.profile.toon`, индекс `agents-index.toon`. Токен
-НЕ хранится в агенте (keyring — инвариант config/secrets раздельно).
+provider+token) / `swarm-load` / `swarm-save` (обязательный рой под-агентов в
+`SavedAgent.swarm`, валидируется `validate_swarm`, роли не отключаются). Хранение —
+`LocalSessionStore`: `agent-<id>.agent.toon`, `agent-<id>.task-<task>.toon`,
+`*.profile.toon`, индекс `agents-index.toon`. Токен НЕ хранится в агенте (keyring —
+инвариант config/secrets раздельно).
+
+Рой (вкладка «Рой», без чекбоксов): клиент видит одно окно, но под капотом —
+детерминированный `SwarmOrchestrator` (код) и обязательные агенты-сущности: 4
+stage-ответчика (Planning/Execution/Validation/Done), General и сервисные
+(memory/summary/topic/profile/invariant). Роли нельзя отключить; настраиваются
+только model/prompt. `apply_saved_agent_memory` резолвит `SwarmConfig` в
+`ResolvedSwarm` и ставит на `ChatAgent`; для plain-чата — `SwarmConfig::defaults()`.
+Stateful-данные хода (`StatefulReport`) берутся из оркестратора через
+`agent.take_stateful_report()` (стриминг сперва зовёт `agent.finalize_stream`), а
+не из устаревшего `stateful_postprocess`. Детали — `src/chat/README.md`.
 
 Чат с активным агентом несёт `saved_agent_id`; сервер биндит сессию к `agent:<id>`,
 грузит profile/task-scope/invariants/domain и инъектит блоками `[agent:domain]` /

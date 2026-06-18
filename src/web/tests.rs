@@ -16,6 +16,24 @@ fn web_profile(provider: ProviderKind) -> ProfileConfig {
     }
 }
 
+/// Test wrapper for `apply_saved_agent_memory` with default profile/token/secrets.
+fn apply_saved_for_test(
+    store: &LocalSessionStore,
+    id: Option<&str>,
+    dialog: &str,
+    agent: &mut ChatAgent,
+) -> Result<(), crate::errors::AppError> {
+    apply_saved_agent_memory(
+        store,
+        id,
+        dialog,
+        agent,
+        &web_profile(ProviderKind::OpenAiCompatible),
+        "test-token",
+        &MemorySecretStore::default(),
+    )
+}
+
 #[derive(Debug, Default)]
 struct StatefulFakeClient {
     replies: std::sync::Mutex<Vec<String>>,
@@ -533,7 +551,7 @@ fn saved_agent_loads_shared_feature_task_across_dialogs_by_default() {
         .expect("save shared task");
 
     let mut agent = web_test_chat_agent();
-    apply_saved_agent_memory(&store, Some("menu-agent"), "slogan-dialog", &mut agent)
+    apply_saved_for_test(&store, Some("menu-agent"), "slogan-dialog", &mut agent)
         .expect("apply saved agent memory");
 
     let task = agent.task_state().expect("task state");
@@ -577,7 +595,7 @@ fn saved_agent_restores_formal_task_state_for_any_dialog_after_restart() {
 
     let restarted_store = LocalSessionStore::from_root(root);
     let mut agent = web_test_chat_agent();
-    apply_saved_agent_memory(
+    apply_saved_for_test(
         &restarted_store,
         Some("app-agent"),
         "any-other-dialog",
@@ -637,7 +655,7 @@ fn saved_agent_can_load_different_task_when_dialog_is_assigned_elsewhere() {
         .expect("save menu task");
 
     let mut agent = web_test_chat_agent();
-    apply_saved_agent_memory(&store, Some("menu-agent"), "menu-dialog", &mut agent)
+    apply_saved_for_test(&store, Some("menu-agent"), "menu-dialog", &mut agent)
         .expect("apply saved agent memory");
 
     let task = agent.task_state().expect("task state");
@@ -698,6 +716,7 @@ async fn agents_manage_can_manually_save_and_bind_dialog_task() {
             token: None,
             token_provider: None,
             title: None,
+            swarm: None,
         }),
     )
     .await;
@@ -714,7 +733,7 @@ async fn agents_manage_can_manually_save_and_bind_dialog_task() {
     );
 
     let mut agent = web_test_chat_agent();
-    apply_saved_agent_memory(&store, Some("menu-agent"), "menu-dialog", &mut agent)
+    apply_saved_for_test(&store, Some("menu-agent"), "menu-dialog", &mut agent)
         .expect("apply task");
     let task = agent.task_state().expect("task state");
     assert_eq!(task.goal, "build potato-first delivery menu");
@@ -735,8 +754,13 @@ async fn stateful_postprocess_persists_task_to_shared_feature_scope() {
 
     let mut agent = web_test_chat_agent();
     agent.set_task_state(Some(TaskContext::default()));
-    let client =
-        StatefulFakeClient::with_replies(vec![r#"{"stage":"clarify","reason":"clarifying"}"#]);
+    // The swarm orchestrator runs the turn (seeds goal, sets stage); the answer
+    // has no STAGE_DONE marker, so the task stays in the Clarify stage.
+    let client = StatefulFakeClient::with_replies(vec!["Конечно, давай уточним тон."]);
+    agent
+        .respond(&client, "Помоги придумать слоган для пиццерии".to_string())
+        .await
+        .expect("respond");
 
     let (debug, _metrics) = run_and_persist_stateful(
         &store,
@@ -912,7 +936,7 @@ fn web_memory_config_supports_all_context_strategies() {
         ("sticky-facts", MemoryStrategy::StickyFacts),
         ("branching", MemoryStrategy::Branching),
         ("scoped-branches", MemoryStrategy::ScopedBranches),
-        ("unknown", MemoryStrategy::SlidingWindow),
+        ("unknown", MemoryStrategy::StickyFacts),
     ];
 
     for (strategy, expected) in cases {
@@ -1591,16 +1615,18 @@ fn web_ui_is_agent_centric() {
     assert!(INDEX_HTML.contains("function renderProfileLongTermFacts(facts)"));
     assert!(INDEX_HTML.contains("layer: 'long-term'"));
     assert!(INDEX_HTML.contains("data-tab=\"task\""));
-    assert!(INDEX_HTML.contains("id=\"taskIdInput\""));
-    assert!(INDEX_HTML.contains("id=\"taskLoad\""));
-    assert!(INDEX_HTML.contains("id=\"taskSave\""));
-    assert!(INDEX_HTML.contains("id=\"taskStageSelect\""));
-    assert!(INDEX_HTML.contains("id=\"taskGoalInput\""));
-    assert!(INDEX_HTML.contains("function saveTaskFromForm()"));
-    assert!(INDEX_HTML.contains("action: 'task-save'"));
-    assert!(INDEX_HTML.contains("action: 'task-load'"));
+    assert!(INDEX_HTML.contains("id=\"taskCurrentStepView\""));
+    assert!(INDEX_HTML.contains("id=\"taskExpectedActionView\""));
+    assert!(INDEX_HTML.contains("id=\"taskResumeHintView\""));
+    assert!(INDEX_HTML.contains("id=\"taskGoalView\""));
+    assert!(INDEX_HTML.contains("Состояние обновляется автоматически task-агентом роя."));
+    assert!(!INDEX_HTML.contains("id=\"taskIdInput\""));
+    assert!(!INDEX_HTML.contains("id=\"taskLoad\""));
+    assert!(!INDEX_HTML.contains("id=\"taskSave\""));
+    assert!(!INDEX_HTML.contains("id=\"taskStageSelect\""));
+    assert!(!INDEX_HTML.contains("function saveTaskFromForm()"));
     assert!(INDEX_HTML.contains("data-tab=\"invariants\""));
-    assert!(INDEX_HTML.contains("Task id привязывает текущий чат"));
+    assert!(INDEX_HTML.contains("Рабочую задачу ведёт обязательный task-агент роя"));
     assert!(!INDEX_HTML.contains("общая для всех диалогов агента"));
     // Wiring: build-schema action, gate↔workspace, agent_state rendering.
     assert!(INDEX_HTML.contains("/api/agents/manage"));
@@ -1660,7 +1686,11 @@ fn web_ui_profile_tab_can_edit_agent_context_without_erasing_domain() {
 
     let marker = "async function saveInvariants()";
     let start = INDEX_HTML.find(marker).expect("saveInvariants");
-    let body = &INDEX_HTML[start..INDEX_HTML.len().min(start + 900)];
+    let mut end = INDEX_HTML.len().min(start + 900);
+    while !INDEX_HTML.is_char_boundary(end) {
+        end -= 1;
+    }
+    let body = &INDEX_HTML[start..end];
     assert!(
         body.contains("agent: agentContextPayload()"),
         "saving invariants must preserve the editable agent domain/context"
@@ -1801,4 +1831,29 @@ fn web_attachments_none_returns_original_prompt() {
     let prompt = "Original prompt";
     let result = build_web_prompt(prompt, None);
     assert_eq!(result, prompt, "no attachments = return prompt as-is");
+}
+
+#[test]
+fn streaming_stays_default_for_deepseek_agents() {
+    assert!(INDEX_HTML.contains("id=\"streamMode\" type=\"checkbox\" checked"));
+    assert!(!INDEX_HTML.contains("agent.provider !== 'deepseek'"));
+    assert!(!INDEX_HTML.contains("localStorage.setItem('ai_stream_mode', 'off')"));
+}
+
+#[test]
+fn streaming_parser_keeps_sse_state_across_network_chunks() {
+    assert!(INDEX_HTML.contains("function parseSseEventBlock(block)"));
+    assert!(INDEX_HTML.contains("sseBuffer.indexOf('\\n\\n')"));
+    assert!(INDEX_HTML.contains("handleSseEvent(parseSseEventBlock(sseBuffer))"));
+    assert!(!INDEX_HTML.contains("let eventType = null;\n          let eventData = null;"));
+}
+
+#[test]
+fn clearing_request_debug_does_not_clear_saved_profile_facts() {
+    let null_branch = INDEX_HTML
+        .split("if (!layers) {")
+        .nth(1)
+        .and_then(|tail| tail.split("return;").next())
+        .expect("renderMemoryLayers null branch");
+    assert!(!null_branch.contains("renderProfileLongTermFacts(null)"));
 }

@@ -163,24 +163,93 @@ Artifacts сохраняются в `TaskContext.artifacts` и инъектят�
 первого user-сообщения. Методы `list_dialogs`, `register_dialog`, `rename_dialog`,
 `delete_dialog` (чистит session/metrics/memory, но не shared task).
 
-`ChatAgent` инъектит память в каждый provider request (`inject_memory_layers`):
-`[agent:domain]`, `[memory:long-term]` (профиль + что ещё спросить),
-`[memory:working]` (стадия + allowed-next + план как read-only контекст; не
-блокирует соседние запросы пользователя),
-`[invariants]` (+ прошлые нарушения как фидбэк).
+`ChatAgent` собирает stateful prompt через prompt builder
+(`inject_memory_layers`): `[agent:domain]`, `[memory:long-term]` (профиль + что
+ещё спросить), `[memory:working]` (стадия + allowed-next + план/current step как
+авторитетное состояние), `[invariants]` (+ прошлые нарушения как фидбэк),
+`[user-profile]`, затем текущий user query. Runtime-профиль пользователя
+дедуплицируется относительно профиля агента и инвариантов, чтобы одинаковые
+строки не попадали в system prompt дважды.
 
 Reusable `UserProfile` хранится отдельно от `SavedAgent` и `AgentProfile`.
 Он описывает пользователя (стиль, формат, язык, ограничения ответа) и
 подмешивается только на runtime блоком `[user-profile]`; agent definition не
 владеет им и не дублирует его предпочтения.
 
-`ChatAgent::stateful_postprocess()` после хода (LLM-driven, реюз паттернов
+Перед сохранением обычного non-streaming ответа главный агент делает
+orchestrator validation pass: проверяет ответ против инвариантов и, если нужно,
+делает один скрытый corrective retry; в историю попадает уже исправленный
+ответ. `ChatAgent::stateful_postprocess()` после хода (LLM-driven, реюз паттернов
 `update_sticky_facts`/классификатора): заполняет профиль из сообщения юзера
-(фильтр `looks_sensitive`), предлагает стадию → валидирует FSM → применяет,
-проверяет ответ против инвариантов. Возвращает `StatefulReport` (pending-вопросы,
-стадия, `StageTransition`, нарушения, метрики). `build_profile_schema()` —
-LLM-генерация схемы интервью из домена. Каждый шаг gated на наличии данных:
-ad-hoc чат без агента не платит ничего.
+(фильтр `looks_sensitive`), предлагает стадию → валидирует FSM → применяет только
+разрешённые переходы, проверяет ответ против инвариантов. Возвращает
+`StatefulReport` (pending-вопросы, стадия, `StageTransition`, нарушения,
+метрики). `build_profile_schema()` — LLM-генерация схемы интервью из домена.
+Каждый шаг gated на наличии данных: ad-hoc чат без агента не платит ничего.
+
+## Рой агентов (swarm)
+
+Клиент видит одно окно главного агента, но под капотом каждый ход исполняет
+обязательный рой настоящих сущностей (`swarm/`). **Агент = класс** (`trait
+SubAgent`), а не галочка; роли нельзя отключить — только настроить их
+provider/model + system prompt. Конфиг (`SwarmConfig`, token-free) хранится в
+`SavedAgent.swarm` (`#[serde(default)]` → старые агенты грузятся как `defaults()`;
+legacy-поле `enabled` нормализуется в `true`).
+
+Сущности:
+
+- **Stage-ответчики** (по стадии FSM): `PlanningAgent`, `ExecutionAgent`,
+  `ValidationAgent`, `DoneAgent`. Clarify сворачивается в Planning. У каждого свой
+  system prompt = работа стадии; завершение стадии модель помечает строкой
+  `<<STAGE_DONE>>` (парсится кодом).
+- **`GeneralAgent`** — ответчик для обычного чата без задачи.
+- **Сервисные**: `MemoryAgent` (KV-факты + слои), `SummaryAgent` (компакция),
+  `TopicAgent` (scoped-routing), `ProfileAgent` (интервью-профиль), `InvariantAgent`
+  (Pass/Fail).
+
+`SwarmOrchestrator` (`orchestrator.rs`) — **чистый код-роутер**, детерминированный
+FSM. На каждом ходу (`run_turn`): sticky-facts memory ДО ответа → выбор stage-
+ответчика по `task.stage` → invariant-проверка с retry (`MAX_INVARIANT_RETRIES`) →
+commit → детерминированный переход стадии по `TaskStage::allowed_next` (LLM НЕ
+называет целевую стадию) → пост-агенты Memory/Summary/Profile. Возвращает
+`(ChatResponse, StatefulReport)`. `ChatAgent::respond*` — тонкая обёртка:
+`build_turn` → `orchestrator.run_turn`. Стриминг: `stream_prepare`/`stream_finalize`
+(без marker, FSM не двигается на стриме).
+
+`PromptBuilder` (`prompt_builder.rs`) — единственное место сборки итогового
+промпта (заменил `inject_memory_layers`). Слои в фиксированном порядке: `system →
+[agent:domain] → [memory:long-term] → [user-profile] (дедуп) → [memory:working] →
+[invariants] → facts → [stage:rules] → окно сообщений → query`. Дедуп: одно
+значение из профиля агента и профиля юзера инъектится один раз (seen-set), поэтому
+дублирования между профилями нет.
+
+- `swarm/config.rs` — `SubAgentRole` (4 stage + general + 5 сервисных),
+  `SubAgentConfig`, `SwarmConfig`.
+- `swarm/runtime.rs` — `resolve_swarm()` → `ResolvedSwarm` (per-role
+  `ProfileConfig` + token). Пустые override = наследовать основного агента;
+  кастомный provider → токен через `get_config_profile_token`, иначе fallback.
+  Секреты читаются только здесь.
+- `swarm/agent.rs` — `trait SubAgent` + `SwarmTurn` (мутабельный контекст хода) +
+  `SubAgentOutcome`.
+
+FSM-переход детерминирован: `complete_pipeline_stage` для pipeline-задач (с
+паузой на human-approval), иначе `allowed_next`. Pause/resume (`pause`/`resume`/
+`approve_pipeline_pause`) и seed goal/title — тоже код в оркестраторе
+(`apply_pause_resume`, `seed_task_progress`), без LLM. Стриминг **тоже** двигает
+FSM: `stream_prepare` шлёт stage-rules с маркером, `stream_finalize` парсит маркер
+и продвигает стадию; web-слой вырезает маркер из живого потока токенов
+(line-buffered фильтр по `\n`).
+
+**Критично:** `Memory` работает на ЛЮБОЙ стратегии. Для `sticky-facts` экстракция
+ДО запроса (facts block), для остальных — ПОСЛЕ ответа. Поэтому долговременная
+память сама обновляется при сообщении нового факта (переезд) на любой стратегии.
+Пустой `facts_extraction_prompt` (и пустой swarm-override) = локальный
+keyword-fallback без LLM. Дефолтная стратегия — `sticky-facts`. UI: вкладка «Рой»
+(без чекбоксов), API `agents/manage` actions `swarm-load`/`swarm-save`.
+
+Старый `stateful_postprocess` и LLM-инференс стадии (`advance_task_state` и т.п.)
+удалены полностью — единственный путь хода теперь оркестратор. Stateful-данные web
+берёт из `ChatAgent::take_stateful_report()` (стрим — после `finalize_stream`).
 
 ## Что важно не ломать
 

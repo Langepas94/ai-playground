@@ -93,6 +93,24 @@ impl ProviderClient for FakeClient {
     }
 }
 
+fn request_containing<'a>(seen: &'a [Vec<ChatMessage>], needle: &str) -> &'a [ChatMessage] {
+    seen.iter()
+        .find(|messages| {
+            messages
+                .last()
+                .is_some_and(|message| message.content == needle)
+        })
+        .or_else(|| {
+            seen.iter().find(|messages| {
+                messages
+                    .iter()
+                    .any(|message| message.content.contains(needle))
+            })
+        })
+        .map(Vec::as_slice)
+        .unwrap_or_else(|| panic!("request containing {needle:?} not found"))
+}
+
 fn test_profile() -> ProfileConfig {
     ProfileConfig {
         provider: crate::providers::ProviderKind::OpenAiCompatible,
@@ -211,7 +229,7 @@ async fn runtime_user_profile_is_separate_payload_block() {
         .expect("respond");
 
     let seen = client.seen_messages.lock().unwrap();
-    let messages = &seen[0];
+    let messages = request_containing(&seen, "answer in detail this time");
     let joined = messages
         .iter()
         .map(|message| message.content.clone())
@@ -260,6 +278,7 @@ async fn same_agent_can_use_different_user_profiles_at_runtime() {
         None,
         None,
     );
+    disable_swarm_memory(&mut agent);
     agent.set_domain("support-agent");
     agent.set_user_profile(Some(make_profile("manager-detailed", "give details")));
     agent
@@ -321,7 +340,7 @@ async fn user_profile_stays_lower_priority_than_agent_context() {
         .expect("respond");
 
     let seen = client.seen_messages.lock().unwrap();
-    let messages = &seen[0];
+    let messages = request_containing(&seen, "explain lifetimes");
     let domain_index = messages
         .iter()
         .position(|message| message.content.contains("[agent:domain]"))
@@ -376,7 +395,7 @@ async fn empty_user_profile_is_not_injected() {
 
     let seen = client.seen_messages.lock().unwrap();
     assert!(
-        seen[0]
+        request_containing(&seen, "hello")
             .iter()
             .all(|message| !message.content.contains("[user-profile]")),
         "empty profile should not add an inert prompt block"
@@ -395,11 +414,12 @@ fn task_block_keeps_tracked_task_as_context_not_a_gate() {
     assert!(block.contains("[memory:working]"));
     assert!(block.contains("Stage: clarify"));
     assert!(block.contains("Paused: false"));
-    assert!(block.contains("background for the tracked task"));
-    assert!(block.contains("Do not force the user to finish this task"));
+    assert!(block.contains("authoritative working memory for the tracked task"));
+    assert!(block.contains("Treat fragmentary follow-up messages as continuation"));
+    assert!(block.contains("do not skip stages"));
     assert!(
-        !block.contains("Do NOT skip stages"),
-        "working memory must not make unfinished tracked tasks block adjacent dialogs"
+        block.contains("unless the user clearly starts an unrelated one"),
+        "working memory must preserve adjacent-dialog escape hatch"
     );
 }
 
@@ -495,7 +515,7 @@ async fn paused_task_resume_context_is_injected_without_reexplaining() {
     assert!(!answer.text.to_ascii_lowercase().contains("explain again"));
 
     let seen = client.seen_messages.lock().unwrap();
-    let joined = seen[0]
+    let joined = request_containing(&seen, "Продолжай")
         .iter()
         .map(|message| message.content.clone())
         .collect::<Vec<_>>()
@@ -508,9 +528,8 @@ async fn paused_task_resume_context_is_injected_without_reexplaining() {
     assert!(joined.contains("do not ask them to restate the task"));
     drop(seen);
 
-    let report = agent
-        .stateful_postprocess(&client, "Продолжай", &answer.text)
-        .await;
+    // Resume now happens deterministically inside respond (orchestrator).
+    let report = agent.take_stateful_report();
     assert_eq!(report.stage, Some(crate::chat::store::TaskStage::Execution));
     assert_eq!(report.current_step, "run validation checks");
     assert_eq!(report.expected_action, "agent_work");
@@ -579,7 +598,7 @@ async fn restored_task_state_is_injected_into_new_agent_request() {
         .expect("respond");
 
     let seen = client.seen_messages.lock().unwrap();
-    let joined = seen[0]
+    let joined = request_containing(&seen, "Продолжай")
         .iter()
         .map(|message| message.content.clone())
         .collect::<Vec<_>>()
@@ -590,126 +609,6 @@ async fn restored_task_state_is_injected_into_new_agent_request() {
     assert!(joined.contains("Expected action: agent_work"));
     assert!(joined.contains("Resume hint: name and plan approved; continue implementation"));
     assert!(joined.contains("do not ask them to restate the task"));
-}
-
-#[tokio::test]
-async fn stateful_postprocess_seeds_task_goal_from_first_prompt() {
-    let client = FakeClient {
-        replies: std::sync::Mutex::new(vec![
-            r#"{"stage":"clarify","current_step":"уточнить acceptance criteria","expected_action":"user_input","resume_hint":"ask for menu constraints","reason":"asking clarifying questions"}"#.to_string(),
-        ]),
-        metrics: std::sync::Mutex::new(Vec::new()),
-        seen_messages: std::sync::Mutex::new(Vec::new()),
-    };
-    let mut agent = ChatAgent::new(
-        test_profile(),
-        "secret".to_string(),
-        Vec::new(),
-        AgentMemory::default(),
-        ResponseControl::uncontrolled(),
-        None,
-        None,
-    );
-    agent.set_task_state(Some(crate::chat::store::TaskContext::default()));
-
-    agent
-        .stateful_postprocess(
-            &client,
-            "Давай придумаем продуктовое меню для пиццерии. Команда небольшая.",
-            "Сначала уточню детали.",
-        )
-        .await;
-
-    let task = agent.task_state().expect("task state");
-    assert_eq!(
-        task.goal,
-        "Давай придумаем продуктовое меню для пиццерии. Команда небольшая."
-    );
-    assert_eq!(task.title, "Давай придумаем продуктовое меню для пиццерии");
-    assert_eq!(task.stage, crate::chat::store::TaskStage::Clarify);
-    assert_eq!(task.current_step, "уточнить acceptance criteria");
-    assert_eq!(task.expected_action, "user_input");
-    assert_eq!(task.resume_hint, "ask for menu constraints");
-}
-
-#[tokio::test]
-async fn stateful_postprocess_infers_planning_when_tracker_stays_too_conservative() {
-    let client = FakeClient {
-        replies: std::sync::Mutex::new(vec![
-            r#"{"stage":"clarify","current_step":"уточнить детали","expected_action":"user_input","resume_hint":"ask more","reason":"too conservative"}"#.to_string(),
-        ]),
-        metrics: std::sync::Mutex::new(Vec::new()),
-        seen_messages: std::sync::Mutex::new(Vec::new()),
-    };
-    let mut agent = ChatAgent::new(
-        test_profile(),
-        "secret".to_string(),
-        Vec::new(),
-        AgentMemory::default(),
-        ResponseControl::uncontrolled(),
-        None,
-        None,
-    );
-    agent.set_task_state(Some(crate::chat::store::TaskContext::default()));
-
-    let report = agent
-        .stateful_postprocess(
-            &client,
-            "Договор есть, акт подписан, заказчик признавал долг. Хочу сначала досудебную претензию.",
-            "Можно идти по плану: проверить договор, собрать документы и подготовить претензию.",
-        )
-        .await;
-
-    assert_eq!(report.stage, Some(crate::chat::store::TaskStage::Planning));
-    assert_eq!(
-        report.current_step,
-        "составить план действий и список нужных документов"
-    );
-    assert_eq!(report.expected_action, "agent_work");
-    assert!(report.stage_transition.expect("transition").accepted);
-}
-
-#[tokio::test]
-async fn stateful_postprocess_pause_preserves_visible_formal_state() {
-    let client = FakeClient {
-        replies: std::sync::Mutex::new(Vec::new()),
-        metrics: std::sync::Mutex::new(Vec::new()),
-        seen_messages: std::sync::Mutex::new(Vec::new()),
-    };
-    let mut agent = ChatAgent::new(
-        test_profile(),
-        "secret".to_string(),
-        Vec::new(),
-        AgentMemory::default(),
-        ResponseControl::uncontrolled(),
-        None,
-        None,
-    );
-    agent.set_task_state(Some(crate::chat::store::TaskContext {
-        stage: crate::chat::store::TaskStage::Planning,
-        current_step: "составить план претензии".to_string(),
-        expected_action: "agent_work".to_string(),
-        goal: "подготовить досудебную претензию".to_string(),
-        ..crate::chat::store::TaskContext::default()
-    }));
-
-    let report = agent
-        .stateful_postprocess(
-            &client,
-            "Остановимся на этом месте. Я найду договор и реквизиты заказчика, вернусь с документами.",
-            "Хорошо, остановимся на плане претензии.",
-        )
-        .await;
-
-    assert_eq!(report.stage, Some(crate::chat::store::TaskStage::Planning));
-    assert_eq!(report.current_step, "составить план претензии");
-    assert_eq!(report.expected_action, "agent_work");
-    assert!(report.paused);
-    assert!(
-        report
-            .resume_hint
-            .contains("подготовить досудебную претензию")
-    );
 }
 
 #[tokio::test]
@@ -740,307 +639,18 @@ async fn paused_task_resumes_when_user_supplies_expected_info_without_command_wo
         ..crate::chat::store::TaskContext::default()
     }));
 
-    let report = agent
-        .stateful_postprocess(
+    agent
+        .respond(
             &client,
-            "Нашёл договор: номер 12 от 1 апреля, заказчик ООО Ромашка.",
-            "Теперь можно продолжать подготовку претензии.",
+            "Нашёл договор: номер 12 от 1 апреля, заказчик ООО Ромашка.".to_string(),
         )
-        .await;
+        .await
+        .expect("respond");
+    let report = agent.take_stateful_report();
 
     assert_eq!(report.stage, Some(crate::chat::store::TaskStage::Planning));
     assert!(!report.paused);
     assert!(!agent.task_state().expect("task").paused);
-}
-
-#[tokio::test]
-async fn stateful_postprocess_captures_approved_task_decision() {
-    let client = FakeClient {
-        replies: std::sync::Mutex::new(vec![
-            r#"{"stage":"clarify","reason":"decision captured"}"#.to_string(),
-        ]),
-        metrics: std::sync::Mutex::new(Vec::new()),
-        seen_messages: std::sync::Mutex::new(Vec::new()),
-    };
-    let mut agent = ChatAgent::new(
-        test_profile(),
-        "secret".to_string(),
-        Vec::new(),
-        AgentMemory::default(),
-        ResponseControl::uncontrolled(),
-        None,
-        None,
-    );
-    agent.set_task_state(Some(crate::chat::store::TaskContext {
-        goal: "Придумать название пиццерии".to_string(),
-        ..crate::chat::store::TaskContext::default()
-    }));
-
-    agent
-        .stateful_postprocess(
-            &client,
-            "ВолгаПицца самое то, утверждаем",
-            "Отлично, «ВолгаПицца» — выбор сделан!",
-        )
-        .await;
-
-    let task = agent.task_state().expect("task state");
-    assert!(
-        task.results.iter().any(|item| item.contains("ВолгаПицца")),
-        "approved brand name should become shared working-task result"
-    );
-}
-
-#[tokio::test]
-async fn stateful_postprocess_autonomously_advances_task_through_fsm_contract() {
-    let client = FakeClient {
-        replies: std::sync::Mutex::new(vec![
-            r#"{"stage":"done","current_step":"deliver final result","expected_action":"none","resume_hint":"contract completed"}"#.to_string(),
-            r#"{"stage":"validation","current_step":"validate contract draft","expected_action":"validation","resume_hint":"run legal review checks"}"#.to_string(),
-            r#"{"stage":"execution","current_step":"draft contract sections","expected_action":"agent_work","resume_hint":"continue drafting the approved contract"}"#.to_string(),
-        ]),
-        metrics: std::sync::Mutex::new(Vec::new()),
-        seen_messages: std::sync::Mutex::new(Vec::new()),
-    };
-    let mut agent = ChatAgent::new(
-        test_profile(),
-        "secret".to_string(),
-        Vec::new(),
-        AgentMemory::default(),
-        ResponseControl::uncontrolled(),
-        None,
-        None,
-    );
-    agent.set_task_state(Some(crate::chat::store::TaskContext {
-        stage: crate::chat::store::TaskStage::Planning,
-        current_step: "approve contract plan".to_string(),
-        expected_action: "user_input".to_string(),
-        title: "make contract".to_string(),
-        goal: "draft a service contract".to_string(),
-        plan: vec![
-            "collect contract details".to_string(),
-            "approve plan".to_string(),
-            "draft contract".to_string(),
-            "validate contract".to_string(),
-        ],
-        ..crate::chat::store::TaskContext::default()
-    }));
-
-    let report = agent
-        .stateful_postprocess(
-            &client,
-            "План утверждаю, делай договор",
-            "Перехожу к подготовке текста договора.",
-        )
-        .await;
-    assert_eq!(report.stage, Some(crate::chat::store::TaskStage::Execution));
-    assert_eq!(report.current_step, "draft contract sections");
-    assert_eq!(report.expected_action, "agent_work");
-    assert_eq!(report.stage_transition.expect("transition").accepted, true);
-
-    let report = agent
-        .stateful_postprocess(
-            &client,
-            "Черновик готов?",
-            "Черновик договора составлен, запускаю проверку условий.",
-        )
-        .await;
-    assert_eq!(
-        report.stage,
-        Some(crate::chat::store::TaskStage::Validation)
-    );
-    assert_eq!(report.current_step, "validate contract draft");
-    assert_eq!(report.expected_action, "validation");
-    assert_eq!(report.stage_transition.expect("transition").accepted, true);
-
-    let report = agent
-        .stateful_postprocess(
-            &client,
-            "Проверка норм, завершаем",
-            "Договор подготовлен и проверен.",
-        )
-        .await;
-    assert_eq!(report.stage, Some(crate::chat::store::TaskStage::Done));
-    assert_eq!(report.current_step, "deliver final result");
-    assert_eq!(report.expected_action, "none");
-    assert_eq!(report.stage_transition.expect("transition").accepted, true);
-
-    let task = agent.task_state().expect("task");
-    assert_eq!(task.stage, crate::chat::store::TaskStage::Done);
-    assert_eq!(task.current_step, "deliver final result");
-    assert_eq!(task.expected_action, "none");
-}
-
-#[tokio::test]
-async fn stateful_postprocess_rejects_illegal_stage_jump_but_keeps_step_metadata() {
-    let client = FakeClient {
-        replies: std::sync::Mutex::new(vec![
-            r#"{"stage":"validation","current_step":"validate before planning","expected_action":"validation","resume_hint":"invalid jump should be rejected"}"#.to_string(),
-        ]),
-        metrics: std::sync::Mutex::new(Vec::new()),
-        seen_messages: std::sync::Mutex::new(Vec::new()),
-    };
-    let mut agent = ChatAgent::new(
-        test_profile(),
-        "secret".to_string(),
-        Vec::new(),
-        AgentMemory::default(),
-        ResponseControl::uncontrolled(),
-        None,
-        None,
-    );
-    agent.set_task_state(Some(crate::chat::store::TaskContext {
-        stage: crate::chat::store::TaskStage::Clarify,
-        current_step: "collect contract details".to_string(),
-        expected_action: "user_input".to_string(),
-        title: "make contract".to_string(),
-        goal: "draft a service contract".to_string(),
-        ..crate::chat::store::TaskContext::default()
-    }));
-
-    let report = agent
-        .stateful_postprocess(
-            &client,
-            "Сделай мне договор",
-            "Уточню стороны договора и предмет работ.",
-        )
-        .await;
-
-    let transition = report.stage_transition.expect("rejected transition");
-    assert_eq!(transition.from, crate::chat::store::TaskStage::Clarify);
-    assert_eq!(transition.to, crate::chat::store::TaskStage::Validation);
-    assert!(!transition.accepted);
-    assert_eq!(report.stage, Some(crate::chat::store::TaskStage::Clarify));
-    assert_eq!(report.current_step, "validate before planning");
-    assert_eq!(report.expected_action, "validation");
-
-    let task = agent.task_state().expect("task");
-    assert_eq!(task.stage, crate::chat::store::TaskStage::Clarify);
-    assert_eq!(task.current_step, "validate before planning");
-    assert_eq!(task.expected_action, "validation");
-
-    let seen = client.seen_messages.lock().unwrap();
-    let state_tracker_request = seen
-        .last()
-        .expect("state tracker request")
-        .iter()
-        .map(|message| message.content.clone())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        state_tracker_request
-            .contains("Allowed next stages from the current stage: planning, done")
-    );
-}
-
-#[tokio::test]
-async fn stateful_postprocess_advances_pipeline_deterministically_from_artifacts() {
-    let client = FakeClient {
-        replies: std::sync::Mutex::new(vec![
-            r#"{"stage":"validation","current_step":"Validation","expected_action":"agent_work"}"#.to_string(),
-            r#"{"stage":"execution","current_step":"draft contract","expected_action":"agent_work","artifact_key":"contract_draft","artifact":"Draft contract text"}"#.to_string(),
-            r#"{"stage":"execution","current_step":"write creating brief","expected_action":"agent_work","artifact_key":"research_conclusion","artifact":"Russian law ok; patent risk noted"}"#.to_string(),
-        ]),
-        metrics: std::sync::Mutex::new(Vec::new()),
-        seen_messages: std::sync::Mutex::new(Vec::new()),
-    };
-    let mut agent = ChatAgent::new(
-        test_profile(),
-        "secret".to_string(),
-        Vec::new(),
-        AgentMemory::default(),
-        ResponseControl::uncontrolled(),
-        None,
-        None,
-    );
-    agent.set_task_state(Some(crate::chat::store::TaskContext {
-        stage: crate::chat::store::TaskStage::Planning,
-        current_step: "run research workers".to_string(),
-        expected_action: "agent_work".to_string(),
-        pipeline: vec![
-            crate::chat::store::TaskPipelineStage {
-                stage: crate::chat::store::TaskStage::Planning,
-                name: "Research".to_string(),
-                system_prompt: "Run parallel legal research workers.".to_string(),
-                artifact_key: "research_conclusion".to_string(),
-                worker_agents: vec![
-                    crate::chat::store::TaskWorkerAgent {
-                        id: "ru-law".to_string(),
-                        direction: "russian_law".to_string(),
-                        system_prompt: "Analyze Russian contract law.".to_string(),
-                    },
-                    crate::chat::store::TaskWorkerAgent {
-                        id: "patent-law".to_string(),
-                        direction: "patent".to_string(),
-                        system_prompt: "Analyze patent constraints.".to_string(),
-                    },
-                ],
-                ..crate::chat::store::TaskPipelineStage::default()
-            },
-            crate::chat::store::TaskPipelineStage {
-                stage: crate::chat::store::TaskStage::Execution,
-                name: "Create".to_string(),
-                system_prompt: "Create the contract from the research artifact.".to_string(),
-                artifact_key: "contract_draft".to_string(),
-                requires_human_approval: true,
-                ..crate::chat::store::TaskPipelineStage::default()
-            },
-            crate::chat::store::TaskPipelineStage {
-                stage: crate::chat::store::TaskStage::Validation,
-                name: "Validation".to_string(),
-                system_prompt: "Validate the created contract.".to_string(),
-                artifact_key: "validation_report".to_string(),
-                ..crate::chat::store::TaskPipelineStage::default()
-            },
-        ],
-        ..crate::chat::store::TaskContext::default()
-    }));
-
-    let report = agent
-        .stateful_postprocess(
-            &client,
-            "Исследования завершились",
-            "Оба research-агента дали заключения.",
-        )
-        .await;
-    assert_eq!(report.stage, Some(crate::chat::store::TaskStage::Execution));
-    assert_eq!(report.current_step, "Create");
-    assert_eq!(report.expected_action, "agent_work");
-    assert_eq!(report.stage_transition.expect("transition").accepted, true);
-    let task = agent.task_state().expect("task");
-    assert_eq!(task.artifacts[0].key, "research_conclusion");
-    assert_eq!(task.artifacts[0].value, "Russian law ok; patent risk noted");
-
-    let report = agent
-        .stateful_postprocess(
-            &client,
-            "Черновик договора готов",
-            "Создающий агент вернул текст договора.",
-        )
-        .await;
-    assert_eq!(report.stage, Some(crate::chat::store::TaskStage::Execution));
-    assert_eq!(report.current_step, "approve Create artifact");
-    assert_eq!(report.expected_action, "user_input");
-    assert!(report.paused);
-    let task = agent.task_state().expect("task");
-    assert_eq!(task.stage, crate::chat::store::TaskStage::Execution);
-    assert!(task.paused);
-    assert_eq!(task.artifacts[1].key, "contract_draft");
-
-    let report = agent
-        .stateful_postprocess(
-            &client,
-            "Утверждаю черновик, переходи к проверке",
-            "Принято, перехожу к валидации договора.",
-        )
-        .await;
-    assert_eq!(
-        report.stage,
-        Some(crate::chat::store::TaskStage::Validation)
-    );
-    assert_eq!(report.current_step, "Validation");
-    assert_eq!(report.expected_action, "agent_work");
-    assert!(!report.paused);
 }
 
 #[tokio::test]
@@ -1074,6 +684,7 @@ async fn sliding_window_sends_only_recent_messages_and_keeps_history() {
         recent_messages: 2,
         ..MemoryConfig::default()
     });
+    disable_swarm_memory(&mut agent);
 
     agent
         .respond(&client, "current question".to_string())
@@ -1519,6 +1130,7 @@ async fn summary_strategy_compacts_old_history_after_response() {
         summary_chunk_messages: 4,
         ..MemoryConfig::default()
     });
+    disable_swarm_memory(&mut agent);
 
     agent
         .respond(&client, "current question".to_string())
@@ -1581,6 +1193,7 @@ async fn summary_strategy_sends_custom_summary_prompt_to_provider() {
         summary_prompt: "CUSTOM SUMMARY PROMPT".to_string(),
         ..MemoryConfig::default()
     });
+    disable_swarm_memory(&mut agent);
 
     agent
         .respond(&client, "current question".to_string())
@@ -1671,6 +1284,7 @@ async fn branching_strategy_uses_current_branch_history_only() {
         recent_messages: 8,
         ..MemoryConfig::default()
     });
+    disable_swarm_memory(&mut agent);
 
     agent
         .respond(&client, "continue branch A".to_string())
@@ -1742,6 +1356,7 @@ async fn branching_keeps_two_branches_independent_from_same_checkpoint() {
         None,
     );
     branch_a.set_memory_config(config.clone());
+    disable_swarm_memory(&mut branch_a);
     let mut branch_b = ChatAgent::new(
         test_profile(),
         "secret".to_string(),
@@ -1752,6 +1367,7 @@ async fn branching_keeps_two_branches_independent_from_same_checkpoint() {
         None,
     );
     branch_b.set_memory_config(config);
+    disable_swarm_memory(&mut branch_b);
 
     branch_a
         .respond(&client, "continue A".to_string())
@@ -1809,6 +1425,7 @@ async fn scoped_branches_keep_one_session_but_filter_provider_context() {
         scoped_auto_route: false,
         ..MemoryConfig::default()
     });
+    disable_swarm_memory(&mut agent);
     agent
         .respond(&client, "alpha question".to_string())
         .await
@@ -2009,6 +1626,7 @@ async fn topic_file_routing_classifies_with_metadata_and_loads_only_selected_top
         topic_auto_create: false,
         ..MemoryConfig::default()
     });
+    disable_swarm_memory(&mut agent);
 
     agent
         .respond(&client, "Rust async followup".to_string())
@@ -2299,10 +1917,11 @@ async fn agent_uses_custom_system_prompt_without_default_agent_prompt() {
         .expect("response");
 
     let seen = client.seen_messages.lock().expect("seen messages");
-    assert_eq!(seen[0].len(), 2);
-    assert_eq!(seen[0][0].role, Role::System);
-    assert_eq!(seen[0][0].content, "Ты эксперт по Civilization 6.");
-    assert_eq!(seen[0][1].content, "Как играть за Византию?");
+    let request = request_containing(&seen, "Как играть за Византию?");
+    assert_eq!(request.len(), 2);
+    assert_eq!(request[0].role, Role::System);
+    assert_eq!(request[0].content, "Ты эксперт по Civilization 6.");
+    assert_eq!(request[1].content, "Как играть за Византию?");
 }
 
 #[test]
@@ -2392,4 +2011,310 @@ fn agent_context_limit_can_be_updated() {
     assert!(agent.context_limit().is_none());
     agent.set_context_limit(Some(8192));
     assert_eq!(agent.context_limit(), Some(8192));
+}
+
+/// Force the Memory sub-agent onto the local keyword fallback so focused
+/// strategy/context tests do not pay for the always-on extraction LLM call.
+fn disable_swarm_memory(agent: &mut ChatAgent) {
+    let mut config = agent.memory_config();
+    config.facts_extraction_prompt.clear();
+    agent.set_memory_config(config);
+}
+
+// --- Swarm: Memory sub-agent ---------------------------------------------
+
+/// Records the model of every request so per-role overrides can be asserted.
+#[derive(Debug, Default)]
+struct RecordingClient {
+    replies: std::sync::Mutex<Vec<String>>,
+    seen_models: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl ProviderClient for RecordingClient {
+    async fn list_models(
+        &self,
+        _profile: &ProfileConfig,
+        _token: &str,
+    ) -> Result<Vec<String>, AppError> {
+        Ok(Vec::new())
+    }
+
+    async fn chat_completion(
+        &self,
+        _profile: &ProfileConfig,
+        _token: &str,
+        request: ChatRequest,
+    ) -> Result<ChatResponse, AppError> {
+        self.seen_models
+            .lock()
+            .expect("models")
+            .push(request.model.clone());
+        let text = self
+            .replies
+            .lock()
+            .expect("replies")
+            .pop()
+            .unwrap_or_else(|| "ok".to_string());
+        Ok(ChatResponse {
+            text,
+            finish_reason: Some("stop".to_string()),
+            metrics: crate::providers::RequestMetrics {
+                elapsed_ms: 1,
+                usage: None,
+                cost: None,
+            },
+        })
+    }
+
+    async fn chat_completion_with_debug(
+        &self,
+        profile: &ProfileConfig,
+        token: &str,
+        request: ChatRequest,
+    ) -> Result<(ChatResponse, ProviderExchangeDebug), AppError> {
+        let response = self.chat_completion(profile, token, request).await?;
+        Ok((
+            response,
+            ProviderExchangeDebug {
+                request: crate::providers::HttpDebugRequest {
+                    method: "POST".to_string(),
+                    url: "https://example.test/v1/chat/completions".to_string(),
+                    headers: Default::default(),
+                    body: serde_json::json!({}),
+                },
+                response: crate::providers::HttpDebugResponse {
+                    status: 200,
+                    headers: Default::default(),
+                    body: serde_json::json!({}),
+                },
+            },
+        ))
+    }
+}
+
+fn summary_agent() -> ChatAgent {
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    // Summary strategy: extraction is NOT part of this context builder, yet the
+    // Memory sub-agent must still run (the bug being fixed).
+    agent.set_memory_config(MemoryConfig {
+        strategy: MemoryStrategy::Summary,
+        ..MemoryConfig::default()
+    });
+    agent
+}
+
+#[tokio::test]
+async fn memory_agent_updates_long_term_on_summary_strategy() {
+    // Calls per turn (Summary strategy, no context pressure): main, then
+    // post-turn extraction. `replies.pop()` is LIFO, so push extraction first,
+    // main last (main pops first).
+    let client = RecordingClient {
+        replies: std::sync::Mutex::new(vec![
+            r#"{"facts":[{"key":"location","value":"Берлин","layer":"long-term"}]}"#.to_string(),
+            "Главный ответ".to_string(),
+        ]),
+        seen_models: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = summary_agent();
+
+    agent
+        .respond(&client, "Я переехал в Берлин".to_string())
+        .await
+        .expect("respond");
+
+    assert_eq!(
+        agent.memory().facts.get("location").map(String::as_str),
+        Some("Берлин"),
+    );
+    assert_eq!(
+        agent.memory().fact_layer("location"),
+        MemoryLayer::LongTerm,
+        "the moved fact must land in long-term so it survives a new session",
+    );
+}
+
+#[tokio::test]
+async fn memory_agent_persisted_disabled_config_still_extracts() {
+    let client = RecordingClient {
+        replies: std::sync::Mutex::new(vec![
+            r#"{"facts":[{"key":"location","value":"Берлин","layer":"long-term"}]}"#.to_string(),
+            "Главный ответ".to_string(),
+        ]),
+        seen_models: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = summary_agent();
+
+    // Old saved configs may contain enabled=false, but swarm roles are
+    // mandatory and must still run.
+    let config = crate::chat::SwarmConfig {
+        agents: vec![crate::chat::SubAgentConfig {
+            role: crate::chat::SubAgentRole::Memory,
+            enabled: false,
+            ..crate::chat::SubAgentConfig::inherit(crate::chat::SubAgentRole::Memory)
+        }],
+    };
+    let resolved = crate::chat::resolve_swarm(
+        &test_profile(),
+        "secret",
+        &config,
+        &crate::config::AppConfig::default(),
+        &crate::secrets::MemorySecretStore::default(),
+    );
+    agent.set_swarm(resolved);
+
+    agent
+        .respond(&client, "Я переехал в Берлин".to_string())
+        .await
+        .expect("respond");
+
+    assert_eq!(client.seen_models.lock().expect("models").len(), 2);
+    assert_eq!(
+        agent.memory().facts.get("location").map(String::as_str),
+        Some("Берлин")
+    );
+}
+
+#[tokio::test]
+async fn memory_agent_uses_its_own_model_override() {
+    let client = RecordingClient {
+        replies: std::sync::Mutex::new(vec![
+            r#"{"facts":[{"key":"location","value":"Берлин","layer":"long-term"}]}"#.to_string(),
+            "Главный ответ".to_string(),
+        ]),
+        seen_models: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = summary_agent();
+
+    // Memory sub-agent gets a cheap model; same provider → reuses main token.
+    let mut config = crate::chat::SwarmConfig::defaults();
+    config.set(crate::chat::SubAgentConfig {
+        model: "cheap-extractor".to_string(),
+        ..crate::chat::SubAgentConfig::inherit(crate::chat::SubAgentRole::Memory)
+    });
+    let resolved = crate::chat::resolve_swarm(
+        &test_profile(),
+        "secret",
+        &config,
+        &crate::config::AppConfig::default(),
+        &crate::secrets::MemorySecretStore::default(),
+    );
+    agent.set_swarm(resolved);
+
+    agent
+        .respond(&client, "Я переехал в Берлин".to_string())
+        .await
+        .expect("respond");
+
+    let models = client.seen_models.lock().expect("models");
+    // Main ran first with the agent model; post-turn extraction used the override.
+    assert_eq!(models.first().map(String::as_str), Some("test-model"));
+    assert!(models.iter().any(|model| model == "cheap-extractor"));
+}
+
+#[test]
+fn legal_invariant_sanitizer_removes_unverified_citations_and_amounts() {
+    let invariants = vec!["Не выдумывать нормы права.".to_string()];
+    let answer = "Требуйте проценты по ст. 395 ГК РФ.\nГоспошлина составит 2 300 руб.\nПриложите договор и акт.";
+
+    let sanitized = sanitize_unverified_legal_claims(&invariants, answer, "");
+
+    assert!(!sanitized.contains("395"));
+    assert!(!sanitized.contains("2 300"));
+    assert!(sanitized.contains("нужно проверить"));
+    assert!(sanitized.contains("Приложите договор и акт."));
+    assert!(local_invariant_violations(&invariants, &sanitized).is_empty());
+}
+
+#[test]
+fn legal_invariant_sanitizes_even_cautious_unverified_reference() {
+    let invariants = vec!["Не выдумывать нормы права.".to_string()];
+    let answer =
+        "Применимую статью ГК РФ нужно проверить по договору и актуальной редакции закона.";
+
+    let sanitized = sanitize_unverified_legal_claims(&invariants, answer, "");
+    assert!(!sanitized.contains("ГК РФ"));
+    assert!(sanitized.contains("нужно проверить"));
+    assert!(local_invariant_violations(&invariants, &sanitized).is_empty());
+}
+
+#[test]
+fn legal_invariant_sanitizes_unverified_absolute_claims_without_citation() {
+    let invariants = vec!["Не выдумывать нормы права.".to_string()];
+    let answer = "Досудебный порядок обязателен: иначе суд может оставить иск без рассмотрения.\nСоберите договор и акт.";
+
+    let sanitized = sanitize_unverified_legal_claims(&invariants, answer, "");
+
+    assert!(!sanitized.contains("обязателен"));
+    assert!(!sanitized.contains("без рассмотрения"));
+    assert!(sanitized.contains("Соберите договор и акт."));
+}
+
+#[test]
+fn legal_invariant_replaces_year_missing_from_user_context() {
+    let invariants = vec!["Не выдумывать нормы права.".to_string()];
+    let answer = "Договор №12 от 01.04.2025 и приложение от 2026 года.";
+
+    let sanitized = sanitize_unverified_legal_claims(
+        &invariants,
+        answer,
+        "Сейчас 2026 год; договор от 1 апреля.",
+    );
+
+    assert!(sanitized.contains("01.04.[год]"));
+    assert!(sanitized.contains("2026 года"));
+    assert!(!sanitized.contains("2025"));
+}
+
+#[test]
+fn legal_invariant_keeps_user_term_but_removes_invented_deadlines() {
+    let invariants = vec!["Не выдумывать нормы права.".to_string()];
+    let answer = "По договору оплата через 5 рабочих дней.\nВ претензии потребуйте оплатить в течение 10 дней.\nОтвет обычно ждут 30 дней.";
+
+    let sanitized = sanitize_unverified_legal_claims(
+        &invariants,
+        answer,
+        "В договоре написано: оплата в течение 5 рабочих дней.",
+    );
+
+    assert!(sanitized.contains("5 рабочих дней"));
+    assert!(!sanitized.contains("10 дней"));
+    assert!(!sanitized.contains("30 дней"));
+}
+
+#[test]
+fn legal_invariant_does_not_reuse_contract_payment_term_as_claim_deadline() {
+    let invariants = vec!["Не выдумывать нормы права.".to_string()];
+    let answer = "1. В течение 5 рабочих дней с момента получения настоящей претензии оплатить долг.\nАкт подписан [дата, например: 30 апреля].";
+
+    let sanitized = sanitize_unverified_legal_claims(
+        &invariants,
+        answer,
+        "По договору оплата в течение 5 рабочих дней после подписания акта.",
+    );
+
+    assert!(sanitized.contains("[срок требования]"));
+    assert!(!sanitized.contains("5 рабочих дней с момента получения"));
+    assert!(!sanitized.contains("30 апреля"));
+    assert!(sanitized.contains("[дата подписания акта]"));
+}
+
+#[test]
+fn legal_invariant_sanitizes_unverified_court_outcome_and_timeline() {
+    let invariants = vec!["Не выдумывать нормы права.".to_string()];
+    let answer = "Без квитанции суд откажет во взыскании расходов.\nЕсли тянуть год-полтора, срок подойдёт к концу.\nПроверьте документы.";
+
+    let sanitized = sanitize_unverified_legal_claims(&invariants, answer, "");
+
+    assert!(!sanitized.contains("суд откажет"));
+    assert!(!sanitized.contains("год-полтора"));
+    assert!(sanitized.contains("Проверьте документы."));
 }

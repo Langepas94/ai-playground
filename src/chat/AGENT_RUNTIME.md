@@ -252,14 +252,40 @@ Web routes `/api/agent/chat` и `/api/agent/session` - это routes локал�
 runtime, а не routes провайдера. Провайдер вызывается только внутри
 `ProviderClient`.
 
+## Рой и оркестратор хода
+
+Живой чат (`ChatAgent::respond*`) исполняется детерминированным
+`SwarmOrchestrator` (код, не LLM). Каждый агент — сущность `trait SubAgent`.
+Дефолтная стратегия — `sticky-facts`. Поток хода:
+
+```text
+User Query
+  -> PromptBuilder (system + [agent:domain] + [memory:long-term] +
+     [user-profile дедуп] + [memory:working] + [invariants] + facts +
+     [stage:rules] + окно + query)
+  -> stage-ответчик по task.stage (Planning|Execution|Validation|Done) | General
+  -> InvariantAgent: Pass -> commit | Fail -> retry ответчика (<= MAX_INVARIANT_RETRIES)
+  -> commit + seed task goal/title
+  -> stage_complete? -> переход по TaskStage::allowed_next (код, не LLM)
+  -> пост-агенты: Memory(non-sticky) -> Summary -> Profile
+  -> (ChatResponse, StatefulReport)
+```
+
+FSM этапов: `Planning -> Execution -> Validation -> Done` (+ легальные возвраты
+`Execution->Planning`, `Validation->Execution`). Целевую стадию выбирает только
+код по таблице переходов; модель лишь помечает готовность маркером
+`<<STAGE_DONE>>`. Полная карта сущностей — секция «Рой агентов» в `README.md`.
+
 ## Что еще не реализовано
 
 Сейчас нет:
 
 - vector embeddings;
-- semantic retrieval;
-- долговременной памяти пользователя между разными сессиями;
-- self-reflective memory.
+- semantic retrieval.
+
+Долговременная память между сессиями реализована: `Memory` под-агент роя
+извлекает KV-факты на любой стратегии и пишет `long-term` в profile-shared store
+(переживает новую сессию). Подробнее — секция «Рой агентов» в `README.md`.
 
 Текущая стратегия - явный request-time context builder:
 
