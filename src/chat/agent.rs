@@ -223,6 +223,10 @@ impl ChatAgent {
             .collect();
     }
 
+    pub fn has_invariants(&self) -> bool {
+        !self.invariants.is_empty()
+    }
+
     /// Free-text domain description that keeps the agent on-topic.
     pub fn set_domain(&mut self, domain: impl Into<String>) {
         self.domain = domain.into().trim().to_string();
@@ -923,6 +927,13 @@ pub struct StatefulReport {
     pub stage_transition: Option<StageTransition>,
     /// Invariants the last response violated (empty = clean).
     pub violations: Vec<String>,
+    /// Code-level invariant gate result: not_run, pass, blocked, or unverified.
+    pub invariant_status: String,
+    /// Safe summary for UI/debug. This is a decision trace, not chain-of-thought.
+    pub invariant_summary: String,
+    /// Titles (or goals) of the paused tasks tracked in parallel with the active
+    /// one. Empty when no other task is on the board.
+    pub backlog: Vec<String>,
     /// Combined token metrics of the auxiliary LLM calls.
     pub metrics: Option<RequestMetrics>,
 }
@@ -1034,30 +1045,49 @@ pub(crate) fn parse_profile_updates(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Parse `{"violations":[...]}` into a list of violated-constraint strings.
-pub(crate) fn parse_invariant_violations(text: &str) -> Vec<String> {
-    let Some(value) = extract_json_value(text) else {
-        return Vec::new();
-    };
-    let array = match &value {
-        serde_json::Value::Array(items) => items.clone(),
+/// Parse a strict invariant-check response. `None` means the checker did not
+/// return the required schema, which must be handled fail-closed for invariants
+/// that code cannot evaluate deterministically.
+pub(crate) fn parse_invariant_check(text: &str) -> Option<Vec<String>> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
+        return None;
+    }
+    let value = serde_json::from_str::<serde_json::Value>(trimmed).ok()?;
+    let array = match value {
         serde_json::Value::Object(map) => map
             .get("violations")
             .and_then(|value| value.as_array())
-            .cloned()
-            .unwrap_or_default(),
-        _ => Vec::new(),
+            .cloned()?,
+        _ => return None,
     };
-    array
+    let violations = array
         .iter()
-        .filter_map(|item| item.as_str())
+        .map(|item| item.as_str())
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
         .map(str::trim)
         .filter(|item| !item.is_empty())
         .map(ToOwned::to_owned)
-        .collect()
+        .collect();
+    Some(violations)
 }
 
 pub(crate) fn local_invariant_violations(invariants: &[String], answer: &str) -> Vec<String> {
+    local_invariant_check(invariants, answer).violations
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct LocalInvariantCheck {
+    pub violations: Vec<String>,
+    /// Invariants whose semantics are fully covered by deterministic code.
+    pub verified: Vec<String>,
+    /// Invariants that need the semantic checker. If it is unavailable or
+    /// malformed, the orchestrator blocks the pending answer.
+    pub unknown: Vec<String>,
+}
+
+pub(crate) fn local_invariant_check(invariants: &[String], answer: &str) -> LocalInvariantCheck {
     let answer_lower = answer.to_lowercase();
     let has_legal_citation = contains_any_agent(
         &answer_lower,
@@ -1070,32 +1100,361 @@ pub(crate) fn local_invariant_violations(invariants: &[String], answer: &str) ->
             || answer_lower.contains("недоста")
             || answer_lower.contains("не хватает"));
     let has_urgency = answer_lower.contains("сроч") || answer_lower.contains("не затяг");
-    let has_cyrillic = answer_lower.chars().any(|ch| matches!(ch, 'а'..='я' | 'ё'));
-    invariants
-        .iter()
-        .filter_map(|invariant| {
-            let normalized = invariant.to_lowercase();
-            let violated =
-                (normalized.contains("отвечать") && normalized.contains("рус") && !has_cyrillic)
-                    || (normalized.contains("не выдумывать")
-                        && normalized.contains("норм")
-                        && has_legal_citation)
-                    || (normalized.contains("отделять факты")
-                        && normalized.contains("предполож")
-                        && !has_fact_assumption_split)
-                    || (normalized.contains("недоста")
-                        && normalized.contains("риск")
-                        && !has_risk_and_documents)
-                    || (normalized.contains("сроч")
-                        && normalized.contains("риск")
-                        && answer_lower.contains("суд")
-                        && !has_urgency)
-                    || (normalized.contains("не называть")
-                        && normalized.contains("юридическим заключением")
-                        && answer_lower.contains("юридическое заключение"));
-            violated.then(|| invariant.clone())
+    let russian_enough = mostly_russian_prose(answer);
+    let legal_conclusion_claim = contains_non_negated_phrase(
+        &answer_lower,
+        &["юридическое заключение", "юридическим заключением"],
+    );
+
+    let mut result = LocalInvariantCheck::default();
+    for invariant in invariants {
+        let normalized = invariant.to_lowercase();
+        let violation = if normalized.contains("отвечать") && normalized.contains("рус")
+        {
+            Some(!russian_enough)
+        } else if normalized.contains("не выдумывать") && normalized.contains("норм")
+        {
+            Some(has_legal_citation)
+        } else if normalized.contains("отделять факты") && normalized.contains("предполож")
+        {
+            Some(!has_fact_assumption_split)
+        } else if normalized.contains("недоста") && normalized.contains("риск") {
+            Some(!has_risk_and_documents)
+        } else if normalized.contains("сроч") && normalized.contains("риск") {
+            Some(answer_lower.contains("суд") && !has_urgency)
+        } else if normalized.contains("не называть")
+            && normalized.contains("юридическим заключением")
+        {
+            Some(legal_conclusion_claim)
+        } else if let Some(allowed) = extract_only_allowed_technologies(&normalized) {
+            Some(mentions_disallowed_technology(&answer_lower, &allowed))
+        } else if normalized.contains("не обещ")
+            && contains_any_agent(&normalized, &["исход", "результат", "побед"])
+        {
+            Some(contains_any_agent(
+                &answer_lower,
+                &[
+                    "гарантир",
+                    "точно выигр",
+                    "обязательно побед",
+                    "100%",
+                    "сто процентов",
+                ],
+            ))
+        } else if normalized.contains("не отправ")
+            && normalized.contains("проверк")
+            && normalized.contains("реквизит")
+        {
+            let recommends_send =
+                contains_any_agent(&answer_lower, &["отправляйте", "отправьте", "направьте"]);
+            let requires_check = answer_lower.contains("провер")
+                && (answer_lower.contains("реквизит") || answer_lower.contains("данн"));
+            Some(recommends_send && !requires_check)
+        } else if let Some(forbidden) = extract_forbidden_literal(&normalized) {
+            Some(contains_non_negated_phrase(
+                &answer_lower,
+                &[forbidden.as_str()],
+            ))
+        } else {
+            None
+        };
+
+        match violation {
+            Some(true) => {
+                result.verified.push(invariant.clone());
+                result.violations.push(invariant.clone());
+            }
+            Some(false) => result.verified.push(invariant.clone()),
+            None => result.unknown.push(invariant.clone()),
+        }
+    }
+    result
+}
+
+fn mostly_russian_prose(text: &str) -> bool {
+    let mut in_code = false;
+    let mut cyrillic = 0usize;
+    let mut latin = 0usize;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            in_code = !in_code;
+            continue;
+        }
+        if in_code {
+            continue;
+        }
+        for ch in line.chars() {
+            let lower = ch.to_lowercase().next().unwrap_or(ch);
+            if matches!(lower, 'а'..='я' | 'ё') {
+                cyrillic += 1;
+            } else if lower.is_ascii_alphabetic() {
+                latin += 1;
+            }
+        }
+    }
+    cyrillic >= 4 && cyrillic >= latin
+}
+
+fn contains_non_negated_phrase(text: &str, phrases: &[&str]) -> bool {
+    phrases.iter().any(|phrase| {
+        text.match_indices(phrase).any(|(index, _)| {
+            let clause_start = text[..index]
+                .rmatch_indices(['.', '!', '?', '\n', ';'])
+                .next()
+                .map(|(offset, delimiter)| offset + delimiter.len())
+                .unwrap_or(0);
+            let phrase_end = index + phrase.len();
+            let clause_end = text[phrase_end..]
+                .match_indices(['.', '!', '?', '\n', ';'])
+                .next()
+                .map(|(offset, _)| phrase_end + offset)
+                .unwrap_or(text.len());
+            let context = &text[clause_start..clause_end];
+            !contains_any_agent(
+                context,
+                &[
+                    "не является",
+                    "не юридическ",
+                    "не счита",
+                    "не называ",
+                    "не использу",
+                    "не примен",
+                    "не предлага",
+                    "не обеща",
+                    "без ",
+                    "отказ от",
+                    "исключить",
+                    "запрещено",
+                ],
+            )
         })
-        .collect()
+    })
+}
+
+fn extract_forbidden_literal(invariant: &str) -> Option<String> {
+    let trimmed = invariant.trim().trim_end_matches(['.', ';', ':']).trim();
+    for prefix in [
+        "без ",
+        "не использовать ",
+        "не применять ",
+        "не предлагать ",
+        "запрещено использовать ",
+        "нельзя использовать ",
+    ] {
+        if let Some(value) = trimmed.strip_prefix(prefix) {
+            let value = value.trim();
+            if !value.is_empty() && value.split_whitespace().count() <= 8 {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn extract_only_allowed_technologies(invariant: &str) -> Option<Vec<String>> {
+    let value = [
+        "архитектура только ",
+        "стек только ",
+        "использовать только ",
+        "только ",
+    ]
+    .iter()
+    .find_map(|prefix| invariant.strip_prefix(prefix))?;
+    let allowed: Vec<String> = known_technologies()
+        .iter()
+        .filter(|technology| contains_standalone_term(value, technology))
+        .map(|technology| (*technology).to_string())
+        .collect();
+    (!allowed.is_empty()).then_some(allowed)
+}
+
+fn mentions_disallowed_technology(answer: &str, allowed: &[String]) -> bool {
+    known_technologies().iter().any(|technology| {
+        !allowed.iter().any(|item| item.as_str() == *technology)
+            && contains_standalone_term(answer, technology)
+            && contains_non_negated_phrase(answer, &[*technology])
+    })
+}
+
+fn contains_standalone_term(text: &str, term: &str) -> bool {
+    text.match_indices(term).any(|(index, _)| {
+        let before = text[..index].chars().next_back();
+        let after = text[index + term.len()..].chars().next();
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+    })
+}
+
+fn known_technologies() -> &'static [&'static str] {
+    &[
+        "angular",
+        "axum",
+        "coroutines",
+        "dart",
+        "django",
+        "express",
+        "fastapi",
+        "flutter",
+        "java",
+        "javascript",
+        "kotlin",
+        "ktor",
+        "mvc",
+        "mvi",
+        "mvvm",
+        "nestjs",
+        "node.js",
+        "python",
+        "react",
+        "rust",
+        "rxjava",
+        "spring",
+        "swift",
+        "swiftui",
+        "typescript",
+        "vue",
+    ]
+}
+
+/// Deterministic refusal shown when a response still breaks hard invariants
+/// after the bounded retries. Invariants live outside the dialog and outrank the
+/// current request, so the orchestrator blocks the violating answer instead of
+/// returning it (lecture rule: the assistant refuses to propose solutions that
+/// break invariants, and explains why). Code-level, never an LLM decision.
+pub(crate) fn build_invariant_refusal_for_prompt(
+    violations: &[String],
+    user_prompt: &str,
+) -> String {
+    let mut out = String::from(
+        "⛔ Не могу выдать этот ответ: он нарушает инварианты задачи.\n\nНарушенные инварианты:\n",
+    );
+    for violation in violations {
+        let line = violation.trim();
+        if line.is_empty() {
+            continue;
+        }
+        out.push_str("• ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    let prompt = user_prompt.trim();
+    if !prompt.is_empty() {
+        out.push_str("\nКонфликт: текущая просьба требует результата, который нельзя безопасно выдать при этих ограничениях.");
+    }
+    out.push_str(
+        "\nПочему отказ: инварианты зафиксированы отдельно от диалога и не меняются \
+от запроса к запросу — они приоритетнее текущей просьбы. Я переработал ответ, но \
+снять нарушение не удалось.\n\nЧто можно сделать: переформулируйте запрос в рамках \
+ограничений или измените сам инвариант, если это допустимо.",
+    );
+    out
+}
+
+pub(crate) fn build_invariant_unverified_response(invariants: &[String]) -> String {
+    let mut out = String::from(
+        "⚠️ Я не могу безопасно выдать подготовленный ответ: проверка обязательных инвариантов не завершилась, поэтому ответ заблокирован на уровне кода.\n\nНужно подтвердить:\n",
+    );
+    for invariant in invariants {
+        let line = invariant.trim();
+        if !line.is_empty() {
+            out.push_str("• ");
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out.push_str(
+        "\nУточните ограничение более формально либо повторите запрос — я заново проверю ответ. Сам неподтверждённый вариант пользователю не показывается.",
+    );
+    out
+}
+
+/// Whether the user's prompt starts a brand-new task (vs. continuing the current
+/// one). Used by the orchestrator to reset the FSM to `Clarify` — including from
+/// the terminal `Done` stage, which otherwise has no outgoing transition. Pure
+/// keyword heuristic, no LLM.
+pub(crate) fn starts_new_task(current: TaskStage, prompt: &str) -> bool {
+    let lower = prompt.to_lowercase();
+    let explicit = contains_any_agent(
+        &lower,
+        &[
+            "новая задача",
+            "новую задачу",
+            "другая задача",
+            "другую задачу",
+            "ещё одна задача",
+            "еще одна задача",
+            "ещё одну задачу",
+            "еще одну задачу",
+            "следующая задача",
+            "следующую задачу",
+            "давай теперь",
+            "теперь сделаем",
+            "теперь составим",
+            "теперь подготов",
+            "теперь напиш",
+            "теперь оформ",
+            "займёмся",
+            "займемся",
+            "перейдём к",
+            "перейдем к",
+            "new task",
+            "next task",
+            "another task",
+        ],
+    );
+    // At the terminal stage any fresh actionable request is necessarily a new
+    // task: the current one is finished and cannot advance further.
+    let done_with_intent = current == TaskStage::Done
+        && infer_task_state_from_exchange(TaskStage::Clarify, prompt, "").is_some();
+    explicit || done_with_intent
+}
+
+/// Whether the prompt asks to switch back to a paused task already on the board.
+/// Matches an explicit "back to" cue plus an overlap with that task's title/goal,
+/// so the orchestrator can resume the right one. Pure keyword heuristic, no LLM.
+pub(crate) fn switch_back_target(
+    prompt: &str,
+    backlog: &[super::store::TaskContext],
+) -> Option<usize> {
+    let lower = prompt.to_lowercase();
+    let wants_switch = contains_any_agent(
+        &lower,
+        &[
+            "вернёмся к",
+            "вернемся к",
+            "вернуться к",
+            "назад к",
+            "обратно к",
+            "продолжим задачу",
+            "продолжить задачу",
+            "back to",
+            "switch to",
+            "resume task",
+        ],
+    );
+    if !wants_switch {
+        return None;
+    }
+    backlog
+        .iter()
+        .enumerate()
+        .filter_map(|(index, task)| {
+            let score = task_reference_overlap(&lower, task);
+            (score > 0).then_some((index, score))
+        })
+        .max_by_key(|(_, score)| *score)
+        .map(|(index, _)| index)
+}
+
+/// Count significant title/goal words from `task` that appear in the prompt.
+fn task_reference_overlap(prompt_lower: &str, task: &super::store::TaskContext) -> usize {
+    let mut haystack = task.title.to_lowercase();
+    haystack.push(' ');
+    haystack.push_str(&task.goal.to_lowercase());
+    haystack
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|word| word.chars().count() >= 4)
+        .filter(|word| prompt_lower.contains(*word))
+        .count()
 }
 
 /// Last-resort guard for legal-agent answers. If a model keeps asserting an

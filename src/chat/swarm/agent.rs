@@ -19,6 +19,15 @@ use super::config::SubAgentRole;
 use super::runtime::ResolvedSwarm;
 use super::{SwarmReport, SwarmRunRecord};
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum InvariantCheckStatus {
+    #[default]
+    NotRun,
+    Passed,
+    Failed,
+    Unavailable,
+}
+
 /// What one agent produced this turn. The orchestrator (pure code) reads this to
 /// decide routing — agents never name a target stage themselves.
 #[derive(Debug, Clone, Default)]
@@ -32,6 +41,9 @@ pub struct SubAgentOutcome {
     pub artifact: Option<(String, String)>,
     /// Invariant violations found (Invariant agent only).
     pub violations: Vec<String>,
+    /// Whether the semantic invariant check passed, failed, or could not be
+    /// trusted. `Unavailable` is fail-closed for locally unknown constraints.
+    pub invariant_status: InvariantCheckStatus,
     /// When set with `answer`, this answer is terminal for the turn (e.g. the
     /// Topic agent could not route and returns a canned message).
     pub short_circuit: bool,

@@ -116,7 +116,13 @@ async fn respond(
         // Pipeline tasks need the stage's expected artifact key; the model may
         // name it in the marker, else default to the stage role name.
         let key = if key.is_empty() {
-            role.as_str().to_string()
+            turn.task
+                .as_ref()
+                .and_then(|task| task.active_pipeline_stage())
+                .map(|stage| stage.artifact_key.trim())
+                .filter(|key| !key.is_empty())
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| role.as_str().to_string())
         } else {
             key
         };

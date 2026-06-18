@@ -5,8 +5,8 @@
 use async_trait::async_trait;
 
 use crate::chat::agent::{
-    local_invariant_violations, memory_facts_extraction_control, memory_summary_control,
-    parse_extracted_facts, parse_invariant_violations, parse_profile_updates,
+    local_invariant_check, memory_facts_extraction_control, memory_summary_control,
+    parse_extracted_facts, parse_invariant_check, parse_profile_updates,
     parse_topic_route_decision, topic_classifier_control, topic_not_found_message,
 };
 use crate::chat::memory::{
@@ -14,7 +14,7 @@ use crate::chat::memory::{
     format_messages_for_summary, looks_sensitive,
 };
 
-use super::super::agent::{SubAgent, SubAgentOutcome, SwarmTurn};
+use super::super::agent::{InvariantCheckStatus, SubAgent, SubAgentOutcome, SwarmTurn};
 use super::super::config::SubAgentRole;
 use super::{
     DEFAULT_INVARIANT_CHECK_PROMPT, DEFAULT_PROFILE_FILL_PROMPT, MEMORY_COMPACT_TIMEOUT,
@@ -225,9 +225,12 @@ impl SubAgent for InvariantAgent {
         // Check the responder's pending answer (before it is committed).
         let answer = turn.pending_answer.clone().unwrap_or_default();
         if answer.trim().is_empty() {
-            return SubAgentOutcome::default();
+            return SubAgentOutcome {
+                invariant_status: InvariantCheckStatus::Unavailable,
+                ..SubAgentOutcome::default()
+            };
         }
-        let local_violations = local_invariant_violations(turn.invariants, &answer);
+        let local = local_invariant_check(turn.invariants, &answer);
         let list = turn
             .invariants
             .iter()
@@ -248,18 +251,60 @@ impl SubAgent for InvariantAgent {
             )
             .await
         else {
-            // No LLM check available — still apply deterministic local checks.
+            // Locally supported rules remain deterministic. Any unknown rule is
+            // fail-closed: the pending answer must not be released.
             return SubAgentOutcome {
-                violations: local_violations,
+                invariant_status: if local.violations.is_empty() && local.unknown.is_empty() {
+                    InvariantCheckStatus::Passed
+                } else if !local.violations.is_empty() {
+                    InvariantCheckStatus::Failed
+                } else {
+                    InvariantCheckStatus::Unavailable
+                },
+                violations: local.violations,
                 ..SubAgentOutcome::default()
             };
         };
-        let mut violations = parse_invariant_violations(response.text.as_str());
-        violations.extend(local_violations);
+        let Some(reported) = parse_invariant_check(response.text.as_str()) else {
+            return SubAgentOutcome {
+                invariant_status: if local.violations.is_empty() && local.unknown.is_empty() {
+                    InvariantCheckStatus::Passed
+                } else if !local.violations.is_empty() {
+                    InvariantCheckStatus::Failed
+                } else {
+                    InvariantCheckStatus::Unavailable
+                },
+                violations: local.violations,
+                metrics: Some(response.metrics),
+                ..SubAgentOutcome::default()
+            };
+        };
+        let mut invalid_reference = false;
+        let mut violations = Vec::new();
+        for reported_violation in reported {
+            if let Some(configured) = turn
+                .invariants
+                .iter()
+                .find(|configured| configured.trim() == reported_violation.trim())
+            {
+                violations.push(configured.clone());
+            } else {
+                invalid_reference = true;
+            }
+        }
+        violations.extend(local.violations);
         violations.sort();
         violations.dedup();
+        let invariant_status = if invalid_reference {
+            InvariantCheckStatus::Unavailable
+        } else if violations.is_empty() {
+            InvariantCheckStatus::Passed
+        } else {
+            InvariantCheckStatus::Failed
+        };
         SubAgentOutcome {
             violations,
+            invariant_status,
             metrics: Some(response.metrics),
             ..SubAgentOutcome::default()
         }

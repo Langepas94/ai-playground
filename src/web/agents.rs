@@ -557,6 +557,7 @@ impl TaskPayload {
             results: clean_lines(self.results),
             notes: self.notes.trim().to_string(),
             violations: Vec::new(),
+            backlog: Vec::new(),
         }
     }
 }

@@ -2318,3 +2318,155 @@ fn legal_invariant_sanitizes_unverified_court_outcome_and_timeline() {
     assert!(!sanitized.contains("год-полтора"));
     assert!(sanitized.contains("Проверьте документы."));
 }
+
+#[test]
+fn russian_invariant_rejects_token_cyrillic_in_english_answer() {
+    let invariants = vec!["Отвечать только на русском языке".to_string()];
+    let check = local_invariant_check(
+        &invariants,
+        "Here is the complete implementation and deployment guide. Готово.",
+    );
+    assert_eq!(check.violations, invariants);
+    assert!(check.unknown.is_empty());
+}
+
+#[test]
+fn russian_invariant_ignores_latin_identifiers_inside_code_block() {
+    let invariants = vec!["Отвечать только на русском языке".to_string()];
+    let answer = "Ниже краткое объяснение реализации на русском языке.\n```rust\nfn main() { println!(\"hello\"); }\n```";
+    let check = local_invariant_check(&invariants, answer);
+    assert!(check.violations.is_empty());
+    assert!(check.unknown.is_empty());
+}
+
+#[test]
+fn legal_disclaimer_is_not_a_false_positive() {
+    let invariants = vec!["Не называть ответ юридическим заключением".to_string()];
+    let check = local_invariant_check(
+        &invariants,
+        "Это не юридическое заключение, а рабочий черновик.",
+    );
+    assert!(check.violations.is_empty());
+    assert!(check.unknown.is_empty());
+}
+
+#[test]
+fn generic_forbidden_literal_is_enforced_locally() {
+    let invariants = vec!["Без RxJava".to_string()];
+    let violation = local_invariant_check(&invariants, "Подключим RxJava для обработки событий.");
+    assert_eq!(violation.violations, invariants);
+    assert!(violation.unknown.is_empty());
+
+    let compliant =
+        local_invariant_check(&invariants, "RxJava не используем; оставляем coroutines.");
+    assert!(compliant.violations.is_empty());
+    assert!(compliant.unknown.is_empty());
+
+    let unrelated_negation =
+        local_invariant_check(&invariants, "Kotlin не используем. Добавим RxJava.");
+    assert_eq!(unrelated_negation.violations, invariants);
+}
+
+#[test]
+fn stack_architecture_and_business_rules_are_enforced_locally() {
+    let stack = vec!["Только Kotlin и Ktor".to_string()];
+    assert_eq!(
+        local_invariant_check(&stack, "Сделаем сервис на Rust и Axum.").violations,
+        stack
+    );
+    assert!(
+        local_invariant_check(&stack, "Оставляем Kotlin и Ktor. Rust не используем.")
+            .violations
+            .is_empty()
+    );
+
+    let architecture = vec!["Архитектура только MVI".to_string()];
+    assert_eq!(
+        local_invariant_check(&architecture, "Предлагаю MVC.").violations,
+        architecture
+    );
+
+    let business = vec!["Не обещать гарантированный исход спора".to_string()];
+    assert_eq!(
+        local_invariant_check(&business, "Гарантируем победу в суде.").violations,
+        business
+    );
+}
+
+#[test]
+fn malformed_invariant_checker_payload_is_distinct_from_pass() {
+    assert_eq!(parse_invariant_check("PASS"), None);
+    assert_eq!(
+        parse_invariant_check(r#"{"violations":[]}"#),
+        Some(Vec::new())
+    );
+}
+
+#[test]
+fn invariant_refusal_names_every_broken_constraint() {
+    let refusal = build_invariant_refusal_for_prompt(
+        &[
+            "Только Kotlin и Ktor".to_string(),
+            "Без RxJava".to_string(),
+            "  ".to_string(), // blank lines are skipped
+        ],
+        "Сделай на Rust",
+    );
+    assert!(refusal.starts_with("⛔"));
+    assert!(refusal.contains("Только Kotlin и Ktor"));
+    assert!(refusal.contains("Без RxJava"));
+    assert!(refusal.contains("Почему отказ"));
+    assert!(refusal.contains("Конфликт"));
+    assert!(refusal.contains("Что можно сделать"));
+    assert_eq!(
+        refusal.matches('•').count(),
+        2,
+        "blank constraint must be dropped"
+    );
+}
+
+#[test]
+fn starts_new_task_detects_explicit_and_terminal_intent() {
+    use crate::chat::store::TaskStage;
+    // Explicit new-task cue, at any stage.
+    assert!(starts_new_task(
+        TaskStage::Planning,
+        "Давай теперь сделаем договор дарения"
+    ));
+    assert!(starts_new_task(TaskStage::Execution, "Новая задача: отчёт"));
+    // From the terminal stage, any fresh actionable request is a new task.
+    assert!(starts_new_task(TaskStage::Done, "Составь претензию"));
+    // Plain continuation is NOT a new task.
+    assert!(!starts_new_task(TaskStage::Planning, "Дальше"));
+    assert!(!starts_new_task(
+        TaskStage::Execution,
+        "Поправь третий пункт"
+    ));
+    // A neutral prompt at Done stays put.
+    assert!(!starts_new_task(TaskStage::Done, "Спасибо"));
+}
+
+#[test]
+fn switch_back_target_matches_paused_task_by_title() {
+    use crate::chat::store::TaskContext;
+    let backlog = vec![
+        TaskContext {
+            title: "Претензия по акту".to_string(),
+            ..TaskContext::default()
+        },
+        TaskContext {
+            goal: "договор аренды офиса".to_string(),
+            ..TaskContext::default()
+        },
+    ];
+    assert_eq!(
+        switch_back_target("Вернёмся к задаче претензия", &backlog),
+        Some(0)
+    );
+    assert_eq!(
+        switch_back_target("назад к договору аренды", &backlog),
+        Some(1)
+    );
+    // No switch cue → no match even if words overlap.
+    assert_eq!(switch_back_target("что с претензией", &backlog), None);
+}

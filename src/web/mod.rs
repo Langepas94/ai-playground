@@ -405,6 +405,10 @@ async fn chat_stream(
         mut agent,
         ..
     } = prepare_web_chat(&state, &request).await?;
+    // With hard invariants, never expose unchecked partial tokens. The provider
+    // may stream internally, but the browser receives only the finalized answer
+    // after the code-level invariant gate.
+    let buffer_until_invariant_check = agent.has_invariants();
     let prepared_stream = agent.prepare_stream_request(&state.client, &prompt).await?;
     let session_id = session.id.clone();
     let session_metrics_before = session.metrics.clone();
@@ -467,10 +471,14 @@ async fn chat_stream(
         let pending = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let marker = crate::chat::swarm::agents::STAGE_DONE_MARKER;
         let pending_cb = pending.clone();
+        let guarded_stream = buffer_until_invariant_check;
         let result = client
             .stream_chat_completion_with_debug(&profile, &token, chat_request, move |chunk| {
                 let mut buf = pending_cb.lock().expect("stream buffer");
                 buf.push_str(chunk);
+                if guarded_stream {
+                    return;
+                }
                 if let Some(nl) = buf.rfind('\n') {
                     let mut flush: String = buf.drain(..=nl).collect();
                     if let Some(i) = flush.find(marker) {
@@ -483,11 +491,15 @@ async fn chat_stream(
         // Flush the final partial line, stripped of the marker.
         {
             let mut buf = pending.lock().expect("stream buffer");
-            if let Some(i) = buf.find(marker) {
-                buf.replace_range(i..i + marker.len(), "");
-            }
-            if !buf.is_empty() {
-                let _ = tx.send(std::mem::take(&mut buf));
+            if !buffer_until_invariant_check {
+                if let Some(i) = buf.find(marker) {
+                    buf.replace_range(i..i + marker.len(), "");
+                }
+                if !buf.is_empty() {
+                    let _ = tx.send(std::mem::take(&mut buf));
+                }
+            } else {
+                buf.clear();
             }
         }
         match result {
@@ -497,6 +509,9 @@ async fn chat_stream(
                 let (assistant_text, _stream_aux) = agent
                     .finalize_stream(&client, &prompt, &response.text)
                     .await;
+                if buffer_until_invariant_check {
+                    let _ = tx.send(assistant_text.clone());
+                }
                 let (agent_state, stateful_metrics) = run_and_persist_stateful(
                     &sessions,
                     saved_agent_id.as_deref(),
@@ -711,6 +726,9 @@ fn stateful_debug_view(report: &StatefulReport) -> StatefulDebugView {
         resume_hint: report.resume_hint.clone(),
         pending_questions: report.pending_questions.clone(),
         violations: report.violations.clone(),
+        invariant_status: report.invariant_status.clone(),
+        invariant_summary: report.invariant_summary.clone(),
+        backlog: report.backlog.clone(),
         stage_transition: report
             .stage_transition
             .map(|transition| StageTransitionView {
@@ -1301,6 +1319,9 @@ struct StatefulDebugView {
     resume_hint: String,
     pending_questions: Vec<String>,
     violations: Vec<String>,
+    invariant_status: String,
+    invariant_summary: String,
+    backlog: Vec<String>,
     stage_transition: Option<StageTransitionView>,
 }
 

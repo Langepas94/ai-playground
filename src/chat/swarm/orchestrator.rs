@@ -3,22 +3,29 @@
 //!
 //! 1. (sticky-facts) MemoryAgent extracts facts before the responder.
 //! 2. (scoped) TopicAgent routes; may short-circuit with a canned answer.
+//! 2b. Task switching: a new-task intent parks the current task (paused, kept in
+//!     the backlog) and opens a fresh Clarify task — the only way to leave the
+//!     terminal Done stage; a "back to …" intent resumes a paused task.
 //! 3. Pick the responder deterministically by current FSM stage.
 //! 4. InvariantAgent validates → retry the responder on violations (bounded).
+//!    If violations survive the retries, the answer is BLOCKED and replaced with
+//!    a refusal — invariants outrank the request, never shipped when broken.
 //! 5. Commit the answer; advance the FSM in code via `allowed_next`.
 //! 6. Post-turn service agents: Memory (non-sticky), Summary, Profile.
 
 use crate::chat::agent::{
-    StageTransition, StatefulReport, infer_task_state_from_exchange, local_chat_response,
+    StageTransition, StatefulReport, build_invariant_refusal_for_prompt,
+    build_invariant_unverified_response, infer_task_state_from_exchange, local_chat_response,
     merge_optional_metrics, paused_user_supplied_next_info, sanitize_unverified_legal_claims,
-    task_decision_from_exchange, task_resume_hint, task_title_from_prompt,
+    starts_new_task, switch_back_target, task_decision_from_exchange, task_resume_hint,
+    task_title_from_prompt,
 };
 use crate::chat::memory::MemoryStrategy;
 use crate::chat::store::{TaskArtifact, TaskStage};
 use crate::errors::AppError;
 use crate::providers::{ChatMessage, ChatRequest, ChatResponse, RequestMetrics, Role};
 
-use super::agent::{SubAgent, SwarmTurn};
+use super::agent::{InvariantCheckStatus, SubAgent, SwarmTurn};
 use super::agents::{
     GeneralAgent, InvariantAgent, MemoryAgent, ProfileAgent, StageAgent, SummaryAgent, TopicAgent,
     strip_stage_marker, update_active_topic_file,
@@ -102,6 +109,11 @@ impl SwarmOrchestrator {
             }
         }
 
+        // 2b. Deterministic task switching: a new-task intent parks the current
+        // task and starts a fresh Clarify task; a "back to …" intent resumes a
+        // paused one. This is what lets the FSM leave the terminal Done stage.
+        apply_task_switching(turn, &prompt);
+
         // 3. Pick responder deterministically by current FSM stage.
         let responder_role = match turn.task.as_ref() {
             Some(task) => {
@@ -119,13 +131,17 @@ impl SwarmOrchestrator {
 
         // 4. Invariant validation + bounded retry.
         let mut violations = Vec::new();
+        let mut invariant_status = InvariantCheckStatus::NotRun;
         if !turn.invariants.is_empty() {
             let mut retries = 0;
             loop {
                 let inv = self.invariant.run(turn).await;
                 accumulate(turn, inv.metrics);
                 violations = inv.violations.clone();
-                if violations.is_empty() || retries >= MAX_INVARIANT_RETRIES {
+                invariant_status = inv.invariant_status;
+                if invariant_status != InvariantCheckStatus::Failed
+                    || retries >= MAX_INVARIANT_RETRIES
+                {
                     break;
                 }
                 retries += 1;
@@ -139,24 +155,53 @@ impl SwarmOrchestrator {
 
         // 5. Commit answer + deterministic task progress + pause/resume + FSM advance.
         let known_user_context = user_evidence_context(turn, &prompt);
-        let answer = sanitize_unverified_legal_claims(
+        let mut answer = sanitize_unverified_legal_claims(
             turn.invariants,
             &turn.pending_answer.take().unwrap_or_default(),
             &known_user_context,
         );
         violations = local_invariant_violations_after_sanitize(turn, &answer, violations);
+        if violations.is_empty() && invariant_status == InvariantCheckStatus::Failed {
+            invariant_status = InvariantCheckStatus::Passed;
+        }
+        // Hard enforcement: unresolved semantic validation and surviving
+        // violations are both blocked. The pending answer is never committed.
+        let blocked = if invariant_status == InvariantCheckStatus::Unavailable {
+            answer = build_invariant_unverified_response(turn.invariants);
+            true
+        } else if !violations.is_empty() {
+            invariant_status = InvariantCheckStatus::Failed;
+            answer = build_invariant_refusal_for_prompt(&violations, &prompt);
+            true
+        } else {
+            if !turn.invariants.is_empty() {
+                invariant_status = InvariantCheckStatus::Passed;
+            }
+            false
+        };
         self.commit(turn, &prompt, &answer);
-        seed_task_progress(turn, &prompt, &answer);
-        apply_pause_resume(turn, &prompt, &answer);
+        let pause_state_changed = if blocked {
+            set_invariant_gate_progress(turn, invariant_status);
+            false
+        } else {
+            seed_task_progress(turn, &prompt, &answer);
+            apply_pause_resume(turn, &prompt, &answer)
+        };
         // Deterministic progress + stage from user intent takes precedence.
         // The stage marker is only a fallback for neutral prompts such as
         // "дальше"; otherwise a Planning response could advance itself merely
         // because it finished answering a clarifying fact.
-        let has_task_intent = turn.task.as_ref().is_some_and(|task| {
-            infer_task_state_from_exchange(task.stage, &prompt, &answer).is_some()
-        });
-        let mut transition = apply_task_inference(turn, &prompt, &answer);
-        if !has_task_intent
+        let has_task_intent = !blocked
+            && !pause_state_changed
+            && turn.task.as_ref().is_some_and(|task| {
+                infer_task_state_from_exchange(task.stage, &prompt, &answer).is_some()
+            });
+        let mut transition = (!blocked && !pause_state_changed)
+            .then(|| apply_task_inference(turn, &prompt, &answer))
+            .flatten();
+        if !blocked
+            && !pause_state_changed
+            && !has_task_intent
             && !paused_user_supplied_next_info(&prompt)
             && let Some(explicit) =
                 apply_stage_completion(turn, outcome.stage_complete, outcome.artifact.clone())
@@ -206,9 +251,13 @@ impl SwarmOrchestrator {
             stateful.expected_action = task.expected_action.clone();
             stateful.paused = task.paused;
             stateful.resume_hint = task.resume_hint.clone();
+            stateful.backlog = backlog_titles(task);
         }
         stateful.stage_transition = transition;
         stateful.violations = violations;
+        stateful.invariant_status = invariant_status_label(invariant_status).to_string();
+        stateful.invariant_summary =
+            invariant_summary(invariant_status, turn.invariants, &stateful.violations);
         stateful.metrics = turn.aux_metrics.clone();
 
         let metrics = combine_response_metrics(main_metrics, &turn.aux_metrics);
@@ -240,6 +289,7 @@ impl SwarmOrchestrator {
                 return Ok(StreamPrep::Local(response, turn.aux_metrics.clone()));
             }
         }
+        apply_task_switching(turn, &prompt);
         let role = match turn.task.as_ref() {
             Some(task) => {
                 let response_stage = infer_task_state_from_exchange(task.stage, &prompt, "")
@@ -277,16 +327,58 @@ impl SwarmOrchestrator {
         // deterministically — same path as a non-streamed turn.
         let (raw_answer, complete, key) = strip_stage_marker(raw_answer);
         let known_user_context = user_evidence_context(turn, prompt);
-        let answer =
+        let mut answer =
             sanitize_unverified_legal_claims(turn.invariants, &raw_answer, &known_user_context);
+
+        // Invariant validation BEFORE commit (streaming does not retry). If the
+        // answer still breaks an invariant, block it and commit a refusal instead
+        // — the same hard enforcement as the non-streamed turn.
+        let mut violations = Vec::new();
+        let mut invariant_status = InvariantCheckStatus::NotRun;
+        if !turn.invariants.is_empty() {
+            turn.pending_answer = Some(answer.clone());
+            let inv = self.invariant.run(turn).await;
+            accumulate(turn, inv.metrics);
+            turn.pending_answer = None;
+            invariant_status = inv.invariant_status;
+            violations = local_invariant_violations_after_sanitize(turn, &answer, inv.violations);
+        }
+
+        if violations.is_empty() && invariant_status == InvariantCheckStatus::Failed {
+            invariant_status = InvariantCheckStatus::Passed;
+        }
+        let blocked = if invariant_status == InvariantCheckStatus::Unavailable {
+            answer = build_invariant_unverified_response(turn.invariants);
+            true
+        } else if !violations.is_empty() {
+            invariant_status = InvariantCheckStatus::Failed;
+            answer = build_invariant_refusal_for_prompt(&violations, prompt);
+            true
+        } else {
+            if !turn.invariants.is_empty() {
+                invariant_status = InvariantCheckStatus::Passed;
+            }
+            false
+        };
         self.commit(turn, prompt, &answer);
-        seed_task_progress(turn, prompt, &answer);
-        apply_pause_resume(turn, prompt, &answer);
-        let has_task_intent = turn.task.as_ref().is_some_and(|task| {
-            infer_task_state_from_exchange(task.stage, prompt, &answer).is_some()
-        });
-        let mut transition = apply_task_inference(turn, prompt, &answer);
-        if !has_task_intent
+        let pause_state_changed = if blocked {
+            set_invariant_gate_progress(turn, invariant_status);
+            false
+        } else {
+            seed_task_progress(turn, prompt, &answer);
+            apply_pause_resume(turn, prompt, &answer)
+        };
+        let has_task_intent = !blocked
+            && !pause_state_changed
+            && turn.task.as_ref().is_some_and(|task| {
+                infer_task_state_from_exchange(task.stage, prompt, &answer).is_some()
+            });
+        let mut transition = (!blocked && !pause_state_changed)
+            .then(|| apply_task_inference(turn, prompt, &answer))
+            .flatten();
+        if !blocked
+            && !pause_state_changed
+            && !has_task_intent
             && !paused_user_supplied_next_info(prompt)
             && let Some(explicit) = apply_stage_completion(
                 turn,
@@ -323,16 +415,8 @@ impl SwarmOrchestrator {
             }
         }
 
-        let mut violations = Vec::new();
-        if !turn.invariants.is_empty() {
-            turn.pending_answer = Some(answer.to_string());
-            let inv = self.invariant.run(turn).await;
-            accumulate(turn, inv.metrics);
-            violations = inv.violations.clone();
-            turn.pending_answer = None;
-            if let Some(task) = turn.task.as_mut() {
-                task.violations = violations.clone();
-            }
+        if let Some(task) = turn.task.as_mut() {
+            task.violations = violations.clone();
         }
 
         let _ = update_active_topic_file(turn, prompt, &answer);
@@ -345,9 +429,13 @@ impl SwarmOrchestrator {
             stateful.expected_action = task.expected_action.clone();
             stateful.paused = task.paused;
             stateful.resume_hint = task.resume_hint.clone();
+            stateful.backlog = backlog_titles(task);
         }
         stateful.stage_transition = transition;
         stateful.violations = violations;
+        stateful.invariant_status = invariant_status_label(invariant_status).to_string();
+        stateful.invariant_summary =
+            invariant_summary(invariant_status, turn.invariants, &stateful.violations);
         let aux = turn.aux_metrics.clone();
         stateful.metrics = aux.clone();
         (stateful, aux, answer)
@@ -453,6 +541,26 @@ fn apply_task_inference(
     None
 }
 
+/// Deterministic multi-task switching (no LLM): a clear new-task intent parks the
+/// active task — paused and preserved in the backlog — and starts a fresh
+/// `Clarify` task; a "back to …" intent resumes a matching paused task. This is
+/// the only path that lets the FSM leave the terminal `Done` stage: a finished
+/// task cannot advance, so a new request opens a new task instead.
+fn apply_task_switching(turn: &mut SwarmTurn<'_>, prompt: &str) {
+    let Some(task) = turn.task.as_mut() else {
+        return;
+    };
+    // Resuming a paused task takes precedence over starting a brand-new one.
+    if let Some(index) = switch_back_target(prompt, &task.backlog) {
+        task.switch_to_backlog(index);
+        return;
+    }
+    if starts_new_task(task.stage, prompt) {
+        let hint = task_resume_hint(task, prompt, "");
+        task.start_new_task(prompt.trim(), hint);
+    }
+}
+
 /// Deterministic stage completion: pipeline-contract advance (with human-approval
 /// pause) when the task has a pipeline, else plain `allowed_next` advance. No LLM
 /// decides the target stage.
@@ -496,9 +604,9 @@ fn apply_stage_completion(
 
 /// Deterministic pause/resume intent (ported from the legacy
 /// `apply_pause_resume_intent`). Keyword-based, no LLM.
-fn apply_pause_resume(turn: &mut SwarmTurn<'_>, user_prompt: &str, answer: &str) {
+fn apply_pause_resume(turn: &mut SwarmTurn<'_>, user_prompt: &str, answer: &str) -> bool {
     let Some(task) = turn.task.as_mut() else {
-        return;
+        return false;
     };
     let prompt = user_prompt.trim().to_lowercase();
     if task.paused
@@ -518,7 +626,7 @@ fn apply_pause_resume(turn: &mut SwarmTurn<'_>, user_prompt: &str, answer: &str)
         if !task.approve_pipeline_pause() {
             task.resume();
         }
-        return;
+        return true;
     }
     if !task.paused
         && (prompt.contains("pause")
@@ -530,8 +638,9 @@ fn apply_pause_resume(turn: &mut SwarmTurn<'_>, user_prompt: &str, answer: &str)
             || prompt.contains("потом продолжим"))
     {
         let hint = task_resume_hint(task, user_prompt, answer);
-        task.pause(hint);
+        return task.pause(hint);
     }
+    false
 }
 
 /// Deterministically seed the task's goal/title/decisions from the exchange
@@ -554,6 +663,68 @@ fn seed_task_progress(turn: &mut SwarmTurn<'_>, prompt: &str, answer: &str) {
         && !task.results.iter().any(|item| item == &decision)
     {
         task.results.push(decision);
+    }
+}
+
+/// Human-readable labels for the paused tasks on the board (title, falling back
+/// to goal), for the web debug view.
+fn backlog_titles(task: &crate::chat::store::TaskContext) -> Vec<String> {
+    task.backlog
+        .iter()
+        .map(|parked| {
+            let title = parked.title.trim();
+            if !title.is_empty() {
+                title.to_string()
+            } else {
+                truncate(parked.goal.trim(), 60)
+            }
+        })
+        .filter(|label| !label.is_empty())
+        .collect()
+}
+
+fn set_invariant_gate_progress(turn: &mut SwarmTurn<'_>, status: InvariantCheckStatus) {
+    let Some(task) = turn.task.as_mut() else {
+        return;
+    };
+    task.current_step = "resolve invariant gate".to_string();
+    task.expected_action = "user_input".to_string();
+    task.resume_hint = match status {
+        InvariantCheckStatus::Unavailable => {
+            "Clarify the invariant or retry validation; do not release the pending answer"
+                .to_string()
+        }
+        _ => "Rephrase the request within the saved invariants".to_string(),
+    };
+}
+
+fn invariant_status_label(status: InvariantCheckStatus) -> &'static str {
+    match status {
+        InvariantCheckStatus::NotRun => "not_run",
+        InvariantCheckStatus::Passed => "pass",
+        InvariantCheckStatus::Failed => "blocked",
+        InvariantCheckStatus::Unavailable => "unverified",
+    }
+}
+
+fn invariant_summary(
+    status: InvariantCheckStatus,
+    invariants: &[String],
+    violations: &[String],
+) -> String {
+    match status {
+        InvariantCheckStatus::NotRun => "Инварианты не заданы.".to_string(),
+        InvariantCheckStatus::Passed => format!(
+            "PASS: кодовый gate допустил ответ после проверки {} инвариант(ов).",
+            invariants.len()
+        ),
+        InvariantCheckStatus::Failed => format!(
+            "BLOCKED: ответ не выдан; нарушено {} инвариант(ов).",
+            violations.len()
+        ),
+        InvariantCheckStatus::Unavailable => {
+            "UNVERIFIED: семантическую проверку нельзя подтвердить; ответ заблокирован, требуется уточнение или повторная проверка.".to_string()
+        }
     }
 }
 

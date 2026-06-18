@@ -249,6 +249,11 @@ pub struct TaskContext {
     /// loop). Cleared once a clean response passes.
     #[serde(default)]
     pub violations: Vec<String>,
+    /// Other tasks tracked in parallel with this (active) one. Each is paused and
+    /// keeps its own stage/plan/results so work is never lost when the user
+    /// switches between tasks. Backlog entries never nest a backlog of their own.
+    #[serde(default)]
+    pub backlog: Vec<TaskContext>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -311,6 +316,48 @@ impl TaskContext {
             && self.pipeline.is_empty()
             && self.artifacts.is_empty()
             && self.results.iter().all(|item| item.trim().is_empty())
+            && self.backlog.is_empty()
+    }
+
+    /// Park the current active task and promote a fresh `Clarify` task driven by
+    /// `goal`. The parked task is paused (work preserved) and pushed to the
+    /// backlog so it can be resumed later. Called by the orchestrator when the
+    /// user clearly starts a new task — including from the terminal `Done` stage.
+    pub fn start_new_task(&mut self, goal: impl Into<String>, resume_hint: impl Into<String>) {
+        let goal = goal.into();
+        let mut backlog = std::mem::take(&mut self.backlog);
+        let mut parked = std::mem::replace(self, TaskContext::default());
+        // Flatten: backlog entries never carry their own backlog.
+        parked.backlog.clear();
+        if !parked.is_empty() {
+            if parked.stage != TaskStage::Done {
+                parked.pause(resume_hint);
+            }
+            backlog.push(parked);
+        }
+        self.backlog = backlog;
+        self.goal = goal;
+    }
+
+    /// Swap the active task with backlog entry `index`, resuming it. The currently
+    /// active task is paused and returned to the backlog so nothing is lost.
+    pub fn switch_to_backlog(&mut self, index: usize) -> bool {
+        if index >= self.backlog.len() {
+            return false;
+        }
+        let mut incoming = self.backlog.remove(index);
+        incoming.resume();
+        let mut backlog = std::mem::take(&mut self.backlog);
+        let mut outgoing = std::mem::replace(self, incoming);
+        outgoing.backlog.clear();
+        if !outgoing.is_empty() {
+            if outgoing.stage != TaskStage::Done {
+                outgoing.pause(String::new());
+            }
+            backlog.push(outgoing);
+        }
+        self.backlog = backlog;
+        true
     }
 
     pub fn pause(&mut self, resume_hint: impl Into<String>) -> bool {

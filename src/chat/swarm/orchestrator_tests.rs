@@ -5,7 +5,7 @@ use async_trait::async_trait;
 
 use crate::chat::agent::ChatAgent;
 use crate::chat::memory::AgentMemory;
-use crate::chat::store::{TaskContext, TaskStage};
+use crate::chat::store::{TaskContext, TaskPipelineStage, TaskStage};
 use crate::chat::swarm::{SubAgentConfig, SubAgentRole, SwarmConfig, resolve_swarm};
 use crate::config::{AppConfig, ProfileConfig};
 use crate::errors::AppError;
@@ -54,6 +54,84 @@ impl ProviderClient for MarkerClient {
             .push(request.model.clone());
         Ok(ChatResponse {
             text: self.text.clone(),
+            finish_reason: Some("stop".to_string()),
+            metrics: RequestMetrics {
+                elapsed_ms: 1,
+                usage: None,
+                cost: None,
+            },
+        })
+    }
+
+    async fn chat_completion_with_debug(
+        &self,
+        profile: &ProfileConfig,
+        token: &str,
+        request: ChatRequest,
+    ) -> Result<(ChatResponse, ProviderExchangeDebug), AppError> {
+        let response = self.chat_completion(profile, token, request).await?;
+        Ok((
+            response,
+            ProviderExchangeDebug {
+                request: crate::providers::HttpDebugRequest {
+                    method: "POST".to_string(),
+                    url: "https://example.test".to_string(),
+                    headers: Default::default(),
+                    body: serde_json::json!({}),
+                },
+                response: crate::providers::HttpDebugResponse {
+                    status: 200,
+                    headers: Default::default(),
+                    body: serde_json::json!({}),
+                },
+            },
+        ))
+    }
+}
+
+#[derive(Debug)]
+struct SemanticInvariantClient {
+    answer: String,
+    violations: Vec<String>,
+}
+
+impl SemanticInvariantClient {
+    fn new(answer: &str, violations: &[&str]) -> Self {
+        Self {
+            answer: answer.to_string(),
+            violations: violations.iter().map(|item| item.to_string()).collect(),
+        }
+    }
+}
+
+#[async_trait]
+impl ProviderClient for SemanticInvariantClient {
+    async fn list_models(
+        &self,
+        _profile: &ProfileConfig,
+        _token: &str,
+    ) -> Result<Vec<String>, AppError> {
+        Ok(Vec::new())
+    }
+
+    async fn chat_completion(
+        &self,
+        _profile: &ProfileConfig,
+        _token: &str,
+        request: ChatRequest,
+    ) -> Result<ChatResponse, AppError> {
+        let is_invariant_check = request.messages.first().is_some_and(|message| {
+            message
+                .content
+                .contains("You are a strict invariant checker")
+        });
+        let text = if is_invariant_check {
+            serde_json::json!({ "violations": self.violations }).to_string()
+        } else {
+            self.answer.clone()
+        };
+        Ok(ChatResponse {
+            text,
             finish_reason: Some("stop".to_string()),
             metrics: RequestMetrics {
                 elapsed_ms: 1,
@@ -141,6 +219,65 @@ async fn task_walks_full_lifecycle_through_all_stages() {
     // Done is terminal: no further transition.
     agent.respond(&client, "Дальше".to_string()).await.unwrap();
     assert_eq!(current_stage(&agent), TaskStage::Done);
+}
+
+#[tokio::test]
+async fn legal_pipeline_records_artifacts_and_waits_for_human_approval() {
+    let client = MarkerClient::new("Артефакт стадии готов. <<STAGE_DONE>>");
+    let mut agent = agent_with_task(TaskContext {
+        stage: TaskStage::Planning,
+        pipeline: vec![
+            TaskPipelineStage {
+                stage: TaskStage::Planning,
+                name: "Сбор фактов".to_string(),
+                system_prompt: "Отделить факты от предположений.".to_string(),
+                artifact_key: "facts_matrix".to_string(),
+                ..TaskPipelineStage::default()
+            },
+            TaskPipelineStage {
+                stage: TaskStage::Execution,
+                name: "Черновик претензии".to_string(),
+                system_prompt: "Подготовить черновик с плейсхолдерами.".to_string(),
+                artifact_key: "claim_draft".to_string(),
+                requires_human_approval: true,
+                ..TaskPipelineStage::default()
+            },
+            TaskPipelineStage {
+                stage: TaskStage::Validation,
+                name: "Проверка рисков".to_string(),
+                system_prompt: "Проверить документы, риски и реквизиты.".to_string(),
+                artifact_key: "risk_report".to_string(),
+                ..TaskPipelineStage::default()
+            },
+        ],
+        ..TaskContext::default()
+    });
+
+    agent.respond(&client, "Дальше".to_string()).await.unwrap();
+    let task = agent.task_state().expect("task");
+    assert_eq!(task.stage, TaskStage::Execution);
+    assert_eq!(task.artifacts[0].key, "facts_matrix");
+
+    agent.respond(&client, "Дальше".to_string()).await.unwrap();
+    let task = agent.task_state().expect("task");
+    assert_eq!(task.stage, TaskStage::Execution);
+    assert!(task.paused);
+    assert_eq!(task.expected_action, "user_input");
+    assert_eq!(task.artifacts[1].key, "claim_draft");
+
+    agent
+        .respond(&client, "Утверждаю черновик".to_string())
+        .await
+        .unwrap();
+    let task = agent.task_state().expect("task");
+    assert_eq!(task.stage, TaskStage::Validation);
+    assert!(!task.paused);
+
+    agent.respond(&client, "Дальше".to_string()).await.unwrap();
+    let task = agent.task_state().expect("task");
+    assert_eq!(task.stage, TaskStage::Done);
+    assert_eq!(task.artifacts[2].key, "risk_report");
+    assert_eq!(task.expected_action, "none");
 }
 
 #[tokio::test]
@@ -352,4 +489,236 @@ async fn repeated_execution_intent_does_not_advance_on_stage_marker() {
         .unwrap();
 
     assert_eq!(current_stage(&agent), TaskStage::Execution);
+}
+
+fn agent_with_task(task: TaskContext) -> ChatAgent {
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_task_state(Some(task));
+    agent
+}
+
+#[tokio::test]
+async fn persistent_invariant_violation_is_refused_not_returned() {
+    // The responder keeps answering in English; the deterministic "Russian only"
+    // local invariant check fires every retry. After the bounded retries the
+    // orchestrator must BLOCK the violating answer and return a refusal instead
+    // of shipping it (lecture: refuse solutions that break invariants).
+    let client = MarkerClient::new("Here is the auth service, all in English.");
+    let mut agent = agent_in_stage(TaskStage::Execution);
+    agent.set_invariants(vec!["Отвечать только на русском языке".to_string()]);
+
+    let response = agent
+        .respond(&client, "Сделай сервис авторизации".to_string())
+        .await
+        .unwrap();
+
+    assert!(
+        response.text.starts_with("⛔"),
+        "expected a refusal, got: {}",
+        response.text
+    );
+    assert!(
+        response.text.contains("Отвечать только на русском языке"),
+        "refusal must name the broken invariant"
+    );
+    assert!(
+        !response.text.contains("auth service"),
+        "the violating content must not be returned"
+    );
+    let report = agent.take_stateful_report();
+    assert!(
+        report.violations.iter().any(|v| v.contains("русском")),
+        "violations must be surfaced, got {:?}",
+        report.violations
+    );
+}
+
+#[tokio::test]
+async fn clean_answer_with_invariants_is_not_refused() {
+    // A compliant answer (Russian) must pass through untouched.
+    let client = MarkerClient::new("Готовлю сервис авторизации на русском.");
+    let mut agent = agent_in_stage(TaskStage::Execution);
+    agent.set_invariants(vec!["Отвечать только на русском языке".to_string()]);
+
+    let response = agent
+        .respond(&client, "Сделай сервис авторизации".to_string())
+        .await
+        .unwrap();
+
+    assert!(
+        !response.text.starts_with("⛔"),
+        "must not refuse a clean answer"
+    );
+    assert!(response.text.contains("авторизации"));
+    assert!(agent.take_stateful_report().violations.is_empty());
+}
+
+#[tokio::test]
+async fn unknown_invariant_with_invalid_checker_is_fail_closed_and_reasks() {
+    let client = MarkerClient::new("Перепишем сервис на Rust и Axum.");
+    let mut agent = agent_in_stage(TaskStage::Execution);
+    agent.set_invariants(vec![
+        "Всегда следовать внутреннему регламенту отдела A-17".to_string(),
+    ]);
+
+    let response = agent
+        .respond(&client, "Сделай реализацию".to_string())
+        .await
+        .unwrap();
+
+    assert!(response.text.starts_with("⚠️"));
+    assert!(response.text.contains("ответ заблокирован на уровне кода"));
+    assert!(!response.text.contains("Rust и Axum"));
+    let task = agent.task_state().expect("task");
+    assert_eq!(task.stage, TaskStage::Execution);
+    assert_eq!(task.expected_action, "user_input");
+    let report = agent.take_stateful_report();
+    assert_eq!(report.invariant_status, "unverified");
+    assert!(report.invariant_summary.contains("UNVERIFIED"));
+}
+
+#[tokio::test]
+async fn forbidden_stack_is_blocked_by_local_code_without_valid_checker_json() {
+    let client = MarkerClient::new("Добавим RxJava для событий.");
+    let mut agent = agent_in_stage(TaskStage::Execution);
+    agent.set_invariants(vec!["Без RxJava".to_string()]);
+
+    let response = agent
+        .respond(&client, "Реализуй обработку событий".to_string())
+        .await
+        .unwrap();
+
+    assert!(response.text.starts_with("⛔"));
+    assert!(response.text.contains("Без RxJava"));
+    assert!(!response.text.contains("Добавим RxJava"));
+    assert_eq!(
+        agent.task_state().expect("task").expected_action,
+        "user_input"
+    );
+}
+
+#[tokio::test]
+async fn architecture_and_business_rule_violations_are_blocked() {
+    let architecture = "Архитектура только MVI";
+    let business = "Не обещать гарантированный исход спора";
+    let client = SemanticInvariantClient::new(
+        "Сделаем MVC и гарантируем победу в суде.",
+        &[architecture, business],
+    );
+    let mut agent = agent_in_stage(TaskStage::Planning);
+    agent.set_invariants(vec![architecture.to_string(), business.to_string()]);
+
+    let response = agent
+        .respond(&client, "Предложи решение и прогноз".to_string())
+        .await
+        .unwrap();
+
+    assert!(response.text.starts_with("⛔"));
+    assert!(response.text.contains(architecture));
+    assert!(response.text.contains(business));
+    assert!(!response.text.contains("гарантируем победу"));
+    let report = agent.take_stateful_report();
+    assert_eq!(report.invariant_status, "blocked");
+    assert_eq!(report.violations.len(), 2);
+}
+
+#[tokio::test]
+async fn semantic_checker_pass_allows_unknown_invariant() {
+    let client = SemanticInvariantClient::new("Оставляем MVI и сначала проверяем реквизиты.", &[]);
+    let mut agent = agent_in_stage(TaskStage::Planning);
+    agent.set_invariants(vec!["Архитектура только MVI".to_string()]);
+
+    let response = agent
+        .respond(&client, "Предложи следующий шаг".to_string())
+        .await
+        .unwrap();
+
+    assert!(!response.text.starts_with('⛔'));
+    assert!(!response.text.starts_with('⚠'));
+    let report = agent.take_stateful_report();
+    assert_eq!(report.invariant_status, "pass");
+    assert!(report.invariant_summary.contains("PASS"));
+}
+
+#[tokio::test]
+async fn new_task_after_done_resets_to_clarify_and_parks_previous() {
+    // Reproduces the reported bug: after the previous task is Done, a new-task
+    // request must move the FSM back to Clarify (Done has no outgoing edge) and
+    // park the finished task instead of staying stuck in Done.
+    let client = MarkerClient::new("Ответ по задаче.");
+    let mut agent = agent_with_task(TaskContext {
+        stage: TaskStage::Done,
+        title: "Досудебная претензия".to_string(),
+        goal: "взыскать долг по акту".to_string(),
+        ..TaskContext::default()
+    });
+
+    agent
+        .respond(&client, "Давай теперь сделаем договор дарения".to_string())
+        .await
+        .unwrap();
+
+    let task = agent.task_state().expect("task");
+    assert_eq!(
+        task.stage,
+        TaskStage::Clarify,
+        "new task must enter Clarify"
+    );
+    assert!(
+        task.goal.to_lowercase().contains("договор дарения"),
+        "new task goal must be the new request, got {:?}",
+        task.goal
+    );
+    assert_eq!(task.backlog.len(), 1, "finished task must be parked");
+    assert_eq!(task.backlog[0].title, "Досудебная претензия");
+}
+
+#[tokio::test]
+async fn parallel_tasks_switch_keeps_both_on_board() {
+    // Two tasks tracked in parallel: starting a second parks the first (paused,
+    // preserved), and a "back to …" request resumes the original without losing
+    // the second.
+    let client = MarkerClient::new("Ответ по задаче.");
+    let mut agent = agent_with_task(TaskContext {
+        stage: TaskStage::Planning,
+        title: "Претензия".to_string(),
+        goal: "взыскать долг по акту".to_string(),
+        ..TaskContext::default()
+    });
+
+    // Start a parallel task.
+    agent
+        .respond(
+            &client,
+            "Давай теперь подготовим договор аренды".to_string(),
+        )
+        .await
+        .unwrap();
+    let task = agent.task_state().expect("task");
+    assert_eq!(task.stage, TaskStage::Clarify);
+    assert_eq!(task.backlog.len(), 1, "first task must be parked, not lost");
+    assert!(task.backlog[0].paused, "parked task must be paused");
+    assert_eq!(task.backlog[0].title, "Претензия");
+
+    // Switch back to the first task.
+    agent
+        .respond(&client, "Вернёмся к задаче претензия".to_string())
+        .await
+        .unwrap();
+    let task = agent.task_state().expect("task");
+    assert!(
+        task.goal.contains("взыскать долг"),
+        "active task must be the resumed one, got {:?}",
+        task.goal
+    );
+    assert!(!task.paused, "resumed task must be active");
+    assert_eq!(task.backlog.len(), 1, "the other task stays on the board");
 }

@@ -1080,6 +1080,7 @@
             </div>
             <div id="taskTransitionLine" class="field-help"></div>
             <div id="taskStatusLine" class="field-help"></div>
+            <div id="taskBacklogView" class="field-help"></div>
           </div>
         </div>
 
@@ -1094,6 +1095,7 @@
               <button id="invariantsSave" class="secondary" type="button">Сохранить инварианты</button>
             </div>
             <div id="invariantsStatusLine" class="field-help"></div>
+            <div id="invariantCheckView" class="field-help"></div>
             <div id="violationsView" class="field-help"></div>
           </div>
         </div>
@@ -2440,6 +2442,7 @@
     function renderInvariants(list) {
       currentInvariants = list || [];
       $('invariantsBox').value = currentInvariants.join('\n');
+      $('invariantCheckView').textContent = '';
       $('violationsView').textContent = '';
     }
 
@@ -2471,6 +2474,18 @@
           state.violations.map((v) => `<span class="violation-item">• ${escapeHtml(v)}</span>`).join('<br>');
       } else {
         $('violationsView').textContent = '';
+      }
+      if (state.invariant_summary) {
+        const status = (state.invariant_status || 'not_run').toUpperCase();
+        $('invariantCheckView').textContent = `Invariant check ${status}: ${state.invariant_summary}`;
+      } else {
+        $('invariantCheckView').textContent = '';
+      }
+      if ((state.backlog || []).length) {
+        $('taskBacklogView').textContent =
+          'Параллельные задачи (на паузе): ' + state.backlog.join('; ');
+      } else {
+        $('taskBacklogView').textContent = '';
       }
       if ((state.pending_questions || []).length) {
         $('profilePending').innerHTML = state.pending_questions

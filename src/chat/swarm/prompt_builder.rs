@@ -61,6 +61,31 @@ impl PromptBuilder {
 
         if let Some(task) = turn.task.as_ref() {
             blocks.push(system(render_task_block(task)));
+            if let Some(stage) = task.active_pipeline_stage() {
+                let mut active = vec![format!(
+                    "[pipeline:active] Stage: {}. Required artifact key: {}.",
+                    stage.stage,
+                    stage.artifact_key.trim()
+                )];
+                if !stage.system_prompt.trim().is_empty() {
+                    active.push(format!("Stage instruction: {}", stage.system_prompt.trim()));
+                }
+                for worker in &stage.worker_agents {
+                    active.push(format!(
+                        "Worker {} [{}]: {}",
+                        worker.id.trim(),
+                        worker.direction.trim(),
+                        worker.system_prompt.trim()
+                    ));
+                }
+                if stage.requires_human_approval {
+                    active.push(
+                        "After producing the artifact, stop for explicit human approval."
+                            .to_string(),
+                    );
+                }
+                blocks.push(system(active.join("\n")));
+            }
             if !task.violations.is_empty() {
                 blocks.push(system(format!(
                     "[invariants] Your previous response violated these invariants — correct this now:\n- {}",

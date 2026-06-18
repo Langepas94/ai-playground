@@ -800,3 +800,56 @@ fn local_session_store_rejects_path_like_session_ids() {
         Err(AppError::InvalidInput(_))
     ));
 }
+
+#[test]
+fn start_new_task_parks_previous_and_promotes_clarify() {
+    let mut task = TaskContext {
+        stage: TaskStage::Execution,
+        title: "Претензия".to_string(),
+        goal: "взыскать долг".to_string(),
+        ..TaskContext::default()
+    };
+    task.start_new_task("сделать договор дарения", "продолжить с черновика");
+
+    assert_eq!(task.stage, TaskStage::Clarify);
+    assert_eq!(task.goal, "сделать договор дарения");
+    assert_eq!(task.backlog.len(), 1);
+    let parked = &task.backlog[0];
+    assert_eq!(parked.title, "Претензия");
+    assert!(parked.paused, "non-terminal parked task is paused");
+    assert!(parked.backlog.is_empty(), "backlog must stay flat");
+}
+
+#[test]
+fn start_new_task_does_not_park_an_empty_task() {
+    let mut task = TaskContext::default();
+    task.start_new_task("первая задача", "");
+    assert!(task.backlog.is_empty(), "empty task is not worth parking");
+    assert_eq!(task.goal, "первая задача");
+}
+
+#[test]
+fn switch_to_backlog_swaps_active_and_parks_outgoing() {
+    let mut task = TaskContext {
+        stage: TaskStage::Clarify,
+        goal: "договор аренды".to_string(),
+        title: "Аренда".to_string(),
+        backlog: vec![TaskContext {
+            stage: TaskStage::Planning,
+            title: "Претензия".to_string(),
+            goal: "взыскать долг".to_string(),
+            paused: true,
+            ..TaskContext::default()
+        }],
+        ..TaskContext::default()
+    };
+
+    assert!(task.switch_to_backlog(0));
+    assert_eq!(task.goal, "взыскать долг", "resumed task becomes active");
+    assert!(!task.paused, "resumed task is no longer paused");
+    assert_eq!(task.backlog.len(), 1);
+    assert_eq!(task.backlog[0].title, "Аренда", "outgoing task is parked");
+    assert!(task.backlog[0].paused);
+
+    assert!(!task.switch_to_backlog(5), "out-of-range index is a no-op");
+}
