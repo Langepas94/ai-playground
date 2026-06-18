@@ -15,10 +15,10 @@
 
 use crate::chat::agent::{
     StageTransition, StatefulReport, build_invariant_refusal_for_prompt,
-    build_invariant_unverified_response, infer_task_state_from_exchange, local_chat_response,
-    merge_optional_metrics, paused_user_supplied_next_info, sanitize_unverified_legal_claims,
-    starts_new_task, switch_back_target, task_decision_from_exchange, task_resume_hint,
-    task_title_from_prompt,
+    build_invariant_unverified_response, infer_task_state_from_exchange,
+    is_invariant_compliance_response, local_chat_response, merge_optional_metrics,
+    paused_user_supplied_next_info, sanitize_unverified_legal_claims, starts_new_task,
+    switch_back_target, task_decision_from_exchange, task_resume_hint, task_title_from_prompt,
 };
 use crate::chat::memory::MemoryStrategy;
 use crate::chat::store::{TaskArtifact, TaskStage};
@@ -179,9 +179,10 @@ impl SwarmOrchestrator {
             }
             false
         };
+        let compliance_only = is_invariant_compliance_response(&answer);
+        let preserve_task_state = blocked || compliance_only;
         self.commit(turn, &prompt, &answer);
-        let pause_state_changed = if blocked {
-            set_invariant_gate_progress(turn, invariant_status);
+        let pause_state_changed = if preserve_task_state {
             false
         } else {
             seed_task_progress(turn, &prompt, &answer);
@@ -191,15 +192,15 @@ impl SwarmOrchestrator {
         // The stage marker is only a fallback for neutral prompts such as
         // "дальше"; otherwise a Planning response could advance itself merely
         // because it finished answering a clarifying fact.
-        let has_task_intent = !blocked
+        let has_task_intent = !preserve_task_state
             && !pause_state_changed
             && turn.task.as_ref().is_some_and(|task| {
                 infer_task_state_from_exchange(task.stage, &prompt, &answer).is_some()
             });
-        let mut transition = (!blocked && !pause_state_changed)
+        let mut transition = (!preserve_task_state && !pause_state_changed)
             .then(|| apply_task_inference(turn, &prompt, &answer))
             .flatten();
-        if !blocked
+        if !preserve_task_state
             && !pause_state_changed
             && !has_task_intent
             && !paused_user_supplied_next_info(&prompt)
@@ -360,23 +361,24 @@ impl SwarmOrchestrator {
             }
             false
         };
+        let compliance_only = is_invariant_compliance_response(&answer);
+        let preserve_task_state = blocked || compliance_only;
         self.commit(turn, prompt, &answer);
-        let pause_state_changed = if blocked {
-            set_invariant_gate_progress(turn, invariant_status);
+        let pause_state_changed = if preserve_task_state {
             false
         } else {
             seed_task_progress(turn, prompt, &answer);
             apply_pause_resume(turn, prompt, &answer)
         };
-        let has_task_intent = !blocked
+        let has_task_intent = !preserve_task_state
             && !pause_state_changed
             && turn.task.as_ref().is_some_and(|task| {
                 infer_task_state_from_exchange(task.stage, prompt, &answer).is_some()
             });
-        let mut transition = (!blocked && !pause_state_changed)
+        let mut transition = (!preserve_task_state && !pause_state_changed)
             .then(|| apply_task_inference(turn, prompt, &answer))
             .flatten();
-        if !blocked
+        if !preserve_task_state
             && !pause_state_changed
             && !has_task_intent
             && !paused_user_supplied_next_info(prompt)
@@ -659,11 +661,98 @@ fn seed_task_progress(turn: &mut SwarmTurn<'_>, prompt: &str, answer: &str) {
     if task.title.trim().is_empty() {
         task.title = task_title_from_prompt(prompt);
     }
+    capture_task_facts(task, prompt);
     if let Some(decision) = task_decision_from_exchange(prompt, answer)
         && !task.results.iter().any(|item| item == &decision)
     {
         task.results.push(decision);
     }
+    if let Some(profile) = turn.agent_profile.as_mut() {
+        capture_profile_fields(profile, prompt);
+    }
+}
+
+fn capture_task_facts(task: &mut crate::chat::store::TaskContext, prompt: &str) {
+    for (key, value) in extract_legal_task_facts(prompt) {
+        let fact = format!("{key}: {value}");
+        if !task.results.iter().any(|item| item == &fact) {
+            task.results.push(fact);
+        }
+    }
+}
+
+fn capture_profile_fields(profile: &mut crate::chat::store::AgentProfile, prompt: &str) {
+    let facts = extract_legal_task_facts(prompt);
+    let mut changed = false;
+    for field in &mut profile.fields {
+        if !field.value.trim().is_empty() {
+            continue;
+        }
+        if let Some((_, value)) = facts.iter().find(|(key, _)| key == &field.key) {
+            field.value = value.clone();
+            changed = true;
+        }
+    }
+    if changed {
+        profile.updated_at_unix = crate::chat::unix_now();
+    }
+}
+
+fn extract_legal_task_facts(prompt: &str) -> Vec<(String, String)> {
+    let lower = prompt.to_lowercase();
+    let mut facts = Vec::new();
+    if lower.contains("заказчик ооо") || lower.contains("должник ооо") {
+        facts.push(("debtor_type".to_string(), "ООО".to_string()));
+    }
+    if let Some(value) = sentence_with(prompt, &["номер", "договор №", "договор номер"])
+    {
+        facts.push(("contract_details".to_string(), value));
+    }
+    if let Some(value) = sentence_with(prompt, &["акт подпис"]) {
+        facts.push(("acceptance_act".to_string(), value));
+    }
+    if let Some(value) = sentence_with(prompt, &["оплата в течение", "срок оплаты"])
+    {
+        facts.push(("payment_terms".to_string(), value));
+    }
+    if let Some(value) = value_after_label(prompt, "адрес") {
+        facts.push(("debtor_address".to_string(), value));
+    }
+    if lower.contains("без суда") {
+        facts.push((
+            "desired_outcome".to_string(),
+            "начать с досудебной претензии, без суда".to_string(),
+        ));
+        facts.push((
+            "claim_status".to_string(),
+            "претензия ещё не отправлена".to_string(),
+        ));
+    }
+    facts
+}
+
+fn sentence_with(text: &str, needles: &[&str]) -> Option<String> {
+    text.split(['\n', '.', '!', '?'])
+        .map(str::trim)
+        .find(|part| {
+            let lower = part.to_lowercase();
+            needles.iter().any(|needle| lower.contains(needle))
+        })
+        .filter(|part| !part.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn value_after_label(text: &str, label: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    let start = lower.find(label)? + label.len();
+    let value = text[start..]
+        .split(['\n', '.', '!', '?'])
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .trim_start_matches([':', '-', '—', ' '])
+        .trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 /// Human-readable labels for the paused tasks on the board (title, falling back
@@ -681,21 +770,6 @@ fn backlog_titles(task: &crate::chat::store::TaskContext) -> Vec<String> {
         })
         .filter(|label| !label.is_empty())
         .collect()
-}
-
-fn set_invariant_gate_progress(turn: &mut SwarmTurn<'_>, status: InvariantCheckStatus) {
-    let Some(task) = turn.task.as_mut() else {
-        return;
-    };
-    task.current_step = "resolve invariant gate".to_string();
-    task.expected_action = "user_input".to_string();
-    task.resume_hint = match status {
-        InvariantCheckStatus::Unavailable => {
-            "Clarify the invariant or retry validation; do not release the pending answer"
-                .to_string()
-        }
-        _ => "Rephrase the request within the saved invariants".to_string(),
-    };
 }
 
 fn invariant_status_label(status: InvariantCheckStatus) -> &'static str {

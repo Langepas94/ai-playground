@@ -351,12 +351,74 @@ pub(super) fn persist_agent_initial_context(
     let profile_key = format!("agent:{agent_id}");
     let mut memory = AgentMemory::default();
     sessions.seed_long_term(&profile_key, &mut memory)?;
-    memory.set_fact_in_layer(
-        "project_context".to_string(),
-        initial_context.to_string(),
-        MemoryLayer::LongTerm,
-    );
+    let entries = parse_initial_context_entries(initial_context);
+    if entries.is_empty() {
+        memory.set_fact_in_layer(
+            "project_context".to_string(),
+            initial_context.to_string(),
+            MemoryLayer::LongTerm,
+        );
+    } else {
+        for (key, value) in &entries {
+            memory.set_fact_in_layer(key.clone(), value.clone(), MemoryLayer::LongTerm);
+        }
+        let mut profile = sessions.load_profile(agent_id)?;
+        for (key, value) in entries {
+            if let Some(field) = profile.fields.iter_mut().find(|field| field.key == key) {
+                field.value = value;
+            } else {
+                profile.fields.push(ProfileField {
+                    key: key.clone(),
+                    question: key,
+                    required: false,
+                    value,
+                });
+            }
+        }
+        profile.updated_at_unix = crate::chat::unix_now();
+        sessions.save_profile(agent_id, &profile)?;
+    }
     sessions.save_long_term(&profile_key, &memory)
+}
+
+fn parse_initial_context_entries(initial_context: &str) -> Vec<(String, String)> {
+    let lines: Vec<&str> = initial_context
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    let mut entries = Vec::new();
+    for line in lines {
+        let Some((key, value)) = line.split_once('=') else {
+            return Vec::new();
+        };
+        let key = normalize_initial_context_key(key);
+        let value = value.trim();
+        if key.is_empty() || value.is_empty() {
+            return Vec::new();
+        }
+        entries.push((key, value.to_string()));
+    }
+    entries
+}
+
+fn normalize_initial_context_key(key: &str) -> String {
+    key.trim()
+        .to_lowercase()
+        .chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string()
 }
 
 fn load_agent_long_term_facts(
@@ -378,11 +440,11 @@ fn load_agent_long_term_facts(
 
 /// Merge a freshly-built/edited schema into the stored profile, carrying over any
 /// already-elicited values for keys that survive.
-fn merge_profile_schema(
+pub(super) fn merge_profile_schema(
     existing: Vec<ProfileField>,
     schema: Vec<ProfileFieldPayload>,
 ) -> Vec<ProfileField> {
-    schema
+    let mut merged: Vec<ProfileField> = schema
         .into_iter()
         .filter(|field| !field.key.trim().is_empty())
         .map(|field| {
@@ -399,7 +461,13 @@ fn merge_profile_schema(
                 value,
             }
         })
-        .collect()
+        .collect();
+    for old in existing {
+        if old.is_filled() && !merged.iter().any(|field| field.key == old.key) {
+            merged.push(old);
+        }
+    }
+    merged
 }
 
 fn require_agent_id(id: Option<&str>) -> Result<String, AppError> {

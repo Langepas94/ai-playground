@@ -2364,7 +2364,10 @@
       $('profilePending').innerHTML = pendingFields.length
         ? pendingFields.map((f) => {
             const question = (f.question || f.key || '').trim();
-            return `<div class="profile-field missing"><span class="pf-key">${escapeHtml(f.key)}</span><span class="pf-val">${escapeHtml(question)}</span></div>`;
+            const detail = question && question !== (f.key || '').trim()
+              ? `<span class="pf-val">${escapeHtml(question)}</span>`
+              : '';
+            return `<div class="profile-field missing"><span class="pf-key">${escapeHtml(f.key)}</span>${detail}</div>`;
           }).join('')
         : '<span class="field-help">Все обязательные вопросы закрыты.</span>';
     }
@@ -2489,7 +2492,7 @@
       }
       if ((state.pending_questions || []).length) {
         $('profilePending').innerHTML = state.pending_questions
-          .map((question) => `<div class="profile-field missing"><span class="pf-key">нужно</span><span class="pf-val">${escapeHtml(question)}</span></div>`)
+          .map((question) => `<div class="profile-field missing"><span class="pf-key">${escapeHtml(question)}</span></div>`)
           .join('');
       }
     }
