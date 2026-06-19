@@ -416,7 +416,29 @@ async fn chat_stream(
 
     let (tx, rx) = mpsc::unbounded_channel::<String>();
     if let Some(local_response) = prepared_stream.local_response {
-        let session_metrics = add_request_metrics(&session_metrics_before, &local_response.metrics);
+        // Lifecycle guards (pause/resume/approval/rejected transitions) are
+        // local responses, but they still mutate task state. Persist and expose
+        // the same stateful report as the provider-backed streaming path.
+        let (agent_state, stateful_metrics) = run_and_persist_stateful(
+            &state.sessions,
+            request.saved_agent_id.as_deref(),
+            session_id.as_str(),
+            &mut agent,
+            &state.client,
+            &prompt,
+            &local_response.text,
+        )
+        .await?;
+        let mut response_metrics = local_response.metrics.clone();
+        let mut context_metrics = prepared_stream.context_metrics;
+        if let Some(metrics) = &stateful_metrics {
+            response_metrics = add_request_metrics(&response_metrics, metrics);
+            context_metrics = Some(match context_metrics {
+                Some(current) => add_request_metrics(&current, metrics),
+                None => metrics.clone(),
+            });
+        }
+        let session_metrics = add_request_metrics(&session_metrics_before, &response_metrics);
         state
             .sessions
             .save_session(&session_key, &session_id, agent.history())?;
@@ -430,24 +452,26 @@ async fn chat_stream(
         let done_event = serde_json::json!({
             "done": true,
             "session_id": session_id,
-            "metrics": local_response.metrics,
-            "context_metrics": prepared_stream.context_metrics,
+            "metrics": response_metrics,
+            "context_metrics": context_metrics,
             "session_metrics": session_metrics,
             "messages": agent.history(),
             "context_debug": context_debug,
             "debug": ChatDebugView {
                 provider_request: crate::providers::HttpDebugRequest {
                     method: "LOCAL".to_string(),
-                    url: "local://topic-file-routing/not-found".to_string(),
+                    url: "local://lifecycle-or-topic-guard".to_string(),
                     headers: Default::default(),
                     body: serde_json::json!({}),
                 },
                 provider_response: crate::providers::HttpDebugResponse {
                     status: 200,
                     headers: Default::default(),
-                    body: serde_json::json!({ "finish_reason": "topic_not_found" }),
+                    body: serde_json::json!({ "finish_reason": "local_guard" }),
                 },
             },
+            "agent_state": agent_state,
+            "swarm_report": agent.swarm_report(),
         });
         let _ = tx.send(local_response.text);
         let _ = tx.send(format!("\x00DONE\x00{done_event}"));
@@ -663,7 +687,12 @@ fn apply_saved_agent_memory(
     // Memory sub-agent keeps long-term memory fresh on every strategy.
     let mut swarm_config = SwarmConfig::defaults();
     if let Some(id) = saved_agent_id.and_then(blank_str_to_none) {
-        agent.set_task_state(Some(store.load_dialog_task(id, session_id)?));
+        let mut task = store.load_dialog_task(id, session_id)?;
+        if task.repair_lifecycle_integrity().is_some() {
+            store.save_dialog_task(id, session_id, &task)?;
+            task = store.load_dialog_task(id, session_id)?;
+        }
+        agent.set_task_state(Some(task));
         agent.set_agent_profile(Some(store.load_profile(id)?));
         if let Some(saved) = store.load_agent(id)? {
             agent.set_invariants(saved.invariants);

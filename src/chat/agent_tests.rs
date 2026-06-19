@@ -2,6 +2,24 @@ use super::*;
 use async_trait::async_trait;
 
 #[test]
+fn requested_stage_respects_explicit_execution_deferral() {
+    assert_eq!(
+        requested_task_stage(
+            "Подготовить претензию. Заверши только текущую стадию, реализацию не начинай."
+        ),
+        Some(TaskStage::Planning)
+    );
+    assert_eq!(
+        requested_task_stage("Составь план, но не переходи к реализации."),
+        Some(TaskStage::Planning)
+    );
+    assert_eq!(
+        requested_task_stage("Подготовь и напиши готовую претензию."),
+        Some(TaskStage::Execution)
+    );
+}
+
+#[test]
 fn parse_extracted_facts_reads_agent_chosen_layer() {
     // Preferred shape: explicit per-fact layer.
     let facts = parse_extracted_facts(

@@ -1,5 +1,7 @@
 use super::*;
-use crate::chat::{ProfileField, TaskPipelineStage, TaskStage, TaskWorkerAgent};
+use crate::chat::{
+    ProfileField, TaskArtifact, TaskPauseReason, TaskPipelineStage, TaskStage, TaskWorkerAgent,
+};
 use crate::secrets::MemorySecretStore;
 use crate::web::agents::{ProfileFieldPayload, merge_profile_schema};
 use axum::{
@@ -38,6 +40,7 @@ fn apply_saved_for_test(
 #[derive(Debug, Default)]
 struct StatefulFakeClient {
     replies: std::sync::Mutex<Vec<String>>,
+    calls: std::sync::atomic::AtomicUsize,
 }
 
 impl StatefulFakeClient {
@@ -46,7 +49,12 @@ impl StatefulFakeClient {
             replies: std::sync::Mutex::new(
                 replies.into_iter().map(ToString::to_string).rev().collect(),
             ),
+            calls: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    fn call_count(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -66,6 +74,7 @@ impl crate::providers::ProviderClient for StatefulFakeClient {
         _token: &str,
         _request: crate::providers::ChatRequest,
     ) -> Result<crate::providers::ChatResponse, AppError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let text = self
             .replies
             .lock()
@@ -583,12 +592,18 @@ fn saved_agent_restores_formal_task_state_for_any_dialog_after_restart() {
                 resume_hint: "name and implementation plan approved".to_string(),
                 title: "create application".to_string(),
                 goal: "build an approved app".to_string(),
+                plan_approved: true,
                 plan: vec![
                     "collect app name".to_string(),
                     "approve plan".to_string(),
                     "create application shell".to_string(),
                     "validate result".to_string(),
                 ],
+                artifacts: vec![TaskArtifact {
+                    stage: TaskStage::Planning,
+                    key: "plan".to_string(),
+                    value: "approved application plan".to_string(),
+                }],
                 ..TaskContext::default()
             },
         )
@@ -845,6 +860,129 @@ async fn stateful_postprocess_persists_task_to_shared_feature_scope() {
             .is_empty(),
         "stateful postprocess must not write into the global agent task"
     );
+}
+
+#[tokio::test]
+async fn invalid_persisted_task_is_repaired_before_streaming_provider_calls() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalSessionStore::from_root(dir.path().join("sessions"));
+    store
+        .save_agent(&web_test_agent("legacy-agent"))
+        .expect("save agent");
+    store
+        .save_dialog_task(
+            "legacy-agent",
+            "legacy-dialog",
+            &TaskContext {
+                stage: TaskStage::Execution,
+                goal: "legacy task without approved plan".to_string(),
+                ..TaskContext::default()
+            },
+        )
+        .expect("save legacy task");
+
+    let client = StatefulFakeClient::default();
+    let mut agent = web_test_chat_agent();
+    apply_saved_for_test(&store, Some("legacy-agent"), "legacy-dialog", &mut agent)
+        .expect("load and repair legacy task");
+
+    let repaired = agent.task_state().expect("repaired task");
+    assert_eq!(repaired.stage, TaskStage::Planning);
+    assert!(
+        repaired
+            .transition_block_reason
+            .contains("без утверждённого")
+    );
+    let persisted = store
+        .load_dialog_task("legacy-agent", "legacy-dialog")
+        .expect("load persisted repair");
+    assert_eq!(persisted.stage, TaskStage::Planning);
+
+    let prepared = agent
+        .prepare_stream_request(&client, "Можно набросать сам текст?")
+        .await
+        .expect("reject invalid skip");
+    assert!(prepared.request.is_none());
+    assert!(
+        prepared
+            .local_response
+            .expect("local rejection")
+            .text
+            .contains('⛔')
+    );
+    assert_eq!(
+        client.call_count(),
+        0,
+        "repair and lifecycle rejection must happen before any provider call"
+    );
+}
+
+#[tokio::test]
+async fn streaming_local_resume_is_persisted_and_survives_agent_reload() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalSessionStore::from_root(dir.path().join("sessions"));
+    store
+        .save_agent(&web_test_agent("resume-agent"))
+        .expect("save agent");
+    store
+        .save_dialog_task(
+            "resume-agent",
+            "resume-dialog",
+            &TaskContext {
+                stage: TaskStage::Execution,
+                goal: "implement approved plan".to_string(),
+                paused: true,
+                pause_reason: TaskPauseReason::Manual,
+                plan_approved: true,
+                artifacts: vec![TaskArtifact {
+                    stage: TaskStage::Planning,
+                    key: "plan".to_string(),
+                    value: "approved implementation plan".to_string(),
+                }],
+                ..TaskContext::default()
+            },
+        )
+        .expect("save paused task");
+
+    let client = StatefulFakeClient::default();
+    let mut agent = web_test_chat_agent();
+    apply_saved_for_test(&store, Some("resume-agent"), "resume-dialog", &mut agent)
+        .expect("load paused task");
+
+    let prepared = agent
+        .prepare_stream_request(&client, "Продолжай")
+        .await
+        .expect("prepare local resume");
+    let local = prepared.local_response.expect("resume must be local");
+    assert!(prepared.request.is_none());
+    assert!(!agent.task_state().expect("task").paused);
+
+    let (debug, _metrics) = run_and_persist_stateful(
+        &store,
+        Some("resume-agent"),
+        "resume-dialog",
+        &mut agent,
+        &client,
+        "Продолжай",
+        &local.text,
+    )
+    .await
+    .expect("persist resumed task");
+    assert!(!debug.expect("agent debug").paused);
+
+    let persisted = store
+        .load_dialog_task("resume-agent", "resume-dialog")
+        .expect("load persisted task");
+    assert_eq!(persisted.stage, TaskStage::Execution);
+    assert!(!persisted.paused);
+    assert_eq!(persisted.pause_reason, TaskPauseReason::None);
+
+    let mut reloaded = web_test_chat_agent();
+    apply_saved_for_test(&store, Some("resume-agent"), "resume-dialog", &mut reloaded)
+        .expect("reload resumed task");
+    let reloaded_task = reloaded.task_state().expect("reloaded task");
+    assert_eq!(reloaded_task.stage, TaskStage::Execution);
+    assert!(!reloaded_task.paused);
 }
 
 #[test]
@@ -1770,6 +1908,18 @@ fn web_ui_renders_memory_layers_control() {
     assert!(INDEX_HTML.contains("/api/memory/update"));
     assert!(INDEX_HTML.contains("saved_agent_id: activeAgentId || null"));
     assert!(INDEX_HTML.contains("memoryFactAdd"));
+}
+
+#[test]
+fn web_ui_clears_previous_swarm_report_when_entering_an_agent() {
+    let enter_agent = INDEX_HTML
+        .split("async function enterAgent(id)")
+        .nth(1)
+        .expect("enterAgent function")
+        .split("// Reload the agent's stored layers")
+        .next()
+        .expect("enterAgent body");
+    assert!(enter_agent.contains("renderSwarmActivity(null);"));
 }
 
 #[test]

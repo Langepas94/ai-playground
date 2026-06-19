@@ -747,6 +747,23 @@ fn contains_any_agent(value: &str, needles: &[&str]) -> bool {
 /// it never mutates the FSM and never selects a future responder.
 pub(crate) fn requested_task_stage(user_prompt: &str) -> Option<TaskStage> {
     let user = user_prompt.to_lowercase();
+    let execution_explicitly_deferred = contains_any_agent(
+        &user,
+        &[
+            "реализацию не",
+            "не начинай реализа",
+            "не переходи к реализа",
+            "без реализации",
+            "только текущую стадию",
+            "только текущий этап",
+            "do not implement",
+            "don't implement",
+            "current stage only",
+        ],
+    );
+    let current_stage_completion = user.contains("текущ")
+        && contains_any_agent(&user, &["стади", "этап", "stage"])
+        && contains_any_agent(&user, &["заверш", "complete"]);
     let wants_done = contains_any_agent(
         &user,
         &[
@@ -757,12 +774,15 @@ pub(crate) fn requested_task_stage(user_prompt: &str) -> Option<TaskStage> {
             "следующие действия",
             "что готово",
             "что отправ",
+            "финал",
+            "закрой задачу",
+            "закрыть задачу",
             "final",
             "summary",
             "done",
         ],
     );
-    if wants_done {
+    if wants_done && !current_stage_completion {
         return Some(TaskStage::Done);
     }
     let wants_validation = contains_any_agent(
@@ -797,7 +817,7 @@ pub(crate) fn requested_task_stage(user_prompt: &str) -> Option<TaskStage> {
             "write",
         ],
     );
-    if wants_execution {
+    if wants_execution && !execution_explicitly_deferred {
         return Some(TaskStage::Execution);
     }
     let wants_planning = contains_any_agent(

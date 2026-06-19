@@ -348,6 +348,76 @@ fn task_stage_transitions_enforced() {
 }
 
 #[test]
+fn lifecycle_guards_require_artifacts_approval_and_validation() {
+    let mut task = TaskContext {
+        stage: TaskStage::Planning,
+        ..TaskContext::default()
+    };
+    let rejected = task.try_transition(TaskStage::Execution);
+    assert!(!rejected.accepted);
+    assert!(rejected.reason.contains("planning"));
+
+    task.record_stage_artifact(TaskStage::Planning, "plan", "1. Build\n2. Test");
+    let rejected = task.try_transition(TaskStage::Execution);
+    assert!(!rejected.accepted);
+    assert!(rejected.reason.contains("утвердить"));
+
+    task.plan_approved = true;
+    assert!(task.try_transition(TaskStage::Execution).accepted);
+
+    let rejected = task.try_transition(TaskStage::Validation);
+    assert!(!rejected.accepted);
+    assert!(rejected.reason.contains("execution"));
+
+    task.record_stage_artifact(TaskStage::Execution, "result", "implemented");
+    assert!(task.try_transition(TaskStage::Validation).accepted);
+
+    let rejected = task.try_transition(TaskStage::Done);
+    assert!(!rejected.accepted);
+    assert!(rejected.reason.contains("validation"));
+
+    task.record_stage_artifact(TaskStage::Validation, "validation", "passed");
+    task.validation_passed = true;
+    assert!(task.try_transition(TaskStage::Done).accepted);
+}
+
+#[test]
+fn invalid_persisted_lifecycle_is_rewound_to_missing_prerequisite() {
+    let mut execution = TaskContext {
+        stage: TaskStage::Execution,
+        ..TaskContext::default()
+    };
+    let reason = execution
+        .repair_lifecycle_integrity()
+        .expect("invalid execution");
+    assert_eq!(execution.stage, TaskStage::Planning);
+    assert!(reason.contains("без утверждённого"));
+
+    let mut done = TaskContext {
+        stage: TaskStage::Done,
+        plan_approved: true,
+        validation_passed: false,
+        artifacts: vec![
+            TaskArtifact {
+                stage: TaskStage::Planning,
+                key: "plan".to_string(),
+                value: "approved".to_string(),
+            },
+            TaskArtifact {
+                stage: TaskStage::Execution,
+                key: "result".to_string(),
+                value: "implemented".to_string(),
+            },
+        ],
+        ..TaskContext::default()
+    };
+    let reason = done.repair_lifecycle_integrity().expect("invalid done");
+    assert_eq!(done.stage, TaskStage::Validation);
+    assert!(!done.validation_passed);
+    assert!(reason.contains("validation"));
+}
+
+#[test]
 fn task_context_pause_resume_preserves_formal_state() {
     for stage in [
         TaskStage::Clarify,

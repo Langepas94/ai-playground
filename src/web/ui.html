@@ -2578,6 +2578,9 @@
         activeAgent = agent;
         activeAgentId = agent.id || id;
         localStorage.setItem('ai_active_agent', activeAgentId);
+        // Reports are turn-scoped and agent-scoped. Never show the previous
+        // agent's activity while the new agent has not run a turn yet.
+        renderSwarmActivity(null);
         if (agent.provider) { $('provider').value = agent.provider; $('provider').dispatchEvent(new Event('change', { bubbles: true })); }
         if (agent.base_url) $('baseUrl').value = agent.base_url;
         if (agent.model) {

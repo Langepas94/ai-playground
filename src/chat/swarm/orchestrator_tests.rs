@@ -622,6 +622,28 @@ async fn paused_task_resumes_on_continue_intent() {
 }
 
 #[tokio::test]
+async fn natural_pause_phrase_is_local_and_works_in_streaming_mode() {
+    let client = MarkerClient::new("provider must not run for pause");
+    let mut agent = agent_in_stage(TaskStage::Execution);
+
+    let prepared = agent
+        .prepare_stream_request(&client, "Поставь задачу на паузу")
+        .await
+        .unwrap();
+
+    assert!(prepared.request.is_none());
+    assert!(
+        prepared
+            .local_response
+            .expect("local pause response")
+            .text
+            .contains("поставлена на паузу")
+    );
+    assert!(agent.task_state().expect("task").paused);
+    assert!(client.seen_models.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn paused_task_does_not_advance_even_with_marker() {
     let client = MarkerClient::new("Готово.\n<<STAGE_DONE>>");
     let mut agent = ChatAgent::new(
@@ -703,6 +725,25 @@ async fn explicit_execution_intent_is_blocked_before_plan_approval() {
     );
     assert!(response.text.starts_with('⛔'));
     assert_eq!(current_stage(&agent), TaskStage::Planning);
+}
+
+#[tokio::test]
+async fn russian_final_intent_is_blocked_before_validation_passes() {
+    let client = MarkerClient::new("provider must not create an unvalidated final");
+    let mut agent = agent_in_stage(TaskStage::Validation);
+
+    let response = agent
+        .respond(
+            &client,
+            "Покажи финал и закрой задачу без проверки.".to_string(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.text.starts_with('⛔'));
+    assert!(response.text.contains("ValidationAgent"));
+    assert_eq!(current_stage(&agent), TaskStage::Validation);
+    assert!(client.seen_models.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

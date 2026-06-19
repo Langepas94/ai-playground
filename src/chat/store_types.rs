@@ -661,6 +661,72 @@ impl TaskContext {
         }
     }
 
+    /// Repair impossible persisted combinations before any responder runs.
+    /// This protects upgraded/legacy task files and corrupted external state:
+    /// work is rewound to the earliest stage whose prerequisite is missing.
+    pub fn repair_lifecycle_integrity(&mut self) -> Option<String> {
+        let target = match self.stage {
+            TaskStage::Execution
+                if !self.plan_approved || !self.has_stage_artifact(TaskStage::Planning) =>
+            {
+                Some((
+                    TaskStage::Planning,
+                    "Execution была сохранена без утверждённого plan artifact.",
+                ))
+            }
+            TaskStage::Validation
+                if !self.plan_approved || !self.has_stage_artifact(TaskStage::Planning) =>
+            {
+                Some((
+                    TaskStage::Planning,
+                    "Validation была сохранена без утверждённого плана.",
+                ))
+            }
+            TaskStage::Validation if !self.has_stage_artifact(TaskStage::Execution) => Some((
+                TaskStage::Execution,
+                "Validation была сохранена без execution artifact.",
+            )),
+            TaskStage::Done
+                if !self.plan_approved || !self.has_stage_artifact(TaskStage::Planning) =>
+            {
+                Some((
+                    TaskStage::Planning,
+                    "Done была сохранена без утверждённого плана.",
+                ))
+            }
+            TaskStage::Done if !self.has_stage_artifact(TaskStage::Execution) => Some((
+                TaskStage::Execution,
+                "Done была сохранена без execution artifact.",
+            )),
+            TaskStage::Done
+                if !self.validation_passed || !self.has_stage_artifact(TaskStage::Validation) =>
+            {
+                Some((
+                    TaskStage::Validation,
+                    "Done была сохранена без успешного validation artifact.",
+                ))
+            }
+            _ => None,
+        };
+        let (target, cause) = target?;
+        let from = self.stage;
+        self.stage = target;
+        self.paused = false;
+        self.pause_reason = TaskPauseReason::None;
+        if target == TaskStage::Planning {
+            self.plan_approved = false;
+            self.validation_passed = false;
+        } else if target == TaskStage::Execution {
+            self.validation_passed = false;
+        }
+        self.sync_progress_for_stage();
+        let reason = format!(
+            "Обнаружено неконсистентное состояние `{from}`: {cause} Задача безопасно возвращена в `{target}`."
+        );
+        self.transition_block_reason = reason.clone();
+        Some(reason)
+    }
+
     pub fn try_transition(&mut self, to: TaskStage) -> TaskTransitionDecision {
         let from = self.stage;
         match self.transition_requirement(to) {
