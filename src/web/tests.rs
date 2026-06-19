@@ -1,5 +1,5 @@
 use super::*;
-use crate::chat::{ProfileField, TaskArtifact, TaskPipelineStage, TaskStage, TaskWorkerAgent};
+use crate::chat::{ProfileField, TaskPipelineStage, TaskStage, TaskWorkerAgent};
 use crate::secrets::MemorySecretStore;
 use crate::web::agents::{ProfileFieldPayload, merge_profile_schema};
 use axum::{
@@ -685,32 +685,36 @@ async fn agents_manage_can_manually_save_and_bind_dialog_task() {
             session_id: Some("menu-dialog".to_string()),
             task_id: Some("menu".to_string()),
             task: Some(TaskPayload {
-                stage: "execution".to_string(),
-                current_step: "draft delivery sections".to_string(),
-                expected_action: "agent_work".to_string(),
-                paused: false,
-                resume_hint: "continue menu backlog".to_string(),
+                stage: "clarify".to_string(),
                 title: "menu backlog".to_string(),
                 goal: "build potato-first delivery menu".to_string(),
                 plan: vec!["draft sections".to_string(), "price combos".to_string()],
-                pipeline: vec![TaskPipelineStage {
-                    stage: TaskStage::Planning,
-                    name: "Research".to_string(),
-                    system_prompt: "Research menu constraints.".to_string(),
-                    artifact_key: "menu_research".to_string(),
-                    worker_agents: vec![TaskWorkerAgent {
-                        id: "pricing".to_string(),
-                        direction: "pricing".to_string(),
-                        system_prompt: "Analyze combo pricing.".to_string(),
-                    }],
-                    ..TaskPipelineStage::default()
-                }],
-                artifacts: vec![TaskArtifact {
-                    stage: TaskStage::Planning,
-                    key: "menu_research".to_string(),
-                    value: "potato-first menu is viable".to_string(),
-                }],
-                results: vec!["approved brand: 34 Картошки".to_string()],
+                pipeline: vec![
+                    TaskPipelineStage {
+                        stage: TaskStage::Planning,
+                        name: "Research".to_string(),
+                        system_prompt: "Research menu constraints.".to_string(),
+                        artifact_key: "menu_research".to_string(),
+                        worker_agents: vec![TaskWorkerAgent {
+                            id: "pricing".to_string(),
+                            direction: "pricing".to_string(),
+                            system_prompt: "Analyze combo pricing.".to_string(),
+                        }],
+                        ..TaskPipelineStage::default()
+                    },
+                    TaskPipelineStage {
+                        stage: TaskStage::Execution,
+                        name: "Build".to_string(),
+                        artifact_key: "menu_draft".to_string(),
+                        ..TaskPipelineStage::default()
+                    },
+                    TaskPipelineStage {
+                        stage: TaskStage::Validation,
+                        name: "Validate".to_string(),
+                        artifact_key: "menu_validation".to_string(),
+                        ..TaskPipelineStage::default()
+                    },
+                ],
                 notes: "manual note from owner".to_string(),
             }),
             agent: None,
@@ -727,7 +731,7 @@ async fn agents_manage_can_manually_save_and_bind_dialog_task() {
     };
 
     assert_eq!(response.task_id, "menu");
-    assert_eq!(response.task.expect("task").stage.to_string(), "execution");
+    assert_eq!(response.task.expect("task").stage.to_string(), "clarify");
     assert_eq!(
         store.dialog_task_id("menu-agent", "menu-dialog").unwrap(),
         "menu"
@@ -739,10 +743,47 @@ async fn agents_manage_can_manually_save_and_bind_dialog_task() {
     let task = agent.task_state().expect("task state");
     assert_eq!(task.goal, "build potato-first delivery menu");
     assert_eq!(task.notes, "manual note from owner");
-    assert_eq!(task.pipeline.len(), 1);
+    assert_eq!(task.pipeline.len(), 3);
     assert_eq!(task.pipeline[0].system_prompt, "Research menu constraints.");
     assert_eq!(task.pipeline[0].worker_agents[0].direction, "pricing");
-    assert_eq!(task.artifacts[0].key, "menu_research");
+    assert!(task.artifacts.is_empty());
+}
+
+#[tokio::test]
+async fn agents_manage_rejects_manual_task_stage_jump() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalSessionStore::from_root(dir.path().join("sessions"));
+    store
+        .save_agent(&web_test_agent("guarded-agent"))
+        .expect("save agent");
+    let state = web_test_state(store);
+
+    let result = agents_manage(
+        State(state),
+        ApiJson(AgentsManageRequest {
+            action: "task-save".to_string(),
+            id: Some("guarded-agent".to_string()),
+            task_id: Some("default".to_string()),
+            task: Some(TaskPayload {
+                stage: "done".to_string(),
+                title: "unsafe jump".to_string(),
+                goal: "skip lifecycle".to_string(),
+                plan: Vec::new(),
+                pipeline: Vec::new(),
+                notes: String::new(),
+            }),
+            session_id: None,
+            agent: None,
+            token: None,
+            token_provider: None,
+            title: None,
+            swarm: None,
+        }),
+    )
+    .await;
+
+    let error = result.expect_err("manual stage overwrite must be rejected");
+    assert!(error.0.to_string().contains("lifecycle orchestrator"));
 }
 
 #[tokio::test]
@@ -772,7 +813,8 @@ async fn stateful_postprocess_persists_task_to_shared_feature_scope() {
         "Помоги придумать слоган для пиццерии",
         "Конечно, давай уточним тон.",
     )
-    .await;
+    .await
+    .expect("persist stateful");
 
     assert_eq!(debug.expect("debug").stage.as_deref(), Some("clarify"));
     assert_eq!(
@@ -1683,17 +1725,21 @@ fn web_ui_is_agent_centric() {
     assert!(INDEX_HTML.contains("layer: 'long-term'"));
     assert!(INDEX_HTML.contains("data-tab=\"task\""));
     assert!(INDEX_HTML.contains("id=\"taskCurrentStepView\""));
-    assert!(INDEX_HTML.contains("id=\"taskExpectedActionView\""));
+    assert!(INDEX_HTML.contains("id=\"taskRequirementView\""));
+    assert!(INDEX_HTML.contains("id=\"taskNextStageView\""));
+    assert!(INDEX_HTML.contains("id=\"taskBlockView\""));
     assert!(INDEX_HTML.contains("id=\"taskResumeHintView\""));
     assert!(INDEX_HTML.contains("id=\"taskGoalView\""));
-    assert!(INDEX_HTML.contains("Состояние обновляется автоматически task-агентом роя."));
+    assert!(INDEX_HTML.contains("Будущий stage-agent не запустится"));
     assert!(!INDEX_HTML.contains("id=\"taskIdInput\""));
     assert!(!INDEX_HTML.contains("id=\"taskLoad\""));
     assert!(!INDEX_HTML.contains("id=\"taskSave\""));
     assert!(!INDEX_HTML.contains("id=\"taskStageSelect\""));
     assert!(!INDEX_HTML.contains("function saveTaskFromForm()"));
     assert!(INDEX_HTML.contains("data-tab=\"invariants\""));
-    assert!(INDEX_HTML.contains("Рабочую задачу ведёт обязательный task-агент роя"));
+    assert!(INDEX_HTML.contains("Стадию меняет только оркестратор"));
+    assert!(INDEX_HTML.contains("id=\"swarmActivity\""));
+    assert!(INDEX_HTML.contains("function renderSwarmActivity(report)"));
     assert!(!INDEX_HTML.contains("общая для всех диалогов агента"));
     // Wiring: build-schema action, gate↔workspace, agent_state rendering.
     assert!(INDEX_HTML.contains("/api/agents/manage"));

@@ -41,6 +41,10 @@ use crate::providers::RequestMetrics;
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SwarmRunRecord {
     pub role: SubAgentRole,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
     /// Whether the sub-agent actually fired a request this turn.
     pub ran: bool,
     /// Legacy compatibility mirror. Mandatory sub-agents are always enabled.
@@ -57,12 +61,25 @@ impl SwarmRunRecord {
     pub fn new(role: SubAgentRole, model: impl Into<String>) -> Self {
         Self {
             role,
+            agent_id: None,
+            direction: None,
             ran: false,
             enabled: true,
             model: model.into(),
             note: String::new(),
             metrics: None,
         }
+    }
+
+    pub fn worker(
+        model: impl Into<String>,
+        agent_id: impl Into<String>,
+        direction: impl Into<String>,
+    ) -> Self {
+        let mut record = Self::new(SubAgentRole::Worker, model);
+        record.agent_id = Some(agent_id.into());
+        record.direction = Some(direction.into());
+        record
     }
 }
 

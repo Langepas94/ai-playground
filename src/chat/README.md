@@ -144,6 +144,21 @@ read-only facts block при любой context strategy. `Sticky Facts` отв�
 `validation→execution`. Сериализуется как строка (как `MemoryLayer`), чтобы TOON
 хранил её как plain-значение.
 
+Lifecycle принуждается не только таблицей:
+
+- responder всегда выбирается по сохранённой `TaskContext.stage`; intent запроса
+  не может запустить будущего stage-agent;
+- завершение Planning сохраняет plan artifact и ставит
+  `pause_reason=plan_approval`; переход в Execution возможен только после точного
+  пользовательского approval (`утверждаю план`);
+- Execution должна сохранить непустой artifact до Validation;
+- Done достижим только после непустого validation artifact и
+  `validation_passed=true`;
+- отклонённый запрос возвращает локальный отказ с причиной и не вызывает
+  будущего responder;
+- `revision` обеспечивает optimistic concurrency: stale task writer получает
+  conflict вместо silent overwrite.
+
 `TaskContext.pipeline` задает stage-level pipeline contract: у каждой стадии есть
 `system_prompt`, список `worker_agents` (id/direction/system_prompt), ожидаемый
 `artifact_key` и флаг `requires_human_approval`. Когда стадия рождает artifact,
@@ -151,6 +166,12 @@ read-only facts block при любой context strategy. `Sticky Facts` отв�
 ставит `paused=true` и `expected_action=user_input`, если требуется human approval.
 Artifacts сохраняются в `TaskContext.artifacts` и инъектятся в `[memory:working]`
 для main-agent/orchestrator.
+
+Pipeline обязан содержать ровно `planning→execution→validation`. Каждый
+`worker_agent` теперь является реальным provider sub-request:
+`PipelineWorkerAgent` запускается до stage responder, сохраняет
+`worker.<id>` artifact, а результаты всех workers инъектятся stage responder в
+`[pipeline:worker-results]`. Пустой/упавший worker fail-closed блокирует стадию.
 
 Хранение через `LocalSessionStore`: `agent-<id>.agent.toon`, legacy/default
 `*.task.toon`, task-scoped `agent-<id>.task-<task>.toon`,
@@ -197,13 +218,11 @@ orchestrator validation pass: проверяет ответ против инв�
 явное отрицание правила, а обычный краткий ответ считается допустимым.
 Compliance/refusal-ответ не двигает task FSM и не меняет title/goal/artifacts.
 `StatefulReport` несёт безопасный `invariant_status`/`invariant_summary` для UI
-без раскрытия chain-of-thought. `ChatAgent::stateful_postprocess()` после хода (LLM-driven, реюз паттернов
-`update_sticky_facts`/классификатора): заполняет профиль из сообщения юзера
-(фильтр `looks_sensitive`), предлагает стадию → валидирует FSM → применяет только
-разрешённые переходы, проверяет ответ против инвариантов. Возвращает
-`StatefulReport` (pending-вопросы, стадия, `StageTransition`, нарушения,
+без раскрытия chain-of-thought. Stateful lifecycle полностью выполняется внутри
+`SwarmOrchestrator`; `ChatAgent` только сохраняет полученный `StatefulReport`
+(pending-вопросы, стадия, gate requirement, `StageTransition`, нарушения,
 метрики). `build_profile_schema()` — LLM-генерация схемы интервью из домена.
-Каждый шаг gated на наличии данных: ad-hoc чат без агента не платит ничего.
+Каждый provider-backed шаг gated на наличии данных.
 
 ## Рой агентов (swarm)
 
@@ -216,25 +235,31 @@ legacy-поле `enabled` нормализуется в `true`).
 
 Сущности:
 
-- **Stage-ответчики** (по стадии FSM): `PlanningAgent`, `ExecutionAgent`,
+- **Stage-ответчики** (строго по текущей стадии FSM): `PlanningAgent`, `ExecutionAgent`,
   `ValidationAgent`, `DoneAgent`. Clarify сворачивается в Planning. У каждого свой
   system prompt = работа стадии; завершение стадии модель помечает строкой
-  `<<STAGE_DONE>>` (парсится кодом).
+  `<<STAGE_DONE>>` — только отдельной последней непустой строкой. Inline/echo
+  marker игнорируется; user `answer_suffix`/`completion_instruction` удаляются из
+  stage-control и не могут изготовить marker.
+- **Pipeline workers**: динамические `PipelineWorkerAgent` из
+  `TaskPipelineStage.worker_agents`; это реальные вызовы модели с отдельными
+  `SwarmRunRecord`, а не текстовые подсказки в prompt.
 - **`GeneralAgent`** — ответчик для обычного чата без задачи.
 - **Сервисные**: `MemoryAgent` (KV-факты + слои), `SummaryAgent` (компакция),
   `TopicAgent` (scoped-routing), `ProfileAgent` (интервью-профиль), `InvariantAgent`
   (Pass/Fail).
 
 `SwarmOrchestrator` (`orchestrator.rs`) — **чистый код-роутер**, детерминированный
-FSM. На каждом ходу (`run_turn`): sticky-facts memory ДО ответа → выбор stage-
-ответчика по `task.stage` → invariant-проверка с retry (`MAX_INVARIANT_RETRIES`) →
-commit → детерминированный переход стадии по `TaskStage::allowed_next` (LLM НЕ
-называет целевую стадию) → пост-агенты Memory/Summary/Profile. Возвращает
+FSM. На каждом ходу (`run_turn`): локальный lifecycle guard → sticky-facts memory
+ДО ответа → реальные pipeline workers → выбор stage-ответчика по сохранённой
+`task.stage` → invariant-проверка с retry (`MAX_INVARIANT_RETRIES`) → commit →
+детерминированное завершение текущей стадии с gates → пост-агенты
+Memory/Summary/Profile. Возвращает
 `(ChatResponse, StatefulReport)`. `ChatAgent::respond*` — тонкая обёртка:
 `build_turn` → `orchestrator.run_turn`. Стриминг: `stream_prepare`/`stream_finalize`
-(без marker, FSM не двигается на стриме). Web для агента с инвариантами
-буферизует provider stream и отдаёт браузеру только финальный текст после
-invariant gate, поэтому нарушающие partial tokens не успевают утечь.
+(тот же marker/gate path). Web для агента с инвариантами буферизует provider
+stream и отдаёт браузеру только финальный текст после invariant gate, поэтому
+нарушающие partial tokens не успевают утечь.
 
 `PromptBuilder` (`prompt_builder.rs`) — единственное место сборки итогового
 промпта (заменил `inject_memory_layers`). Слои в фиксированном порядке: `system →

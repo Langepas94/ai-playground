@@ -262,7 +262,7 @@ Provider/model: `DeepSeek / deepseek-v4-flash`
 
 ### INV-DEMO-OK-003 — Юридический сценарий проходит целевые стадии
 
-Тест `demo_scenario_walks_stages_by_intent_and_fills_task_fields` прошёл:
+Тест `demo_scenario_obeys_strict_lifecycle_gates_and_fills_task_fields` прошёл:
 
 ```text
 planning → execution → validation → done
@@ -434,7 +434,7 @@ Rust tests и анализ production-кода.
 rtk cargo test invariant
 10 passed
 
-rtk cargo test demo_scenario_walks_stages_by_intent_and_fills_task_fields
+rtk cargo test demo_scenario_obeys_strict_lifecycle_gates_and_fills_task_fields
 1 passed
 
 После исправлений:

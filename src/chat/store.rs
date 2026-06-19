@@ -18,8 +18,9 @@ use super::memory::{AgentMemory, MemoryLayer, TopicFile};
 
 pub use super::store_types::{
     AgentProfile, AgentSummary, DialogMeta, LongTermMemory, ProfileField, SavedAgent,
-    SavedMemoryConfig, TaskArtifact, TaskContext, TaskPipelineStage, TaskStage, TaskWorkerAgent,
-    UserProfile, UserProfileBindings, agent_id_from_key, unix_now,
+    SavedMemoryConfig, TaskArtifact, TaskContext, TaskPauseReason, TaskPipelineStage, TaskStage,
+    TaskTransitionDecision, TaskWorkerAgent, UserProfile, UserProfileBindings, agent_id_from_key,
+    unix_now,
 };
 use super::store_types::{
     AgentsIndex, DialogsIndex, UserProfilesIndex, blank_str_to_none, default_task_id,
@@ -397,7 +398,7 @@ impl LocalSessionStore {
 
     /// Persist the working-memory task and keep the picker index's stage in sync.
     pub fn save_task(&self, id: &str, task: &TaskContext) -> Result<(), AppError> {
-        self.write_toon(&self.agent_task_path(id), task)?;
+        self.write_task_checked(&self.agent_task_path(id), task)?;
         let mut index: AgentsIndex = self
             .read_toon(&self.agents_index_path())?
             .unwrap_or_default();
@@ -430,7 +431,20 @@ impl LocalSessionStore {
         task_id: &str,
         task: &TaskContext,
     ) -> Result<(), AppError> {
-        self.write_toon(&self.agent_scoped_task_path(agent_id, task_id), task)
+        self.write_task_checked(&self.agent_scoped_task_path(agent_id, task_id), task)
+    }
+
+    fn write_task_checked(&self, path: &Path, task: &TaskContext) -> Result<(), AppError> {
+        let current: TaskContext = self.read_toon(path)?.unwrap_or_default();
+        if current.revision != task.revision {
+            return Err(AppError::InvalidInput(format!(
+                "Task state conflict: expected revision {}, current revision {}. Reload the task before saving.",
+                task.revision, current.revision
+            )));
+        }
+        let mut next = task.clone();
+        next.revision = current.revision.saturating_add(1);
+        self.write_toon(path, &next)
     }
 
     pub fn dialog_task_id(&self, agent_id: &str, session_id: &str) -> Result<String, AppError> {

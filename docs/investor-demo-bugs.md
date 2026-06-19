@@ -4,7 +4,7 @@
 
 | Баг | Статус | Что сделано |
 | --- | --- | --- |
-| DEMO-001 | ✅ fixed | Детерминированный `infer_task_state_from_exchange` в оркестраторе: стадия следует интенту пользователя по ключевым словам, доходит до `done`. |
+| DEMO-001 | ✅ fixed | Строгий lifecycle: intent запроса не выбирает будущего responder; стадии меняются только по stage artifact + code gate. |
 | DEMO-002 | ✅ fixed | Оркестратор всегда ставит `current_step`/`expected_action`/`resume_hint` (`set_progress` per stage). |
 | DEMO-003 | ✅ fixed | Seed-поля «что уточнить» → required-поля схемы интервью на сохранении агента (`agents.rs`). |
 | DEMO-004 | ✅ fixed (prompt) | EXECUTION stage-rules: давать черновик с плейсхолдерами, не блокировать из-за неполных данных. |
@@ -13,9 +13,9 @@
 | DEMO-007 | ✅ fixed | `[output:policy]`: служебные/контрольные формулировки не попадают в ответ пользователю. |
 | DEMO-008 | ✅ fixed | Streaming снова включён для DeepSeek; исправлен SSE parser. Полный production-рой сохранён. В повторном прогоне ответы завершались за 18–35 секунд вместо 90–110. |
 | DEMO-009 | ✅ fixed | Сброс request debug больше не очищает сохранённые long-term facts во вкладке профиля. |
-| DEMO-010 | ✅ fixed | Финал «что отправляем» → `stage=done`, `expected_action=none` (inference). |
+| DEMO-010 | ✅ fixed | Финал заблокирован до успешного validation artifact; после validation → `stage=done`, `expected_action=none`. |
 
-Покрыто тестом `demo_scenario_walks_stages_by_intent_and_fills_task_fields`
+Покрыто тестом `demo_scenario_obeys_strict_lifecycle_gates_and_fills_task_fields`
 (`src/chat/swarm/orchestrator_tests.rs`).
 
 ## Повторный production-прогон

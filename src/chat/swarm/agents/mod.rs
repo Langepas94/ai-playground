@@ -8,8 +8,10 @@
 mod responder;
 mod service;
 
-pub use responder::{GeneralAgent, StageAgent};
-pub(crate) use responder::{STAGE_DONE_MARKER, stage_rules, strip_stage_marker};
+pub use responder::{GeneralAgent, PipelineWorkerAgent, StageAgent};
+pub(crate) use responder::{
+    STAGE_DONE_MARKER, lifecycle_safe_control, stage_rules, strip_stage_marker,
+};
 pub(crate) use service::update_active_topic_file;
 pub use service::{InvariantAgent, MemoryAgent, ProfileAgent, SummaryAgent, TopicAgent};
 

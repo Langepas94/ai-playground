@@ -3,9 +3,9 @@
 //!
 //! 1. (sticky-facts) MemoryAgent extracts facts before the responder.
 //! 2. (scoped) TopicAgent routes; may short-circuit with a canned answer.
-//! 2b. Task switching: a new-task intent parks the current task (paused, kept in
-//!     the backlog) and opens a fresh Clarify task — the only way to leave the
-//!     terminal Done stage; a "back to …" intent resumes a paused task.
+//!    Task switching: a new-task intent parks the current task (paused, kept in
+//!    the backlog) and opens a fresh Clarify task — the only way to leave the
+//!    terminal Done stage; a "back to …" intent resumes a paused task.
 //! 3. Pick the responder deterministically by current FSM stage.
 //! 4. InvariantAgent validates → retry the responder on violations (bounded).
 //!    If violations survive the retries, the answer is BLOCKED and replaced with
@@ -15,20 +15,20 @@
 
 use crate::chat::agent::{
     StageTransition, StatefulReport, build_invariant_refusal_for_prompt,
-    build_invariant_unverified_response, infer_task_state_from_exchange,
-    is_invariant_compliance_response, local_chat_response, merge_optional_metrics,
-    paused_user_supplied_next_info, sanitize_unverified_legal_claims, starts_new_task,
-    switch_back_target, task_decision_from_exchange, task_resume_hint, task_title_from_prompt,
+    build_invariant_unverified_response, is_invariant_compliance_response, local_chat_response,
+    merge_optional_metrics, paused_user_supplied_next_info, requested_task_stage,
+    sanitize_unverified_legal_claims, starts_new_task, switch_back_target,
+    task_decision_from_exchange, task_resume_hint, task_title_from_prompt,
 };
 use crate::chat::memory::MemoryStrategy;
-use crate::chat::store::{TaskArtifact, TaskStage};
+use crate::chat::store::{TaskArtifact, TaskPauseReason, TaskStage};
 use crate::errors::AppError;
 use crate::providers::{ChatMessage, ChatRequest, ChatResponse, RequestMetrics, Role};
 
 use super::agent::{InvariantCheckStatus, SubAgent, SwarmTurn};
 use super::agents::{
-    GeneralAgent, InvariantAgent, MemoryAgent, ProfileAgent, StageAgent, SummaryAgent, TopicAgent,
-    strip_stage_marker, update_active_topic_file,
+    GeneralAgent, InvariantAgent, MemoryAgent, PipelineWorkerAgent, ProfileAgent, StageAgent,
+    SummaryAgent, TopicAgent, lifecycle_safe_control, strip_stage_marker, update_active_topic_file,
 };
 use super::config::SubAgentRole;
 use super::prompt_builder::PromptBuilder;
@@ -91,6 +91,34 @@ impl SwarmOrchestrator {
     ) -> Result<(ChatResponse, StatefulReport), AppError> {
         let prompt = turn.prompt.to_string();
 
+        // Lifecycle control is evaluated before any provider-backed service
+        // agent. Pause/resume/approval therefore remains a local, durable action.
+        apply_task_switching(turn, &prompt);
+        if let Some((message, transition)) = apply_lifecycle_control(turn, &prompt) {
+            return Ok(self.local_lifecycle_result(turn, &prompt, message, transition));
+        }
+        if let Some((requested, reason)) = lifecycle_request_rejection(turn, &prompt) {
+            let current = turn
+                .task
+                .as_ref()
+                .map(|task| task.stage)
+                .unwrap_or_default();
+            if let Some(task) = turn.task.as_mut() {
+                task.transition_block_reason = reason.clone();
+            }
+            return Ok(self.local_lifecycle_result(
+                turn,
+                &prompt,
+                lifecycle_block_message(current, &reason),
+                Some(StageTransition {
+                    from: current,
+                    to: requested,
+                    accepted: false,
+                    reason,
+                }),
+            ));
+        }
+
         // 1. Sticky-facts: extract before the responder so the facts block is fresh.
         if turn.memory_config.strategy == MemoryStrategy::StickyFacts {
             let outcome = self.memory.run(turn).await;
@@ -109,19 +137,27 @@ impl SwarmOrchestrator {
             }
         }
 
-        // 2b. Deterministic task switching: a new-task intent parks the current
-        // task and starts a fresh Clarify task; a "back to …" intent resumes a
-        // paused one. This is what lets the FSM leave the terminal Done stage.
-        apply_task_switching(turn, &prompt);
-
-        // 3. Pick responder deterministically by current FSM stage.
-        let responder_role = match turn.task.as_ref() {
-            Some(task) => {
-                let response_stage = infer_task_state_from_exchange(task.stage, &prompt, "")
-                    .map(|inferred| inferred.stage)
-                    .unwrap_or(task.stage);
-                stage_responder_role(response_stage)
+        if let Err(reason) = run_pipeline_workers(turn).await {
+            let current = turn
+                .task
+                .as_ref()
+                .map(|task| task.stage)
+                .unwrap_or_default();
+            if let Some(task) = turn.task.as_mut() {
+                task.transition_block_reason = reason.clone();
             }
+            return Ok(self.local_lifecycle_result(
+                turn,
+                &prompt,
+                lifecycle_block_message(current, &reason),
+                None,
+            ));
+        }
+
+        // 3. Pick responder strictly by the persisted current FSM stage. User
+        // intent may be rejected above, but can never select a future agent.
+        let responder_role = match turn.task.as_ref() {
+            Some(task) => stage_responder_role(task.stage),
             None => SubAgentRole::General,
         };
         turn.retry_violations.clear();
@@ -182,33 +218,12 @@ impl SwarmOrchestrator {
         let compliance_only = is_invariant_compliance_response(&answer);
         let preserve_task_state = blocked || compliance_only;
         self.commit(turn, &prompt, &answer);
-        let pause_state_changed = if preserve_task_state {
-            false
-        } else {
+        if !preserve_task_state {
             seed_task_progress(turn, &prompt, &answer);
-            apply_pause_resume(turn, &prompt, &answer)
-        };
-        // Deterministic progress + stage from user intent takes precedence.
-        // The stage marker is only a fallback for neutral prompts such as
-        // "дальше"; otherwise a Planning response could advance itself merely
-        // because it finished answering a clarifying fact.
-        let has_task_intent = !preserve_task_state
-            && !pause_state_changed
-            && turn.task.as_ref().is_some_and(|task| {
-                infer_task_state_from_exchange(task.stage, &prompt, &answer).is_some()
-            });
-        let mut transition = (!preserve_task_state && !pause_state_changed)
-            .then(|| apply_task_inference(turn, &prompt, &answer))
-            .flatten();
-        if !preserve_task_state
-            && !pause_state_changed
-            && !has_task_intent
-            && !paused_user_supplied_next_info(&prompt)
-            && let Some(explicit) =
-                apply_stage_completion(turn, outcome.stage_complete, outcome.artifact.clone())
-        {
-            transition = Some(explicit);
         }
+        let transition = (!preserve_task_state)
+            .then(|| apply_stage_completion(turn, outcome.stage_complete, outcome.artifact.clone()))
+            .flatten();
         if let Some(task) = turn.task.as_mut() {
             task.violations = violations.clone();
         }
@@ -252,6 +267,9 @@ impl SwarmOrchestrator {
             stateful.expected_action = task.expected_action.clone();
             stateful.paused = task.paused;
             stateful.resume_hint = task.resume_hint.clone();
+            stateful.transition_block_reason = task.transition_block_reason.clone();
+            stateful.next_stage = task.next_stage();
+            stateful.next_transition_requirement = task.next_transition_requirement();
             stateful.backlog = backlog_titles(task);
         }
         stateful.stage_transition = transition;
@@ -276,6 +294,42 @@ impl SwarmOrchestrator {
     /// user; stages advance on non-streamed turns.
     pub async fn stream_prepare(&self, turn: &mut SwarmTurn<'_>) -> Result<StreamPrep, AppError> {
         let prompt = turn.prompt.to_string();
+        apply_task_switching(turn, &prompt);
+        if let Some((message, transition)) = apply_lifecycle_control(turn, &prompt) {
+            let (response, report) =
+                self.local_lifecycle_result(turn, &prompt, message, transition);
+            return Ok(StreamPrep::Local(
+                response,
+                turn.aux_metrics.clone(),
+                report,
+            ));
+        }
+        if let Some((requested, reason)) = lifecycle_request_rejection(turn, &prompt) {
+            let current = turn
+                .task
+                .as_ref()
+                .map(|task| task.stage)
+                .unwrap_or_default();
+            if let Some(task) = turn.task.as_mut() {
+                task.transition_block_reason = reason.clone();
+            }
+            let (response, report) = self.local_lifecycle_result(
+                turn,
+                &prompt,
+                lifecycle_block_message(current, &reason),
+                Some(StageTransition {
+                    from: current,
+                    to: requested,
+                    accepted: false,
+                    reason,
+                }),
+            );
+            return Ok(StreamPrep::Local(
+                response,
+                turn.aux_metrics.clone(),
+                report,
+            ));
+        }
         if turn.memory_config.strategy == MemoryStrategy::StickyFacts {
             let outcome = self.memory.run(turn).await;
             accumulate(turn, outcome.metrics);
@@ -287,17 +341,36 @@ impl SwarmOrchestrator {
                 let message = outcome.answer.unwrap_or_default();
                 self.commit(turn, &prompt, &message);
                 let response = local_chat_response(message, turn.aux_metrics.clone());
-                return Ok(StreamPrep::Local(response, turn.aux_metrics.clone()));
+                return Ok(StreamPrep::Local(
+                    response,
+                    turn.aux_metrics.clone(),
+                    StatefulReport::default(),
+                ));
             }
         }
-        apply_task_switching(turn, &prompt);
-        let role = match turn.task.as_ref() {
-            Some(task) => {
-                let response_stage = infer_task_state_from_exchange(task.stage, &prompt, "")
-                    .map(|inferred| inferred.stage)
-                    .unwrap_or(task.stage);
-                stage_responder_role(response_stage)
+        if let Err(reason) = run_pipeline_workers(turn).await {
+            let current = turn
+                .task
+                .as_ref()
+                .map(|task| task.stage)
+                .unwrap_or_default();
+            if let Some(task) = turn.task.as_mut() {
+                task.transition_block_reason = reason.clone();
             }
+            let (response, report) = self.local_lifecycle_result(
+                turn,
+                &prompt,
+                lifecycle_block_message(current, &reason),
+                None,
+            );
+            return Ok(StreamPrep::Local(
+                response,
+                turn.aux_metrics.clone(),
+                report,
+            ));
+        }
+        let role = match turn.task.as_ref() {
+            Some(task) => stage_responder_role(task.stage),
             None => SubAgentRole::General,
         };
         let (profile, _token) = turn.responder_profile(role);
@@ -308,7 +381,7 @@ impl SwarmOrchestrator {
         let request = ChatRequest {
             model: profile.model.clone(),
             messages,
-            control: turn.control.clone(),
+            control: lifecycle_safe_control(turn.control, role),
             pricing: turn.pricing.clone(),
             billing: turn.billing.clone(),
         };
@@ -364,32 +437,18 @@ impl SwarmOrchestrator {
         let compliance_only = is_invariant_compliance_response(&answer);
         let preserve_task_state = blocked || compliance_only;
         self.commit(turn, prompt, &answer);
-        let pause_state_changed = if preserve_task_state {
-            false
-        } else {
+        if !preserve_task_state {
             seed_task_progress(turn, prompt, &answer);
-            apply_pause_resume(turn, prompt, &answer)
-        };
-        let has_task_intent = !preserve_task_state
-            && !pause_state_changed
-            && turn.task.as_ref().is_some_and(|task| {
-                infer_task_state_from_exchange(task.stage, prompt, &answer).is_some()
-            });
-        let mut transition = (!preserve_task_state && !pause_state_changed)
-            .then(|| apply_task_inference(turn, prompt, &answer))
-            .flatten();
-        if !preserve_task_state
-            && !pause_state_changed
-            && !has_task_intent
-            && !paused_user_supplied_next_info(prompt)
-            && let Some(explicit) = apply_stage_completion(
+        }
+        let transition = if !preserve_task_state {
+            apply_stage_completion(
                 turn,
                 complete,
                 complete.then(|| (key, truncate(&answer, 280))),
             )
-        {
-            transition = Some(explicit);
-        }
+        } else {
+            None
+        };
         if turn.memory_config.strategy != MemoryStrategy::StickyFacts {
             let outcome = self.memory.run(turn).await;
             accumulate(turn, outcome.metrics);
@@ -431,6 +490,9 @@ impl SwarmOrchestrator {
             stateful.expected_action = task.expected_action.clone();
             stateful.paused = task.paused;
             stateful.resume_hint = task.resume_hint.clone();
+            stateful.transition_block_reason = task.transition_block_reason.clone();
+            stateful.next_stage = task.next_stage();
+            stateful.next_transition_requirement = task.next_transition_requirement();
             stateful.backlog = backlog_titles(task);
         }
         stateful.stage_transition = transition;
@@ -441,6 +503,38 @@ impl SwarmOrchestrator {
         let aux = turn.aux_metrics.clone();
         stateful.metrics = aux.clone();
         (stateful, aux, answer)
+    }
+
+    fn local_lifecycle_result(
+        &self,
+        turn: &mut SwarmTurn<'_>,
+        prompt: &str,
+        message: String,
+        transition: Option<StageTransition>,
+    ) -> (ChatResponse, StatefulReport) {
+        self.commit(turn, prompt, &message);
+        let mut stateful = StatefulReport {
+            stage_transition: transition,
+            invariant_status: "not_run".to_string(),
+            invariant_summary: "Локальный lifecycle guard; ответ модели не запускался.".to_string(),
+            metrics: turn.aux_metrics.clone(),
+            ..StatefulReport::default()
+        };
+        if let Some(task) = turn.task.as_ref() {
+            stateful.stage = Some(task.stage);
+            stateful.current_step = task.current_step.clone();
+            stateful.expected_action = task.expected_action.clone();
+            stateful.paused = task.paused;
+            stateful.resume_hint = task.resume_hint.clone();
+            stateful.transition_block_reason = task.transition_block_reason.clone();
+            stateful.next_stage = task.next_stage();
+            stateful.next_transition_requirement = task.next_transition_requirement();
+            stateful.backlog = backlog_titles(task);
+        }
+        (
+            local_chat_response(message, turn.aux_metrics.clone()),
+            stateful,
+        )
     }
 
     /// Append the user prompt + answer to history and record branch labels.
@@ -500,7 +594,7 @@ pub enum StreamPrep {
     /// Stream this request from the resolved responder.
     Request(ChatRequest, Option<RequestMetrics>),
     /// A terminal local answer (e.g. topic routing could not match).
-    Local(ChatResponse, Option<RequestMetrics>),
+    Local(ChatResponse, Option<RequestMetrics>, StatefulReport),
 }
 
 /// Map a task stage to its responder role (Clarify folds into Planning).
@@ -513,34 +607,41 @@ fn stage_responder_role(stage: TaskStage) -> SubAgentRole {
     }
 }
 
-/// Deterministic task-state from the exchange (keyword inference, no LLM): always
-/// sets `current_step`/`expected_action`/`resume_hint`, and advances the stage
-/// when the user's intent clearly moves it (validated by `can_transition`). This
-/// keeps the FSM tracking the actual request instead of lagging a turn behind.
-fn apply_task_inference(
-    turn: &mut SwarmTurn<'_>,
-    prompt: &str,
-    answer: &str,
-) -> Option<StageTransition> {
-    let current = turn.task.as_ref()?.stage;
-    if turn.task.as_ref()?.paused {
-        return None;
+async fn run_pipeline_workers(turn: &mut SwarmTurn<'_>) -> Result<(), String> {
+    let Some(task) = turn.task.as_ref() else {
+        return Ok(());
+    };
+    if task.paused {
+        return Ok(());
     }
-    let inferred = infer_task_state_from_exchange(current, prompt, answer)?;
-    let task = turn.task.as_mut()?;
-    task.set_progress(inferred.current_step, inferred.expected_action);
-    if !inferred.resume_hint.trim().is_empty() {
-        task.resume_hint = inferred.resume_hint;
+    let stage = task.stage;
+    let workers = task
+        .active_pipeline_stage()
+        .map(|pipeline| pipeline.worker_agents.clone())
+        .unwrap_or_default();
+    for worker in workers {
+        if worker.id.trim().is_empty() {
+            return Err(format!(
+                "Pipeline worker для стадии {stage} не имеет обязательного id."
+            ));
+        }
+        let outcome = PipelineWorkerAgent::new(worker.clone(), stage)
+            .run(turn)
+            .await;
+        accumulate(turn, outcome.metrics);
+        let Some((key, value)) = outcome.artifact else {
+            return Err(format!(
+                "Pipeline worker `{}` не создал результат; стадия {stage} остановлена.",
+                worker.id.trim()
+            ));
+        };
+        let artifact = TaskArtifact { stage, key, value };
+        turn.worker_outputs.push(artifact.clone());
+        if let Some(task) = turn.task.as_mut() {
+            task.artifacts.push(artifact);
+        }
     }
-    if inferred.stage != current && current.can_transition(inferred.stage) {
-        task.stage = inferred.stage;
-        return Some(StageTransition {
-            from: current,
-            to: inferred.stage,
-            accepted: true,
-        });
-    }
-    None
+    Ok(())
 }
 
 /// Deterministic multi-task switching (no LLM): a clear new-task intent parks the
@@ -578,71 +679,304 @@ fn apply_stage_completion(
     if task.paused {
         return None;
     }
-    let (key, value) = artifact.unwrap_or_default();
+    let current = task.stage;
+    let (key, value) = artifact.unwrap_or_else(|| {
+        (
+            current.to_string(),
+            "Stage responder returned no artifact.".to_string(),
+        )
+    });
+    if value.trim().is_empty() {
+        let reason = format!("Стадия {current} не завершена: результат пуст.");
+        task.transition_block_reason = reason.clone();
+        return Some(StageTransition {
+            from: current,
+            to: current,
+            accepted: false,
+            reason,
+        });
+    }
     if !task.pipeline.is_empty() {
+        if let Err(reason) = task.validate_pipeline() {
+            task.transition_block_reason = reason.clone();
+            return Some(StageTransition {
+                from: current,
+                to: current,
+                accepted: false,
+                reason,
+            });
+        }
+        if current == TaskStage::Planning && task.plan.is_empty() {
+            task.plan = plan_lines(&value);
+        }
         let advance = task.complete_pipeline_stage(key, value)?;
         return Some(StageTransition {
             from: advance.from,
             to: advance.to,
             accepted: advance.accepted,
+            reason: task.transition_block_reason.clone(),
         });
     }
-    if !key.is_empty() || !value.is_empty() {
-        task.artifacts.push(TaskArtifact {
-            stage: task.stage,
-            key,
-            value,
+    if !task.record_stage_artifact(current, key, value.clone()) {
+        return Some(StageTransition {
+            from: current,
+            to: current,
+            accepted: false,
+            reason: task.transition_block_reason.clone(),
         });
     }
-    let from = task.stage;
-    let &next = from.allowed_next().first()?;
-    task.stage = next;
+    if current == TaskStage::Planning {
+        if task.plan.is_empty() {
+            task.plan = plan_lines(&value);
+        }
+        task.pause_for(
+            TaskPauseReason::PlanApproval,
+            "Проверьте подготовленный план и явно напишите «утверждаю план».",
+        );
+        task.current_step = "утвердить план".to_string();
+        task.expected_action = "approve_plan".to_string();
+        return Some(StageTransition {
+            from: current,
+            to: current,
+            accepted: true,
+            reason: "План подготовлен; переход в execution ожидает явного approval.".to_string(),
+        });
+    }
+    if current == TaskStage::Validation {
+        task.validation_passed = true;
+    }
+    let next = current.canonical_next()?;
+    let decision = task.try_transition(next);
     Some(StageTransition {
-        from,
-        to: next,
-        accepted: true,
+        from: decision.from,
+        to: decision.to,
+        accepted: decision.accepted,
+        reason: decision.reason,
     })
 }
 
-/// Deterministic pause/resume intent (ported from the legacy
-/// `apply_pause_resume_intent`). Keyword-based, no LLM.
-fn apply_pause_resume(turn: &mut SwarmTurn<'_>, user_prompt: &str, answer: &str) -> bool {
-    let Some(task) = turn.task.as_mut() else {
-        return false;
-    };
-    let prompt = user_prompt.trim().to_lowercase();
-    if task.paused
-        && (prompt.contains("resume")
-            || prompt.contains("continue")
-            || prompt.contains("approve")
-            || prompt.contains("approved")
-            || prompt.contains("ok")
-            || prompt.contains("okay")
-            || prompt.contains("продолж")
-            || prompt.contains("возобнов")
-            || prompt.contains("утвержд")
-            || prompt.contains("одобря")
-            || prompt.contains("ок")
-            || paused_user_supplied_next_info(&prompt))
-    {
-        if !task.approve_pipeline_pause() {
-            task.resume();
+/// Apply pause/resume/approval before a provider call. Approval uses explicit
+/// whole-message intent; substring matches such as `ок` inside `срок` are never
+/// accepted.
+fn apply_lifecycle_control(
+    turn: &mut SwarmTurn<'_>,
+    user_prompt: &str,
+) -> Option<(String, Option<StageTransition>)> {
+    let task = turn.task.as_mut()?;
+    let prompt = normalize_control_intent(user_prompt);
+    if task.paused {
+        if matches!(
+            task.pause_reason,
+            TaskPauseReason::PlanApproval | TaskPauseReason::StageApproval
+        ) {
+            if !explicit_approval_intent(&prompt, task.pause_reason) {
+                let reason = match task.pause_reason {
+                    TaskPauseReason::PlanApproval => {
+                        "План ожидает явного утверждения. Напишите «утверждаю план»."
+                    }
+                    TaskPauseReason::StageApproval => {
+                        "Артефакт ожидает явного утверждения. Напишите «утверждаю результат»."
+                    }
+                    _ => unreachable!(),
+                };
+                task.transition_block_reason = reason.to_string();
+                return Some((
+                    format!("⏸ {reason}\n\nТекущая стадия: `{}`.", task.stage),
+                    None,
+                ));
+            }
+            let from = task.stage;
+            if task.approve_pipeline_pause() {
+                let to = task.stage;
+                return Some((
+                    format!(
+                        "✅ Approval принят. Задача перешла `{from}` → `{to}`. Следующий ход выполнит только агент стадии `{to}`."
+                    ),
+                    Some(StageTransition {
+                        from,
+                        to,
+                        accepted: true,
+                        reason: "Явное пользовательское approval.".to_string(),
+                    }),
+                ));
+            }
+            let reason = task.transition_block_reason.clone();
+            return Some((
+                lifecycle_block_message(from, &reason),
+                Some(StageTransition {
+                    from,
+                    to: from.canonical_next().unwrap_or(from),
+                    accepted: false,
+                    reason,
+                }),
+            ));
         }
-        return true;
+        if resume_intent(&prompt) || paused_user_supplied_next_info(&prompt) {
+            task.resume();
+            return Some((
+                format!(
+                    "▶️ Задача возобновлена на стадии `{}`. Продолжаю с сохранённого шага: {}.",
+                    task.stage,
+                    task.resume_hint.trim()
+                ),
+                None,
+            ));
+        }
+        let reason = "Задача на паузе. Напишите «продолжай», чтобы возобновить её.";
+        task.transition_block_reason = reason.to_string();
+        return Some((format!("⏸ {reason}"), None));
     }
-    if !task.paused
-        && (prompt.contains("pause")
-            || prompt.contains("paused")
-            || prompt.contains("пауз")
-            || prompt.contains("приостанов")
-            || prompt.contains("останов")
-            || prompt.contains("вернусь позже")
-            || prompt.contains("потом продолжим"))
+    if pause_intent(&prompt) {
+        let hint = task_resume_hint(task, user_prompt, "");
+        task.pause(hint.clone());
+        return Some((
+            format!(
+                "⏸ Задача поставлена на паузу на стадии `{}`. Для продолжения: {}.",
+                task.stage, hint
+            ),
+            None,
+        ));
+    }
+    None
+}
+
+fn lifecycle_request_rejection(turn: &SwarmTurn<'_>, prompt: &str) -> Option<(TaskStage, String)> {
+    let task = turn.task.as_ref()?;
+    let requested = requested_task_stage(prompt)?;
+    if requested == task.stage
+        || (task.stage == TaskStage::Clarify && requested == TaskStage::Planning)
     {
-        let hint = task_resume_hint(task, user_prompt, answer);
-        return task.pause(hint);
+        return None;
     }
-    false
+    if requested == TaskStage::Planning
+        && matches!(task.stage, TaskStage::Execution | TaskStage::Validation)
+    {
+        return None;
+    }
+    let current_index = TaskStage::ORDERED
+        .iter()
+        .position(|stage| *stage == task.stage)?;
+    let requested_index = TaskStage::ORDERED
+        .iter()
+        .position(|stage| *stage == requested)?;
+    if requested_index <= current_index {
+        return None;
+    }
+    let reason = match task.stage {
+        TaskStage::Clarify => {
+            "Сначала завершите уточнение задачи; реализация и проверка пока заблокированы."
+                .to_string()
+        }
+        TaskStage::Planning => {
+            if !task.has_stage_artifact(TaskStage::Planning) {
+                "Сначала PlanningAgent должен подготовить план.".to_string()
+            } else {
+                "Сначала пользователь должен явно утвердить план.".to_string()
+            }
+        }
+        TaskStage::Execution => {
+            "Сначала ExecutionAgent должен завершить результат, затем его проверит ValidationAgent."
+                .to_string()
+        }
+        TaskStage::Validation => {
+            "Финал доступен только после успешного результата ValidationAgent.".to_string()
+        }
+        TaskStage::Done => "Задача уже завершена.".to_string(),
+    };
+    Some((requested, reason))
+}
+
+fn lifecycle_block_message(stage: TaskStage, reason: &str) -> String {
+    format!(
+        "⛔ Нельзя перейти дальше со стадии `{stage}`.\n\n{reason}\n\nСледующее допустимое действие задаётся lifecycle-панелью задачи."
+    )
+}
+
+fn normalize_control_intent(value: &str) -> String {
+    value
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() || ch.is_whitespace() {
+                ch
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn explicit_approval_intent(prompt: &str, reason: TaskPauseReason) -> bool {
+    let exact_short = matches!(prompt, "ок" | "ok" | "approved" | "утверждаю" | "одобряю");
+    exact_short
+        || match reason {
+            TaskPauseReason::PlanApproval => [
+                "утверждаю план",
+                "одобряю план",
+                "план утвержден",
+                "план утверждён",
+                "approve plan",
+                "plan approved",
+            ]
+            .contains(&prompt),
+            TaskPauseReason::StageApproval => [
+                "утверждаю результат",
+                "одобряю результат",
+                "результат утвержден",
+                "результат утверждён",
+                "approve result",
+                "artifact approved",
+            ]
+            .contains(&prompt),
+            _ => false,
+        }
+}
+
+fn resume_intent(prompt: &str) -> bool {
+    matches!(
+        prompt,
+        "continue"
+            | "continue task"
+            | "resume"
+            | "resume task"
+            | "продолжай"
+            | "продолжить"
+            | "возобновить"
+            | "возобновляй"
+    )
+}
+
+fn pause_intent(prompt: &str) -> bool {
+    matches!(
+        prompt,
+        "pause"
+            | "pause task"
+            | "пауза"
+            | "поставь на паузу"
+            | "приостанови"
+            | "останови задачу"
+            | "вернусь позже"
+            | "потом продолжим"
+    )
+}
+
+fn plan_lines(answer: &str) -> Vec<String> {
+    answer
+        .lines()
+        .map(|line| {
+            line.trim()
+                .trim_start_matches(['-', '*', '•'])
+                .trim_start_matches(|ch: char| ch.is_ascii_digit() || ch == '.' || ch == ')')
+                .trim()
+                .to_string()
+        })
+        .filter(|line| !line.is_empty())
+        .take(12)
+        .collect()
 }
 
 /// Deterministically seed the task's goal/title/decisions from the exchange
@@ -660,6 +994,9 @@ fn seed_task_progress(turn: &mut SwarmTurn<'_>, prompt: &str, answer: &str) {
     }
     if task.title.trim().is_empty() {
         task.title = task_title_from_prompt(prompt);
+    }
+    if task.current_step.trim().is_empty() || task.expected_action.trim().is_empty() {
+        task.sync_progress_for_stage();
     }
     capture_task_facts(task, prompt);
     if let Some(decision) = task_decision_from_exchange(prompt, answer)

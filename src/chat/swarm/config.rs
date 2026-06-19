@@ -38,6 +38,9 @@ pub enum SubAgentRole {
     Profile,
     /// Checks responses against the agent's invariants (Pass/Fail → retry).
     Invariant,
+    /// Dynamic pipeline worker. Workers are configured per task stage and run
+    /// as real provider sub-requests before the stage responder.
+    Worker,
     /// Legacy role kept only so old persisted configs still deserialize. Not in
     /// [`SubAgentRole::ALL`]; superseded by the stage responders + orchestrator.
     Task,
@@ -79,6 +82,7 @@ impl SubAgentRole {
             SubAgentRole::Topic => "topic",
             SubAgentRole::Profile => "profile",
             SubAgentRole::Invariant => "invariant",
+            SubAgentRole::Worker => "worker",
             SubAgentRole::Task => "task",
         }
     }
@@ -116,6 +120,7 @@ impl FromStr for SubAgentRole {
             "topic" => Ok(SubAgentRole::Topic),
             "profile" => Ok(SubAgentRole::Profile),
             "invariant" => Ok(SubAgentRole::Invariant),
+            "worker" => Ok(SubAgentRole::Worker),
             "task" => Ok(SubAgentRole::Task),
             _ => Err(()),
         }
