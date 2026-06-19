@@ -155,7 +155,8 @@ impl Serialize for TaskStage {
 impl<'de> Deserialize<'de> for TaskStage {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = String::deserialize(deserializer)?;
-        Ok(raw.parse().unwrap_or_default())
+        raw.parse()
+            .map_err(|_| serde::de::Error::custom(format!("invalid task stage: {raw}")))
     }
 }
 
@@ -183,6 +184,18 @@ impl TaskStage {
     /// Whether moving from `self` to `to` is allowed. Staying put is always allowed.
     pub fn can_transition(self, to: TaskStage) -> bool {
         self == to || self.allowed_next().contains(&to)
+    }
+
+    /// The normal forward lifecycle edge. Backward repair transitions remain in
+    /// [`Self::allowed_next`] but are never selected by stage completion.
+    pub fn canonical_next(self) -> Option<TaskStage> {
+        match self {
+            TaskStage::Clarify => Some(TaskStage::Planning),
+            TaskStage::Planning => Some(TaskStage::Execution),
+            TaskStage::Execution => Some(TaskStage::Validation),
+            TaskStage::Validation => Some(TaskStage::Done),
+            TaskStage::Done => None,
+        }
     }
 }
 
@@ -214,10 +227,74 @@ impl std::str::FromStr for TaskStage {
     }
 }
 
+/// Why a task is paused. Approval pauses are intentionally distinct from a
+/// manual pause so ordinary follow-up text cannot accidentally approve a gate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TaskPauseReason {
+    #[default]
+    None,
+    Manual,
+    PlanApproval,
+    StageApproval,
+}
+
+impl Serialize for TaskPauseReason {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for TaskPauseReason {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        raw.parse()
+            .map_err(|_| serde::de::Error::custom(format!("invalid task pause reason: {raw}")))
+    }
+}
+
+impl std::fmt::Display for TaskPauseReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            TaskPauseReason::None => "none",
+            TaskPauseReason::Manual => "manual",
+            TaskPauseReason::PlanApproval => "plan_approval",
+            TaskPauseReason::StageApproval => "stage_approval",
+        })
+    }
+}
+
+impl std::str::FromStr for TaskPauseReason {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "none" => Ok(TaskPauseReason::None),
+            "manual" => Ok(TaskPauseReason::Manual),
+            "plan_approval" | "plan-approval" => Ok(TaskPauseReason::PlanApproval),
+            "stage_approval" | "stage-approval" | "human_approval" => {
+                Ok(TaskPauseReason::StageApproval)
+            }
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskTransitionDecision {
+    pub from: TaskStage,
+    pub to: TaskStage,
+    pub accepted: bool,
+    pub reason: String,
+}
+
 /// Working memory: the agent's current task, shared across all of its sessions.
 /// Auto-populated by the agent; `stage` is driven by the task state machine.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TaskContext {
+    /// Optimistic-concurrency revision. Storage increments it on each successful
+    /// save and rejects stale writers.
+    #[serde(default)]
+    pub revision: u64,
     #[serde(default)]
     pub stage: TaskStage,
     #[serde(default)]
@@ -227,6 +304,8 @@ pub struct TaskContext {
     #[serde(default)]
     pub paused: bool,
     #[serde(default)]
+    pub pause_reason: TaskPauseReason,
+    #[serde(default)]
     pub resume_hint: String,
     #[serde(default)]
     pub title: String,
@@ -235,6 +314,14 @@ pub struct TaskContext {
     /// The approved plan (one entry per step).
     #[serde(default)]
     pub plan: Vec<String>,
+    #[serde(default)]
+    pub plan_approved: bool,
+    #[serde(default)]
+    pub validation_passed: bool,
+    /// Last lifecycle rejection, safe to show in the UI and inject as working
+    /// context. Cleared after a successful transition.
+    #[serde(default)]
+    pub transition_block_reason: String,
     #[serde(default)]
     pub pipeline: Vec<TaskPipelineStage>,
     #[serde(default)]
@@ -308,11 +395,15 @@ impl TaskContext {
             && self.current_step.trim().is_empty()
             && self.expected_action.trim().is_empty()
             && !self.paused
+            && self.pause_reason == TaskPauseReason::None
             && self.resume_hint.trim().is_empty()
             && self.title.trim().is_empty()
             && self.goal.trim().is_empty()
             && self.notes.trim().is_empty()
             && self.plan.iter().all(|step| step.trim().is_empty())
+            && !self.plan_approved
+            && !self.validation_passed
+            && self.transition_block_reason.trim().is_empty()
             && self.pipeline.is_empty()
             && self.artifacts.is_empty()
             && self.results.iter().all(|item| item.trim().is_empty())
@@ -325,8 +416,11 @@ impl TaskContext {
     /// user clearly starts a new task — including from the terminal `Done` stage.
     pub fn start_new_task(&mut self, goal: impl Into<String>, resume_hint: impl Into<String>) {
         let goal = goal.into();
+        let document_revision = self.revision;
         let mut backlog = std::mem::take(&mut self.backlog);
-        let mut parked = std::mem::replace(self, TaskContext::default());
+        let mut parked = std::mem::take(self);
+        self.revision = document_revision;
+        parked.revision = 0;
         // Flatten: backlog entries never carry their own backlog.
         parked.backlog.clear();
         if !parked.is_empty() {
@@ -345,10 +439,13 @@ impl TaskContext {
         if index >= self.backlog.len() {
             return false;
         }
+        let document_revision = self.revision;
         let mut incoming = self.backlog.remove(index);
+        incoming.revision = document_revision;
         incoming.resume();
         let mut backlog = std::mem::take(&mut self.backlog);
         let mut outgoing = std::mem::replace(self, incoming);
+        outgoing.revision = 0;
         outgoing.backlog.clear();
         if !outgoing.is_empty() {
             if outgoing.stage != TaskStage::Done {
@@ -365,6 +462,7 @@ impl TaskContext {
             return false;
         }
         self.paused = true;
+        self.pause_reason = TaskPauseReason::Manual;
         let hint = resume_hint.into();
         if !hint.trim().is_empty() {
             self.resume_hint = hint;
@@ -377,7 +475,257 @@ impl TaskContext {
             return false;
         }
         self.paused = false;
+        self.pause_reason = TaskPauseReason::None;
+        self.transition_block_reason.clear();
         true
+    }
+
+    pub fn pause_for(&mut self, reason: TaskPauseReason, resume_hint: impl Into<String>) -> bool {
+        if self.stage == TaskStage::Done || reason == TaskPauseReason::None {
+            return false;
+        }
+        self.paused = true;
+        self.pause_reason = reason;
+        let hint = resume_hint.into();
+        if !hint.trim().is_empty() {
+            self.resume_hint = hint;
+        }
+        true
+    }
+
+    pub fn has_stage_artifact(&self, stage: TaskStage) -> bool {
+        self.artifacts
+            .iter()
+            .any(|artifact| artifact.stage == stage && !artifact.value.trim().is_empty())
+    }
+
+    pub fn record_stage_artifact(
+        &mut self,
+        stage: TaskStage,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> bool {
+        let key = key.into();
+        let value = value.into();
+        if value.trim().is_empty() {
+            self.transition_block_reason =
+                format!("Стадия {stage} не завершена: результат пуст.").to_string();
+            return false;
+        }
+        self.artifacts.push(TaskArtifact { stage, key, value });
+        true
+    }
+
+    pub fn validate_pipeline(&self) -> Result<(), String> {
+        if self.pipeline.is_empty() {
+            return Ok(());
+        }
+        if self.pipeline.len() != 3 {
+            return Err(
+                "Pipeline должен содержать ровно planning, execution и validation.".to_string(),
+            );
+        }
+        let mut previous: Option<TaskStage> = None;
+        for stage in &self.pipeline {
+            if stage.stage == TaskStage::Clarify || stage.stage == TaskStage::Done {
+                return Err(format!(
+                    "Pipeline stage {} нельзя настраивать как рабочую стадию.",
+                    stage.stage
+                ));
+            }
+            if stage.artifact_key.trim().is_empty() {
+                return Err(format!(
+                    "У стадии {} должен быть непустой artifact_key.",
+                    stage.stage
+                ));
+            }
+            if let Some(previous) = previous {
+                if previous.canonical_next() != Some(stage.stage) {
+                    return Err(format!(
+                        "Pipeline должен идти по порядку planning → execution → validation; найдено {} → {}.",
+                        previous, stage.stage
+                    ));
+                }
+            } else if stage.stage != TaskStage::Planning {
+                return Err("Pipeline должен начинаться со стадии planning.".to_string());
+            }
+            let mut worker_ids = std::collections::BTreeSet::new();
+            for worker in &stage.worker_agents {
+                let id = worker.id.trim();
+                if id.is_empty() {
+                    return Err(format!(
+                        "У каждого worker стадии {} должен быть непустой id.",
+                        stage.stage
+                    ));
+                }
+                if !worker_ids.insert(id) {
+                    return Err(format!(
+                        "Worker id `{id}` повторяется на стадии {}.",
+                        stage.stage
+                    ));
+                }
+            }
+            previous = Some(stage.stage);
+        }
+        if previous != Some(TaskStage::Validation) {
+            return Err("Pipeline должен завершаться стадией validation.".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn transition_requirement(&self, to: TaskStage) -> Result<(), String> {
+        if !self.stage.can_transition(to) {
+            return Err(format!(
+                "Переход {} → {} запрещён. Допустимо: {}.",
+                self.stage,
+                to,
+                self.stage
+                    .allowed_next()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        match (self.stage, to) {
+            (TaskStage::Planning, TaskStage::Execution) => {
+                if !self.has_stage_artifact(TaskStage::Planning) {
+                    return Err("Сначала нужен сохранённый результат стадии planning.".to_string());
+                }
+                if !self.plan_approved {
+                    return Err(
+                        "Сначала пользователь должен явно утвердить подготовленный план."
+                            .to_string(),
+                    );
+                }
+            }
+            (TaskStage::Execution, TaskStage::Validation)
+                if !self.has_stage_artifact(TaskStage::Execution) =>
+            {
+                return Err("Сначала нужен сохранённый результат стадии execution.".to_string());
+            }
+            (TaskStage::Validation, TaskStage::Done) => {
+                if !self.has_stage_artifact(TaskStage::Validation) {
+                    return Err(
+                        "Финал запрещён: отсутствует результат стадии validation.".to_string()
+                    );
+                }
+                if !self.validation_passed {
+                    return Err(
+                        "Финал запрещён: validation ещё не завершилась успешно.".to_string()
+                    );
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub fn next_stage(&self) -> Option<TaskStage> {
+        self.stage.canonical_next()
+    }
+
+    pub fn next_transition_requirement(&self) -> String {
+        if self.paused {
+            return match self.pause_reason {
+                TaskPauseReason::PlanApproval => {
+                    "Явное сообщение пользователя: «утверждаю план».".to_string()
+                }
+                TaskPauseReason::StageApproval => {
+                    "Явное сообщение пользователя: «утверждаю результат».".to_string()
+                }
+                TaskPauseReason::Manual => "Явное сообщение пользователя: «продолжай».".to_string(),
+                TaskPauseReason::None => "Снять паузу.".to_string(),
+            };
+        }
+        match self.stage {
+            TaskStage::Clarify => {
+                "PlanningAgent должен завершить уточнение и выдать непустой результат.".to_string()
+            }
+            TaskStage::Planning if !self.has_stage_artifact(TaskStage::Planning) => {
+                "PlanningAgent должен подготовить и сохранить план.".to_string()
+            }
+            TaskStage::Planning if !self.plan_approved => {
+                "Пользователь должен явно написать «утверждаю план».".to_string()
+            }
+            TaskStage::Planning => "План утверждён; разрешён переход в execution.".to_string(),
+            TaskStage::Execution => {
+                "ExecutionAgent должен создать непустой execution-артефакт.".to_string()
+            }
+            TaskStage::Validation if !self.validation_passed => {
+                "ValidationAgent должен проверить результат и завершить validation успешно."
+                    .to_string()
+            }
+            TaskStage::Validation => "Validation пройдена; разрешён переход в done.".to_string(),
+            TaskStage::Done => "Задача завершена; исходящих переходов нет.".to_string(),
+        }
+    }
+
+    pub fn try_transition(&mut self, to: TaskStage) -> TaskTransitionDecision {
+        let from = self.stage;
+        match self.transition_requirement(to) {
+            Ok(()) => {
+                self.stage = to;
+                self.paused = false;
+                self.pause_reason = TaskPauseReason::None;
+                self.transition_block_reason.clear();
+                if matches!((from, to), (TaskStage::Execution, TaskStage::Planning)) {
+                    self.plan_approved = false;
+                    self.validation_passed = false;
+                } else if matches!((from, to), (TaskStage::Validation, TaskStage::Execution)) {
+                    self.validation_passed = false;
+                }
+                self.sync_progress_for_stage();
+                TaskTransitionDecision {
+                    from,
+                    to,
+                    accepted: true,
+                    reason: String::new(),
+                }
+            }
+            Err(reason) => {
+                self.transition_block_reason = reason.clone();
+                TaskTransitionDecision {
+                    from,
+                    to,
+                    accepted: false,
+                    reason,
+                }
+            }
+        }
+    }
+
+    pub fn sync_progress_for_stage(&mut self) {
+        let (step, action, hint) = match self.stage {
+            TaskStage::Clarify => (
+                "уточнить задачу",
+                "agent_work",
+                "Ответьте на вопросы Clarify/Planning агента.",
+            ),
+            TaskStage::Planning => (
+                "подготовить утверждаемый план",
+                "agent_work",
+                "PlanningAgent должен выдать план; затем потребуется «утверждаю план».",
+            ),
+            TaskStage::Execution => (
+                "выполнить утверждённый план",
+                "agent_work",
+                "ExecutionAgent создаёт результат только по утверждённому плану.",
+            ),
+            TaskStage::Validation => (
+                "проверить результат",
+                "validation",
+                "ValidationAgent должен завершить проверку до финала.",
+            ),
+            TaskStage::Done => (
+                "задача завершена",
+                "none",
+                "Для новой работы создайте новую задачу.",
+            ),
+        };
+        self.current_step = step.to_string();
+        self.expected_action = action.to_string();
+        self.resume_hint = hint.to_string();
     }
 
     pub fn approve_pipeline_pause(&mut self) -> bool {
@@ -385,23 +733,22 @@ impl TaskContext {
             return false;
         }
         let current = self.stage;
-        let Some(active_index) = self
+        let active_index = self
             .pipeline
             .iter()
-            .position(|stage| stage.stage == current && stage.requires_human_approval)
-        else {
-            return self.resume();
-        };
-        let next = self
-            .pipeline
-            .get(active_index + 1)
+            .position(|stage| stage.stage == current);
+        let next = active_index
+            .and_then(|index| self.pipeline.get(index + 1))
             .map(|stage| stage.stage)
+            .or_else(|| current.canonical_next())
             .unwrap_or(TaskStage::Done);
-        if !current.can_transition(next) {
+        if self.pause_reason == TaskPauseReason::PlanApproval {
+            self.plan_approved = true;
+        }
+        let decision = self.try_transition(next);
+        if !decision.accepted {
             return false;
         }
-        self.stage = next;
-        self.paused = false;
         if let Some(next_stage) = self.active_pipeline_stage() {
             let label = pipeline_stage_label(next_stage);
             self.current_step = label.clone();
@@ -459,8 +806,18 @@ impl TaskContext {
             });
         }
 
-        if active.requires_human_approval {
+        if current == TaskStage::Validation {
+            self.validation_passed = true;
+        }
+
+        if current == TaskStage::Planning || active.requires_human_approval {
+            let pause_reason = if current == TaskStage::Planning {
+                TaskPauseReason::PlanApproval
+            } else {
+                TaskPauseReason::StageApproval
+            };
             self.paused = true;
+            self.pause_reason = pause_reason;
             self.current_step = format!("approve {} artifact", pipeline_stage_label(&active));
             self.expected_action = "user_input".to_string();
             self.resume_hint = format!(
@@ -481,10 +838,9 @@ impl TaskContext {
             .get(active_index + 1)
             .map(|stage| stage.stage)
             .unwrap_or(TaskStage::Done);
-        let accepted = current.can_transition(next);
+        let decision = self.try_transition(next);
+        let accepted = decision.accepted;
         if accepted {
-            self.stage = next;
-            self.paused = false;
             if let Some(next_stage) = self.active_pipeline_stage() {
                 let label = pipeline_stage_label(next_stage);
                 self.current_step = label.clone();

@@ -354,7 +354,7 @@ async fn chat(
         &prompt,
         &response.text,
     )
-    .await;
+    .await?;
     let mut response = response;
     if let Some(metrics) = &stateful_metrics {
         response.metrics = add_request_metrics(&response.metrics, metrics);
@@ -389,6 +389,7 @@ async fn chat(
             provider_response: provider_debug.response,
         },
         agent_state,
+        swarm_report: agent.swarm_report().clone(),
     }))
 }
 
@@ -512,7 +513,7 @@ async fn chat_stream(
                 if buffer_until_invariant_check {
                     let _ = tx.send(assistant_text.clone());
                 }
-                let (agent_state, stateful_metrics) = run_and_persist_stateful(
+                let persisted = run_and_persist_stateful(
                     &sessions,
                     saved_agent_id.as_deref(),
                     stateful_session_id.as_str(),
@@ -522,6 +523,13 @@ async fn chat_stream(
                     &assistant_text,
                 )
                 .await;
+                let (agent_state, stateful_metrics) = match persisted {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let _ = tx.send(format!("\x00ERR\x00{error}"));
+                        return;
+                    }
+                };
                 let mut response_metrics = response.metrics.clone();
                 let mut context_metrics = context_metrics.clone();
                 if let Some(context_metrics) = &context_metrics {
@@ -536,10 +544,15 @@ async fn chat_stream(
                 }
                 let session_metrics =
                     add_request_metrics(&session_metrics_before, &response_metrics);
-                let _ = sessions.save_session(&session_key, &session_id, agent.history());
-                let _ = sessions.save_metrics(&session_id, &session_metrics);
-                let _ = sessions.save_memory(&session_id, agent.memory());
-                let _ = sessions.save_long_term(&session_key, agent.memory());
+                let persist_result = sessions
+                    .save_session(&session_key, &session_id, agent.history())
+                    .and_then(|_| sessions.save_metrics(&session_id, &session_metrics))
+                    .and_then(|_| sessions.save_memory(&session_id, agent.memory()))
+                    .and_then(|_| sessions.save_long_term(&session_key, agent.memory()));
+                if let Err(error) = persist_result {
+                    let _ = tx.send(format!("\x00ERR\x00{error}"));
+                    return;
+                }
                 let context_debug =
                     build_context_debug(agent.memory(), &agent.memory_config(), agent.history());
                 let done_event = serde_json::json!({
@@ -555,6 +568,7 @@ async fn chat_stream(
                         provider_response: provider_debug.response,
                     },
                     "agent_state": agent_state,
+                    "swarm_report": agent.swarm_report(),
                 });
                 let _ = tx.send(format!("\x00DONE\x00{done_event}"));
                 drop(tx);
@@ -696,25 +710,28 @@ async fn run_and_persist_stateful(
     client: &dyn crate::providers::ProviderClient,
     user_prompt: &str,
     answer: &str,
-) -> (
-    Option<StatefulDebugView>,
-    Option<crate::providers::RequestMetrics>,
-) {
+) -> Result<
+    (
+        Option<StatefulDebugView>,
+        Option<crate::providers::RequestMetrics>,
+    ),
+    AppError,
+> {
     let _ = (client, user_prompt, answer);
     let Some(id) = saved_agent_id.and_then(blank_str_to_none) else {
-        return (None, None);
+        return Ok((None, None));
     };
     // The swarm orchestrator already ran the stateful turn (deterministic stage
     // advance + invariant retry + profile fill). Read its report; do not re-run.
     let report = agent.take_stateful_report();
     if let Some(task) = agent.task_state() {
-        let _ = store.save_dialog_task(id, session_id, task);
+        store.save_dialog_task(id, session_id, task)?;
     }
     if let Some(profile) = agent.agent_profile() {
-        let _ = store.save_profile(id, profile);
+        store.save_profile(id, profile)?;
     }
     let metrics = report.metrics.clone();
-    (Some(stateful_debug_view(&report)), metrics)
+    Ok((Some(stateful_debug_view(&report)), metrics))
 }
 
 fn stateful_debug_view(report: &StatefulReport) -> StatefulDebugView {
@@ -724,6 +741,9 @@ fn stateful_debug_view(report: &StatefulReport) -> StatefulDebugView {
         expected_action: report.expected_action.clone(),
         paused: report.paused,
         resume_hint: report.resume_hint.clone(),
+        transition_block_reason: report.transition_block_reason.clone(),
+        next_stage: report.next_stage.map(|stage| stage.to_string()),
+        next_transition_requirement: report.next_transition_requirement.clone(),
         pending_questions: report.pending_questions.clone(),
         violations: report.violations.clone(),
         invariant_status: report.invariant_status.clone(),
@@ -731,10 +751,12 @@ fn stateful_debug_view(report: &StatefulReport) -> StatefulDebugView {
         backlog: report.backlog.clone(),
         stage_transition: report
             .stage_transition
+            .as_ref()
             .map(|transition| StageTransitionView {
                 from: transition.from.to_string(),
                 to: transition.to.to_string(),
                 accepted: transition.accepted,
+                reason: transition.reason.clone(),
             }),
     }
 }
@@ -1245,6 +1267,7 @@ struct ChatWebResponse {
     debug: ChatDebugView,
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_state: Option<StatefulDebugView>,
+    swarm_report: crate::chat::SwarmReport,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1317,6 +1340,9 @@ struct StatefulDebugView {
     expected_action: String,
     paused: bool,
     resume_hint: String,
+    transition_block_reason: String,
+    next_stage: Option<String>,
+    next_transition_requirement: String,
     pending_questions: Vec<String>,
     violations: Vec<String>,
     invariant_status: String,
@@ -1330,6 +1356,7 @@ struct StageTransitionView {
     from: String,
     to: String,
     accepted: bool,
+    reason: String,
 }
 
 fn build_context_debug(

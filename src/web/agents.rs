@@ -5,7 +5,7 @@ use crate::{
     chat::memory::{MemoryConfig, MemoryLayer},
     chat::{
         AgentMemory, AgentProfile, AgentSummary, LocalSessionStore, ProfileField, SavedAgent,
-        SavedMemoryConfig, SwarmConfig, TaskArtifact, TaskContext, TaskPipelineStage, UserProfile,
+        SavedMemoryConfig, SwarmConfig, TaskContext, TaskPipelineStage, UserProfile,
         UserProfileBindings, build_profile_schema,
     },
     config::ProfileConfig,
@@ -223,22 +223,27 @@ pub(super) async fn agents_manage(
                 .and_then(blank_str_to_none)
                 .map(str::to_string)
                 .unwrap_or_else(|| "default".to_string());
-            let task = request
+            let payload = request
                 .task
-                .ok_or_else(|| AppError::InvalidInput("Task payload is required".to_string()))?
-                .into_task_context();
+                .ok_or_else(|| AppError::InvalidInput("Task payload is required".to_string()))?;
             let saved_task = if let Some(session_id) =
                 request.session_id.as_deref().and_then(blank_str_to_none)
             {
                 state
                     .sessions
                     .assign_dialog_task(&id, session_id, &task_id)?;
+                let current = state.sessions.load_dialog_task(&id, session_id)?;
+                let task = payload.into_task_context(current)?;
                 state.sessions.save_dialog_task(&id, session_id, &task)?;
                 state.sessions.load_dialog_task(&id, session_id)?
             } else if task_id == "default" {
+                let current = state.sessions.load_task(&id)?;
+                let task = payload.into_task_context(current)?;
                 state.sessions.save_task(&id, &task)?;
                 state.sessions.load_task(&id)?
             } else {
+                let current = state.sessions.load_scoped_task(&id, &task_id)?;
+                let task = payload.into_task_context(current)?;
                 state.sessions.save_scoped_task(&id, &task_id, &task)?;
                 state.sessions.load_scoped_task(&id, &task_id)?
             };
@@ -586,14 +591,6 @@ pub(super) struct TaskPayload {
     #[serde(default)]
     pub(super) stage: String,
     #[serde(default)]
-    pub(super) current_step: String,
-    #[serde(default)]
-    pub(super) expected_action: String,
-    #[serde(default)]
-    pub(super) paused: bool,
-    #[serde(default)]
-    pub(super) resume_hint: String,
-    #[serde(default)]
     pub(super) title: String,
     #[serde(default)]
     pub(super) goal: String,
@@ -602,31 +599,59 @@ pub(super) struct TaskPayload {
     #[serde(default)]
     pub(super) pipeline: Vec<TaskPipelineStage>,
     #[serde(default)]
-    pub(super) artifacts: Vec<TaskArtifact>,
-    #[serde(default)]
-    pub(super) results: Vec<String>,
-    #[serde(default)]
     pub(super) notes: String,
 }
 
 impl TaskPayload {
-    fn into_task_context(self) -> TaskContext {
-        TaskContext {
-            stage: self.stage.parse().unwrap_or_default(),
-            current_step: self.current_step.trim().to_string(),
-            expected_action: self.expected_action.trim().to_string(),
-            paused: self.paused,
-            resume_hint: self.resume_hint.trim().to_string(),
-            title: self.title.trim().to_string(),
-            goal: self.goal.trim().to_string(),
-            plan: clean_lines(self.plan),
-            pipeline: self.pipeline,
-            artifacts: self.artifacts,
-            results: clean_lines(self.results),
-            notes: self.notes.trim().to_string(),
-            violations: Vec::new(),
-            backlog: Vec::new(),
+    fn into_task_context(self, mut current: TaskContext) -> Result<TaskContext, AppError> {
+        if !self.stage.trim().is_empty() {
+            let requested = self.stage.parse::<crate::chat::TaskStage>().map_err(|_| {
+                AppError::InvalidInput(format!("Unknown task stage: {}", self.stage.trim()))
+            })?;
+            if requested != current.stage {
+                return Err(AppError::InvalidInput(
+                    "Task stage is managed by the lifecycle orchestrator and cannot be overwritten."
+                        .to_string(),
+                ));
+            }
         }
+        current.title = self.title.trim().to_string();
+        current.goal = self.goal.trim().to_string();
+        let plan = clean_lines(self.plan);
+        if plan != current.plan
+            && !matches!(
+                current.stage,
+                crate::chat::TaskStage::Clarify | crate::chat::TaskStage::Planning
+            )
+        {
+            return Err(AppError::InvalidInput(
+                "Approved plan cannot be edited after execution has started; return the task to planning first."
+                    .to_string(),
+            ));
+        }
+        if self.pipeline != current.pipeline
+            && !matches!(
+                current.stage,
+                crate::chat::TaskStage::Clarify | crate::chat::TaskStage::Planning
+            )
+        {
+            return Err(AppError::InvalidInput(
+                "Pipeline cannot be edited after execution has started.".to_string(),
+            ));
+        }
+        if plan != current.plan {
+            current.plan_approved = false;
+            current
+                .artifacts
+                .retain(|artifact| artifact.stage != crate::chat::TaskStage::Planning);
+        }
+        current.plan = plan;
+        current.pipeline = self.pipeline;
+        current.notes = self.notes.trim().to_string();
+        current
+            .validate_pipeline()
+            .map_err(AppError::InvalidInput)?;
+        Ok(current)
     }
 }
 

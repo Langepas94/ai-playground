@@ -145,7 +145,7 @@ async fn agent_injects_working_and_long_term_blocks() {
         stage: crate::chat::store::TaskStage::Planning,
         current_step: "change TaskContext serialization".to_string(),
         expected_action: "agent_work".to_string(),
-        paused: true,
+        paused: false,
         resume_hint: "continue from state machine tests".to_string(),
         title: "ship agents".to_string(),
         goal: "persist settings".to_string(),
@@ -176,11 +176,10 @@ async fn agent_injects_working_and_long_term_blocks() {
         .join("\n");
     assert!(joined.contains("[memory:working]"), "working block missing");
     assert!(joined.contains("Stage: planning"));
-    assert!(joined.contains("Paused: true"));
+    assert!(joined.contains("Paused: false"));
     assert!(joined.contains("Current step: change TaskContext serialization"));
     assert!(joined.contains("Expected action: agent_work"));
     assert!(joined.contains("Resume hint: continue from state machine tests"));
-    assert!(joined.contains("do not ask them to restate the task"));
     assert!(joined.contains("ship agents"));
     assert!(
         joined.contains("[memory:long-term]"),
@@ -514,19 +513,11 @@ async fn paused_task_resume_context_is_injected_without_reexplaining() {
     assert!(!answer.text.to_ascii_lowercase().contains("restate"));
     assert!(!answer.text.to_ascii_lowercase().contains("explain again"));
 
-    let seen = client.seen_messages.lock().unwrap();
-    let joined = request_containing(&seen, "Продолжай")
-        .iter()
-        .map(|message| message.content.clone())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(joined.contains("Stage: execution"));
-    assert!(joined.contains("Paused: true"));
-    assert!(joined.contains("Current step: run validation checks"));
-    assert!(joined.contains("Expected action: agent_work"));
-    assert!(joined.contains("Resume hint: continue from cargo test failure analysis"));
-    assert!(joined.contains("do not ask them to restate the task"));
-    drop(seen);
+    assert!(answer.text.contains("Задача возобновлена"));
+    assert!(
+        client.seen_messages.lock().unwrap().is_empty(),
+        "resume is a durable local lifecycle action"
+    );
 
     // Resume now happens deterministically inside respond (orchestrator).
     let report = agent.take_stateful_report();
@@ -597,18 +588,14 @@ async fn restored_task_state_is_injected_into_new_agent_request() {
         .await
         .expect("respond");
 
-    let seen = client.seen_messages.lock().unwrap();
-    let joined = request_containing(&seen, "Продолжай")
-        .iter()
-        .map(|message| message.content.clone())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(joined.contains("Stage: execution"));
-    assert!(joined.contains("Paused: true"));
-    assert!(joined.contains("Current step: create application shell"));
-    assert!(joined.contains("Expected action: agent_work"));
-    assert!(joined.contains("Resume hint: name and plan approved; continue implementation"));
-    assert!(joined.contains("do not ask them to restate the task"));
+    assert!(
+        client.seen_messages.lock().unwrap().is_empty(),
+        "restored resume must not depend on a provider call"
+    );
+    let task = agent.task_state().expect("task");
+    assert_eq!(task.stage, crate::chat::store::TaskStage::Execution);
+    assert!(!task.paused);
+    assert_eq!(task.current_step, "create application shell");
 }
 
 #[tokio::test]
@@ -1307,7 +1294,7 @@ async fn branching_strategy_uses_current_branch_history_only() {
 
 #[tokio::test]
 async fn branching_keeps_two_branches_independent_from_same_checkpoint() {
-    let checkpoint = vec![
+    let checkpoint = [
         ChatMessage {
             role: Role::User,
             content: "checkpoint question".to_string(),

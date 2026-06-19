@@ -6,7 +6,8 @@
 
 use async_trait::async_trait;
 
-use crate::providers::ChatRequest;
+use crate::chat::store::{TaskStage, TaskWorkerAgent};
+use crate::providers::{ChatRequest, ResponseControl};
 
 use super::super::SwarmRunRecord;
 use super::super::agent::{SubAgent, SubAgentOutcome, SwarmTurn};
@@ -75,6 +76,84 @@ impl SubAgent for GeneralAgent {
     }
 }
 
+/// A real task-scoped worker. Every configured `TaskWorkerAgent` produces its
+/// own provider request; the stage responder then synthesizes their outputs.
+pub struct PipelineWorkerAgent {
+    spec: TaskWorkerAgent,
+    stage: TaskStage,
+}
+
+impl PipelineWorkerAgent {
+    pub fn new(spec: TaskWorkerAgent, stage: TaskStage) -> Self {
+        Self { spec, stage }
+    }
+}
+
+#[async_trait]
+impl SubAgent for PipelineWorkerAgent {
+    fn role(&self) -> SubAgentRole {
+        SubAgentRole::Worker
+    }
+
+    async fn run(&self, turn: &mut SwarmTurn<'_>) -> SubAgentOutcome {
+        let stage_role = match self.stage {
+            TaskStage::Clarify | TaskStage::Planning => SubAgentRole::Planning,
+            TaskStage::Execution => SubAgentRole::Execution,
+            TaskStage::Validation => SubAgentRole::Validation,
+            TaskStage::Done => SubAgentRole::Done,
+        };
+        let (profile, token) = turn.responder_profile(stage_role);
+        let instruction = format!(
+            "[pipeline:worker]\nWorker id: {}\nDirection: {}\n{}\nReturn a concrete worker artifact for the current stage. Do not emit lifecycle markers.",
+            self.spec.id.trim(),
+            self.spec.direction.trim(),
+            self.spec.system_prompt.trim()
+        );
+        let request = ChatRequest {
+            model: profile.model.clone(),
+            messages: PromptBuilder::build(turn, Some(&instruction)),
+            control: lifecycle_safe_control(turn.control, stage_role),
+            pricing: turn.pricing.clone(),
+            billing: turn.billing.clone(),
+        };
+        let mut record = SwarmRunRecord::worker(
+            profile.model.clone(),
+            self.spec.id.trim(),
+            self.spec.direction.trim(),
+        );
+        let response = match turn.client.chat_completion(&profile, &token, request).await {
+            Ok(response) => response,
+            Err(error) => {
+                record.note = format!("worker failed: {error}");
+                turn.report.record(record);
+                return SubAgentOutcome {
+                    violations: vec![format!(
+                        "Pipeline worker {} failed: {error}",
+                        self.spec.id.trim()
+                    )],
+                    ..SubAgentOutcome::default()
+                };
+            }
+        };
+        record.ran = true;
+        record.note = "pipeline artifact produced".to_string();
+        record.metrics = Some(response.metrics.clone());
+        turn.report.record(record);
+        let answer = response.text.trim().to_string();
+        SubAgentOutcome {
+            artifact: (!answer.is_empty()).then(|| {
+                (
+                    format!("worker.{}", self.spec.id.trim()),
+                    truncate(&answer, 2_000),
+                )
+            }),
+            answer: Some(answer),
+            metrics: Some(response.metrics),
+            ..SubAgentOutcome::default()
+        }
+    }
+}
+
 /// Shared responder body: build the prompt, call the role's resolved model,
 /// parse the stage-done marker deterministically.
 async fn respond(
@@ -87,7 +166,7 @@ async fn respond(
     let request = ChatRequest {
         model: profile.model.clone(),
         messages,
-        control: turn.control.clone(),
+        control: lifecycle_safe_control(turn.control, role),
         pricing: turn.pricing.clone(),
         billing: turn.billing.clone(),
     };
@@ -139,30 +218,42 @@ async fn respond(
     }
 }
 
+pub(crate) fn lifecycle_safe_control(
+    control: &ResponseControl,
+    role: SubAgentRole,
+) -> ResponseControl {
+    let mut control = control.clone();
+    if role.is_stage() {
+        // These user-facing formatting knobs are system messages at provider
+        // level. They must never be able to manufacture a lifecycle marker.
+        control.answer_suffix = None;
+        control.completion_instruction = None;
+    }
+    control
+}
+
 /// Remove a `<<STAGE_DONE>>` / `<<STAGE_DONE: artifact_key>>` marker from the
 /// answer. Returns `(clean_answer, completed, artifact_key)`. Public so the
 /// streaming finalize path parses it identically.
 pub(crate) fn strip_stage_marker(text: &str) -> (String, bool, String) {
-    let Some(index) = text.find(STAGE_DONE_MARKER) else {
+    let trimmed = text.trim_end();
+    let last_line_start = trimmed.rfind('\n').map(|index| index + 1).unwrap_or(0);
+    let last_line = trimmed[last_line_start..].trim();
+    let key = if last_line == STAGE_DONE_MARKER {
+        String::new()
+    } else if let Some(value) = last_line
+        .strip_prefix("<<STAGE_DONE:")
+        .and_then(|value| value.strip_suffix(">>"))
+    {
+        value.trim().to_string()
+    } else {
         return (text.trim().to_string(), false, String::new());
     };
-    let after = &text[index + STAGE_DONE_MARKER.len()..];
-    // Optional "STAGE_DONE: key>>" form (marker stored without the trailing >>).
-    let (key, tail_start) = if let Some(stripped) = after.strip_prefix(':') {
-        match stripped.find(">>") {
-            Some(end) => (
-                stripped[..end].trim().to_string(),
-                index + STAGE_DONE_MARKER.len() + 1 + end + 2,
-            ),
-            None => (String::new(), index + STAGE_DONE_MARKER.len()),
-        }
-    } else {
-        (String::new(), index + STAGE_DONE_MARKER.len())
-    };
-    let mut cleaned = String::with_capacity(text.len());
-    cleaned.push_str(&text[..index]);
-    cleaned.push_str(&text[tail_start..]);
-    (cleaned.trim().to_string(), true, key)
+    let cleaned = trimmed[..last_line_start].trim();
+    if cleaned.is_empty() {
+        return (String::new(), false, String::new());
+    }
+    (cleaned.to_string(), true, key)
 }
 
 fn truncate(text: &str, max: usize) -> String {

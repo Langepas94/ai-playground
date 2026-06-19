@@ -68,8 +68,10 @@
   `project_context`.
 - **рабочая** — `TaskContext` со стадией FSM (`clarify→planning→execution→
   validation→done`), ведётся автоматически для рабочей задачи/фичи и может быть
-  общей для нескольких диалогов. Вкладка `Задача` (бейдж стадии + флоу + план,
-  read-only).
+  общей для нескольких диалогов. Вкладка `Задача` показывает только текущую
+  стадию, следующий stage, точное условие перехода и причину блокировки.
+  Planning всегда требует явного `утверждаю план`; Done требует успешной
+  Validation.
 - **инварианты** — редактируемый список (вкладка `Инварианты`), проверяются по ответу.
   UI показывает `PASS` / `BLOCKED` / `UNVERIFIED` summary. Для агентов с
   инвариантами streaming буферизуется до завершения проверки: непроверенные
@@ -88,8 +90,11 @@ provider+token) / `swarm-load` / `swarm-save` (обязательный рой �
 Рой (вкладка «Рой», без чекбоксов): клиент видит одно окно, но под капотом —
 детерминированный `SwarmOrchestrator` (код) и обязательные агенты-сущности: 4
 stage-ответчика (Planning/Execution/Validation/Done), General и сервисные
-(memory/summary/topic/profile/invariant). Роли нельзя отключить; настраиваются
-только model/prompt. `apply_saved_agent_memory` резолвит `SwarmConfig` в
+(memory/summary/topic/profile/invariant), плюс реальные динамические
+`PipelineWorkerAgent` из `TaskPipelineStage.worker_agents`. Worker делает
+отдельный provider request, его artifact передаётся stage responder и виден в
+`swarm_report`. Роли нельзя отключить; настраиваются только model/prompt.
+`apply_saved_agent_memory` резолвит `SwarmConfig` в
 `ResolvedSwarm` и ставит на `ChatAgent`; для plain-чата — `SwarmConfig::defaults()`.
 Stateful-данные хода (`StatefulReport`) берутся из оркестратора через
 `agent.take_stateful_report()` (стриминг сперва зовёт `agent.finalize_stream`), а
@@ -97,11 +102,12 @@ Stateful-данные хода (`StatefulReport`) берутся из оркес
 
 Чат с активным агентом несёт `saved_agent_id`; сервер биндит сессию к `agent:<id>`,
 грузит profile/task-scope/invariants/domain и инъектит блоками `[agent:domain]` /
-`[memory:long-term]` / `[memory:working]` / `[invariants]`. После ответа —
-`ChatAgent::stateful_postprocess` (заполнить профиль, продвинуть стадию по FSM,
-проверить инварианты), persist task-scope+profile, и `agent_state` в ответе
-(`StatefulDebugView`: стадия, pending-вопросы, переход, нарушения) рендерится в UI
-(стадия в хедере, нарушения во вкладке Инварианты).
+`[memory:long-term]` / `[memory:working]` / `[invariants]`. Ход полностью ведёт
+`SwarmOrchestrator`: lifecycle guard → workers → current-stage responder →
+invariant gate → stage completion. Затем persist task-scope+profile, а
+`agent_state` и `swarm_report` рендерятся в UI. Ошибка сохранения больше не
+подавляется: non-stream запрос завершается ошибкой, streaming посылает error
+вместо ложного DONE.
 
 ## Управление и дебаг памяти (memory layers)
 

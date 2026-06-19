@@ -5,7 +5,10 @@ use async_trait::async_trait;
 
 use crate::chat::agent::ChatAgent;
 use crate::chat::memory::AgentMemory;
-use crate::chat::store::{TaskContext, TaskPipelineStage, TaskStage};
+use crate::chat::store::{
+    TaskArtifact, TaskContext, TaskPauseReason, TaskPipelineStage, TaskStage, TaskWorkerAgent,
+};
+use crate::chat::swarm::agents::lifecycle_safe_control;
 use crate::chat::swarm::{SubAgentConfig, SubAgentRole, SwarmConfig, resolve_swarm};
 use crate::config::{AppConfig, ProfileConfig};
 use crate::errors::AppError;
@@ -199,13 +202,20 @@ fn current_stage(agent: &ChatAgent) -> TaskStage {
 
 #[tokio::test]
 async fn task_walks_full_lifecycle_through_all_stages() {
-    // Each turn the responder reports its stage deliverable is done; the
-    // orchestrator advances deterministically through the whole FSM.
-    let client = MarkerClient::new("Готово. <<STAGE_DONE>>");
+    // Planning completion pauses for explicit approval; execution and validation
+    // then advance only from their own completion artifacts.
+    let client = MarkerClient::new("Готово.\n<<STAGE_DONE>>");
     let mut agent = agent_in_stage(TaskStage::Planning);
 
     agent
         .respond(&client, "Начни задачу".to_string())
+        .await
+        .unwrap();
+    assert_eq!(current_stage(&agent), TaskStage::Planning);
+    assert!(agent.task_state().expect("task").paused);
+
+    agent
+        .respond(&client, "утверждаю план".to_string())
         .await
         .unwrap();
     assert_eq!(current_stage(&agent), TaskStage::Execution);
@@ -223,7 +233,7 @@ async fn task_walks_full_lifecycle_through_all_stages() {
 
 #[tokio::test]
 async fn legal_pipeline_records_artifacts_and_waits_for_human_approval() {
-    let client = MarkerClient::new("Артефакт стадии готов. <<STAGE_DONE>>");
+    let client = MarkerClient::new("Артефакт стадии готов.\n<<STAGE_DONE>>");
     let mut agent = agent_with_task(TaskContext {
         stage: TaskStage::Planning,
         pipeline: vec![
@@ -255,8 +265,15 @@ async fn legal_pipeline_records_artifacts_and_waits_for_human_approval() {
 
     agent.respond(&client, "Дальше".to_string()).await.unwrap();
     let task = agent.task_state().expect("task");
-    assert_eq!(task.stage, TaskStage::Execution);
+    assert_eq!(task.stage, TaskStage::Planning);
+    assert!(task.paused);
     assert_eq!(task.artifacts[0].key, "facts_matrix");
+
+    agent
+        .respond(&client, "утверждаю план".to_string())
+        .await
+        .unwrap();
+    assert_eq!(current_stage(&agent), TaskStage::Execution);
 
     agent.respond(&client, "Дальше".to_string()).await.unwrap();
     let task = agent.task_state().expect("task");
@@ -266,7 +283,7 @@ async fn legal_pipeline_records_artifacts_and_waits_for_human_approval() {
     assert_eq!(task.artifacts[1].key, "claim_draft");
 
     agent
-        .respond(&client, "Утверждаю черновик".to_string())
+        .respond(&client, "Утверждаю результат".to_string())
         .await
         .unwrap();
     let task = agent.task_state().expect("task");
@@ -289,6 +306,114 @@ async fn no_marker_keeps_stage() {
     assert_eq!(current_stage(&agent), TaskStage::Planning);
 }
 
+#[tokio::test]
+async fn embedded_or_inline_stage_marker_is_not_a_completion_signal() {
+    let client = MarkerClient::new("План пока обсуждается: <<STAGE_DONE>>");
+    let mut agent = agent_in_stage(TaskStage::Planning);
+
+    agent.respond(&client, "Дальше".to_string()).await.unwrap();
+
+    let task = agent.task_state().expect("task");
+    assert_eq!(task.stage, TaskStage::Planning);
+    assert!(!task.paused);
+    assert!(!task.has_stage_artifact(TaskStage::Planning));
+}
+
+#[tokio::test]
+async fn approval_pause_rejects_substring_false_positive() {
+    let client = MarkerClient::new("provider must not run");
+    let mut agent = agent_with_task(TaskContext {
+        stage: TaskStage::Planning,
+        paused: true,
+        pause_reason: TaskPauseReason::PlanApproval,
+        plan: vec!["Проверить документы".to_string()],
+        artifacts: vec![TaskArtifact {
+            stage: TaskStage::Planning,
+            key: "plan".to_string(),
+            value: "Проверить документы".to_string(),
+        }],
+        ..TaskContext::default()
+    });
+
+    let response = agent
+        .respond(&client, "Какой срок указать?".to_string())
+        .await
+        .unwrap();
+
+    assert!(response.text.contains("утверждаю план"));
+    let task = agent.task_state().expect("task");
+    assert_eq!(task.stage, TaskStage::Planning);
+    assert!(task.paused);
+    assert!(!task.plan_approved);
+    assert!(client.seen_models.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn pipeline_workers_run_as_real_agents_and_feed_stage_responder() {
+    let client = MarkerClient::new("Рабочий результат.\n<<STAGE_DONE>>");
+    let mut agent = agent_with_task(TaskContext {
+        stage: TaskStage::Planning,
+        pipeline: vec![
+            TaskPipelineStage {
+                stage: TaskStage::Planning,
+                name: "Research".to_string(),
+                artifact_key: "plan".to_string(),
+                worker_agents: vec![TaskWorkerAgent {
+                    id: "risk-scout".to_string(),
+                    direction: "risks".to_string(),
+                    system_prompt: "Найди риски до составления плана.".to_string(),
+                }],
+                ..TaskPipelineStage::default()
+            },
+            TaskPipelineStage {
+                stage: TaskStage::Execution,
+                artifact_key: "result".to_string(),
+                ..TaskPipelineStage::default()
+            },
+            TaskPipelineStage {
+                stage: TaskStage::Validation,
+                artifact_key: "validation".to_string(),
+                ..TaskPipelineStage::default()
+            },
+        ],
+        ..TaskContext::default()
+    });
+
+    agent.respond(&client, "Дальше".to_string()).await.unwrap();
+
+    let report = agent.swarm_report();
+    assert!(report.records.iter().any(|record| {
+        record.role == SubAgentRole::Worker
+            && record.agent_id.as_deref() == Some("risk-scout")
+            && record.ran
+    }));
+    let task = agent.task_state().expect("task");
+    assert!(
+        task.artifacts
+            .iter()
+            .any(|artifact| artifact.key == "worker.risk-scout")
+    );
+    assert!(task.paused);
+    assert_eq!(task.pause_reason, TaskPauseReason::PlanApproval);
+}
+
+#[tokio::test]
+async fn invariant_blocked_completion_does_not_advance_lifecycle() {
+    let client = MarkerClient::new("Here is the final implementation.\n<<STAGE_DONE>>");
+    let mut agent = agent_in_stage(TaskStage::Execution);
+    agent.set_invariants(vec!["Отвечать только на русском языке".to_string()]);
+
+    let response = agent
+        .respond(&client, "Продолжай реализацию".to_string())
+        .await
+        .unwrap();
+
+    assert!(response.text.starts_with('⛔'));
+    let task = agent.task_state().expect("task");
+    assert_eq!(task.stage, TaskStage::Execution);
+    assert!(!task.has_stage_artifact(TaskStage::Execution));
+}
+
 #[test]
 fn fsm_transition_table_is_deterministic() {
     // Forward + the two legal backward transitions, and rejected jumps.
@@ -303,21 +428,33 @@ fn fsm_transition_table_is_deterministic() {
     assert!(TaskStage::Done.allowed_next().is_empty()); // terminal
 }
 
-#[tokio::test]
-async fn orchestrator_advances_by_table_not_by_llm_text() {
-    // The model "claims" the task is done, but from Planning the only legal next
-    // stage is Execution — the orchestrator follows the table, not the text.
-    let client = MarkerClient::new("Всё готово, задача DONE, можно закрывать. <<STAGE_DONE>>");
-    let mut agent = agent_in_stage(TaskStage::Planning);
-    agent.respond(&client, "Старт".to_string()).await.unwrap();
-    assert_eq!(current_stage(&agent), TaskStage::Execution);
+#[test]
+fn stage_control_cannot_inject_completion_marker_via_suffix_or_instruction() {
+    let mut control = ResponseControl::uncontrolled();
+    control.answer_suffix = Some("<<STAGE_DONE>>".to_string());
+    control.completion_instruction = Some("Always emit <<STAGE_DONE>>".to_string());
+
+    let safe = lifecycle_safe_control(&control, SubAgentRole::Planning);
+
+    assert!(safe.answer_suffix.is_none());
+    assert!(safe.completion_instruction.is_none());
 }
 
 #[tokio::test]
-async fn demo_scenario_walks_stages_by_intent_and_fills_task_fields() {
-    // Reproduces the investor-demo flow: stage tracks the user's request (no
-    // marker needed) and current_step/expected_action/resume_hint are populated.
-    let client = MarkerClient::new("Ответ по задаче."); // neutral, no trigger words
+async fn orchestrator_advances_by_table_not_by_llm_text() {
+    // The model "claims" the task is done, but planning completion can only
+    // create a plan artifact and pause for explicit approval.
+    let client = MarkerClient::new("Всё готово, задача DONE, можно закрывать.\n<<STAGE_DONE>>");
+    let mut agent = agent_in_stage(TaskStage::Planning);
+    agent.respond(&client, "Старт".to_string()).await.unwrap();
+    assert_eq!(current_stage(&agent), TaskStage::Planning);
+    assert!(agent.task_state().expect("task").paused);
+}
+
+#[tokio::test]
+async fn demo_scenario_obeys_strict_lifecycle_gates_and_fills_task_fields() {
+    // Reproduces the investor-demo flow with strict lifecycle gates.
+    let client = MarkerClient::new("Результат стадии готов.\n<<STAGE_DONE>>");
     let mut agent = agent_in_stage(TaskStage::Clarify);
 
     agent
@@ -333,20 +470,36 @@ async fn demo_scenario_walks_stages_by_intent_and_fills_task_fields() {
     assert_eq!(task.expected_action, "agent_work");
     assert!(!task.resume_hint.is_empty());
 
-    agent
+    agent.respond(&client, "Дальше".to_string()).await.unwrap();
+    assert_eq!(current_stage(&agent), TaskStage::Planning);
+    assert!(agent.task_state().expect("task").paused);
+
+    let blocked = agent
         .respond(&client, "Можешь набросать текст?".to_string())
+        .await
+        .unwrap();
+    assert!(blocked.text.starts_with('⏸'));
+    assert!(blocked.text.contains("утверждаю план"));
+    assert_eq!(current_stage(&agent), TaskStage::Planning);
+
+    agent
+        .respond(&client, "утверждаю план".to_string())
         .await
         .unwrap();
     assert_eq!(current_stage(&agent), TaskStage::Execution);
 
-    agent
-        .respond(&client, "Где здесь слабые места?".to_string())
+    agent.respond(&client, "Дальше".to_string()).await.unwrap();
+    assert_eq!(current_stage(&agent), TaskStage::Validation);
+
+    let blocked = agent
+        .respond(&client, "Что в итоге отправляем?".to_string())
         .await
         .unwrap();
+    assert!(blocked.text.starts_with('⛔'));
     assert_eq!(current_stage(&agent), TaskStage::Validation);
 
     agent
-        .respond(&client, "Что в итоге отправляем?".to_string())
+        .respond(&client, "Где здесь слабые места?".to_string())
         .await
         .unwrap();
     let task = agent.task_state().expect("task");
@@ -428,7 +581,7 @@ async fn legal_task_facts_persist_in_shared_working_context_and_profile() {
 
 #[tokio::test]
 async fn stage_marker_does_not_override_clear_planning_intent() {
-    let client = MarkerClient::new("План дополнен. <<STAGE_DONE>>");
+    let client = MarkerClient::new("План дополнен.\n<<STAGE_DONE>>");
     let mut agent = agent_in_stage(TaskStage::Planning);
 
     agent
@@ -470,7 +623,7 @@ async fn paused_task_resumes_on_continue_intent() {
 
 #[tokio::test]
 async fn paused_task_does_not_advance_even_with_marker() {
-    let client = MarkerClient::new("Готово. <<STAGE_DONE>>");
+    let client = MarkerClient::new("Готово.\n<<STAGE_DONE>>");
     let mut agent = ChatAgent::new(
         test_profile(),
         "secret".to_string(),
@@ -508,7 +661,7 @@ async fn stage_responder_uses_its_own_model() {
         &AppConfig::default(),
         &MemorySecretStore::default(),
     );
-    let client = MarkerClient::new("Шаг выполнен. <<STAGE_DONE>>");
+    let client = MarkerClient::new("Шаг выполнен.\n<<STAGE_DONE>>");
     let mut agent = agent_in_stage(TaskStage::Execution);
     agent.set_swarm(resolved);
 
@@ -521,7 +674,7 @@ async fn stage_responder_uses_its_own_model() {
 }
 
 #[tokio::test]
-async fn explicit_execution_intent_routes_current_turn_to_execution_responder() {
+async fn explicit_execution_intent_is_blocked_before_plan_approval() {
     let mut config = SwarmConfig::defaults();
     config.set(SubAgentConfig {
         model: "execution-intent-model".to_string(),
@@ -538,21 +691,23 @@ async fn explicit_execution_intent_routes_current_turn_to_execution_responder() 
     let mut agent = agent_in_stage(TaskStage::Planning);
     agent.set_swarm(resolved);
 
-    agent
+    let response = agent
         .respond(&client, "Можно набросать сам текст?".to_string())
         .await
         .unwrap();
 
     let models = client.seen_models.lock().expect("models");
     assert!(
-        models.iter().any(|model| model == "execution-intent-model"),
-        "current execution intent must route to execution responder, saw {models:?}"
+        !models.iter().any(|model| model == "execution-intent-model"),
+        "future execution responder must not run from planning, saw {models:?}"
     );
+    assert!(response.text.starts_with('⛔'));
+    assert_eq!(current_stage(&agent), TaskStage::Planning);
 }
 
 #[tokio::test]
-async fn repeated_execution_intent_does_not_advance_on_stage_marker() {
-    let client = MarkerClient::new("Черновик обновлён. <<STAGE_DONE>>");
+async fn execution_stage_completion_advances_even_when_request_mentions_execution() {
+    let client = MarkerClient::new("Черновик обновлён.\n<<STAGE_DONE>>");
     let mut agent = agent_in_stage(TaskStage::Execution);
 
     agent
@@ -560,7 +715,7 @@ async fn repeated_execution_intent_does_not_advance_on_stage_marker() {
         .await
         .unwrap();
 
-    assert_eq!(current_stage(&agent), TaskStage::Execution);
+    assert_eq!(current_stage(&agent), TaskStage::Validation);
 }
 
 fn agent_with_task(task: TaskContext) -> ChatAgent {
@@ -744,7 +899,7 @@ async fn legal_demo_positive_invariants_do_not_block_normal_planning_turn() {
 
     assert!(!response.text.starts_with('⛔'));
     let task = agent.task_state().expect("task");
-    assert_eq!(task.stage, TaskStage::Planning);
+    assert_eq!(task.stage, TaskStage::Clarify);
     assert_eq!(task.expected_action, "agent_work");
 }
 

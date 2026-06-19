@@ -436,13 +436,17 @@ fn pipeline_stage_artifact_drives_deterministic_transition_or_human_pause() {
         .complete_pipeline_stage("research_conclusion", "Russian law ok; patent risk noted")
         .expect("research stage");
     assert_eq!(advance.from, TaskStage::Planning);
-    assert_eq!(advance.to, TaskStage::Execution);
+    assert_eq!(advance.to, TaskStage::Planning);
     assert!(advance.accepted);
-    assert!(!advance.paused_for_human);
-    assert_eq!(task.stage, TaskStage::Execution);
-    assert_eq!(task.current_step, "Create");
-    assert_eq!(task.expected_action, "agent_work");
+    assert!(advance.paused_for_human);
+    assert_eq!(task.stage, TaskStage::Planning);
+    assert!(task.paused);
     assert_eq!(task.artifacts.len(), 1);
+
+    assert!(task.approve_pipeline_pause());
+    assert_eq!(task.stage, TaskStage::Execution);
+    assert!(task.plan_approved);
+    assert!(!task.paused);
 
     let advance = task
         .complete_pipeline_stage("contract_draft", "Draft contract text")
@@ -536,6 +540,35 @@ fn task_fsm_state_survives_restart_and_shared_dialog_resume() {
             "run validation"
         ]
     );
+}
+
+#[test]
+fn stale_task_revision_is_rejected_instead_of_overwriting_newer_state() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalSessionStore::from_root(dir.path().join("sessions"));
+    let initial = TaskContext {
+        goal: "shared task".to_string(),
+        ..TaskContext::default()
+    };
+    store.save_task("agent", &initial).expect("initial save");
+
+    let mut writer_a = store.load_task("agent").expect("writer a");
+    let mut writer_b = store.load_task("agent").expect("writer b");
+    writer_a.notes = "writer a".to_string();
+    store.save_task("agent", &writer_a).expect("writer a save");
+
+    writer_b.notes = "writer b".to_string();
+    let error = store
+        .save_task("agent", &writer_b)
+        .expect_err("stale writer must conflict");
+    assert!(error.to_string().contains("revision"));
+    assert_eq!(store.load_task("agent").unwrap().notes, "writer a");
+}
+
+#[test]
+fn unknown_serialized_task_stage_is_rejected() {
+    let raw = r#"{"stage":"teleport","goal":"unsafe"}"#;
+    assert!(serde_json::from_str::<TaskContext>(raw).is_err());
 }
 
 #[test]

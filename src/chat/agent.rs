@@ -8,7 +8,7 @@ use crate::{
 };
 
 use super::memory::{AgentMemory, MemoryConfig, MemoryLayer, MemoryStrategy, TopicRouteDecision};
-use super::store::{ProfileField, TaskStage, TopicFileStorage};
+use super::store::{ProfileField, TaskArtifact, TaskStage, TopicFileStorage};
 use super::swarm::{ResolvedSwarm, SwarmOrchestrator, SwarmReport, SwarmTurn};
 use super::token_accounting::{TokenEstimate, estimate_exchange};
 
@@ -312,7 +312,8 @@ impl ChatAgent {
                     local_response: None,
                 }
             }
-            super::swarm::orchestrator::StreamPrep::Local(response, context_metrics) => {
+            super::swarm::orchestrator::StreamPrep::Local(response, context_metrics, stateful) => {
+                self.last_stateful = stateful;
                 PreparedStreamRequest {
                     request: None,
                     context_metrics,
@@ -372,6 +373,7 @@ impl ChatAgent {
             prompt,
             pending_answer: None,
             retry_violations: Vec::new(),
+            worker_outputs: Vec::<TaskArtifact>::new(),
             aux_metrics: None,
             captured_debug: None,
             report: SwarmReport::default(),
@@ -741,23 +743,10 @@ fn contains_any_agent(value: &str, needles: &[&str]) -> bool {
 /// Deterministic task-state inferred from one exchange (keyword-based, no LLM).
 /// Used by the orchestrator to keep stage + progress fields tracking the user's
 /// actual request.
-#[derive(Debug, Clone)]
-pub(crate) struct InferredTaskState {
-    pub(crate) stage: TaskStage,
-    pub(crate) current_step: String,
-    pub(crate) expected_action: String,
-    pub(crate) resume_hint: String,
-}
-
-/// Map the latest exchange to a task stage + progress fields by intent keywords.
-/// Returns `None` when nothing clearly indicates a stage.
-pub(crate) fn infer_task_state_from_exchange(
-    current: TaskStage,
-    user_prompt: &str,
-    answer: &str,
-) -> Option<InferredTaskState> {
+/// The stage the user is asking to work on. This is only a request classifier:
+/// it never mutates the FSM and never selects a future responder.
+pub(crate) fn requested_task_stage(user_prompt: &str) -> Option<TaskStage> {
     let user = user_prompt.to_lowercase();
-    let combined = format!("{user}\n{}", answer.to_lowercase());
     let wants_done = contains_any_agent(
         &user,
         &[
@@ -773,6 +762,9 @@ pub(crate) fn infer_task_state_from_exchange(
             "done",
         ],
     );
+    if wants_done {
+        return Some(TaskStage::Done);
+    }
     let wants_validation = contains_any_agent(
         &user,
         &[
@@ -787,6 +779,9 @@ pub(crate) fn infer_task_state_from_exchange(
             "validate",
         ],
     );
+    if wants_validation {
+        return Some(TaskStage::Validation);
+    }
     let wants_execution = contains_any_agent(
         &user,
         &[
@@ -802,8 +797,11 @@ pub(crate) fn infer_task_state_from_exchange(
             "write",
         ],
     );
+    if wants_execution {
+        return Some(TaskStage::Execution);
+    }
     let wants_planning = contains_any_agent(
-        &combined,
+        &user,
         &[
             "план",
             "что делать",
@@ -818,70 +816,7 @@ pub(crate) fn infer_task_state_from_exchange(
         ],
     );
 
-    let mut stage = if wants_done {
-        TaskStage::Done
-    } else if wants_validation {
-        TaskStage::Validation
-    } else if wants_execution {
-        TaskStage::Execution
-    } else if wants_planning {
-        TaskStage::Planning
-    } else {
-        return None;
-    };
-
-    if !current.can_transition(stage) {
-        stage = match (current, stage) {
-            (TaskStage::Clarify, TaskStage::Execution | TaskStage::Validation) => {
-                TaskStage::Planning
-            }
-            (TaskStage::Planning, TaskStage::Validation) if wants_validation => {
-                TaskStage::Validation
-            }
-            (TaskStage::Execution, TaskStage::Done) if wants_done => TaskStage::Done,
-            (TaskStage::Execution, TaskStage::Planning) if wants_planning => TaskStage::Planning,
-            (TaskStage::Validation, TaskStage::Execution) if wants_execution => {
-                TaskStage::Execution
-            }
-            (TaskStage::Validation, TaskStage::Done) if wants_done => TaskStage::Done,
-            _ => current,
-        };
-    }
-
-    let (current_step, expected_action, resume_hint) = match stage {
-        TaskStage::Clarify => (
-            "уточнить недостающие факты",
-            "user_input",
-            "продолжить с уточнения фактов задачи",
-        ),
-        TaskStage::Planning => (
-            "составить план действий и список нужных документов",
-            "agent_work",
-            "продолжить с плана и недостающих данных",
-        ),
-        TaskStage::Execution => (
-            "подготовить рабочий черновик результата",
-            "agent_work",
-            "продолжить с подготовки черновика",
-        ),
-        TaskStage::Validation => (
-            "проверить риски, пробелы и ограничения",
-            "validation",
-            "продолжить с проверки рисков и недостающих данных",
-        ),
-        TaskStage::Done => (
-            "зафиксировать итог и следующие действия",
-            "none",
-            "задача завершена",
-        ),
-    };
-
-    Some(InferredTaskState {
-        stage,
-        current_step: current_step.to_string(),
-        expected_action: expected_action.to_string(),
-        resume_hint: resume_hint.to_string(),
-    })
+    wants_planning.then_some(TaskStage::Planning)
 }
 
 pub(crate) fn paused_user_supplied_next_info(prompt: &str) -> bool {
@@ -905,11 +840,12 @@ pub(crate) fn paused_user_supplied_next_info(prompt: &str) -> bool {
 }
 
 /// A proposed task-stage transition and whether the FSM accepted it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StageTransition {
     pub from: TaskStage,
     pub to: TaskStage,
     pub accepted: bool,
+    pub reason: String,
 }
 
 /// Result of one turn's stateful post-processing, surfaced to the debug view.
@@ -923,6 +859,10 @@ pub struct StatefulReport {
     pub expected_action: String,
     pub paused: bool,
     pub resume_hint: String,
+    /// Safe, deterministic explanation of the last rejected lifecycle action.
+    pub transition_block_reason: String,
+    pub next_stage: Option<TaskStage>,
+    pub next_transition_requirement: String,
     /// The transition decided this turn, if any (includes rejected ones).
     pub stage_transition: Option<StageTransition>,
     /// Invariants the last response violated (empty = clean).
@@ -1155,13 +1095,9 @@ pub(crate) fn local_invariant_check(invariants: &[String], answer: &str) -> Loca
             let requires_check = answer_lower.contains("провер")
                 && (answer_lower.contains("реквизит") || answer_lower.contains("данн"));
             Some(recommends_send && !requires_check)
-        } else if let Some(forbidden) = extract_forbidden_literal(&normalized) {
-            Some(contains_non_negated_phrase(
-                &answer_lower,
-                &[forbidden.as_str()],
-            ))
         } else {
-            None
+            extract_forbidden_literal(&normalized)
+                .map(|forbidden| contains_non_negated_phrase(&answer_lower, &[forbidden.as_str()]))
         };
 
         match violation {
@@ -1488,8 +1424,7 @@ pub(crate) fn starts_new_task(current: TaskStage, prompt: &str) -> bool {
     );
     // At the terminal stage any fresh actionable request is necessarily a new
     // task: the current one is finished and cannot advance further.
-    let done_with_intent = current == TaskStage::Done
-        && infer_task_state_from_exchange(TaskStage::Clarify, prompt, "").is_some();
+    let done_with_intent = current == TaskStage::Done && requested_task_stage(prompt).is_some();
     explicit || done_with_intent
 }
 
@@ -1768,6 +1703,9 @@ fn extract_json_value(text: &str) -> Option<serde_json::Value> {
 pub(crate) fn render_task_block(task: &super::store::TaskContext) -> String {
     let mut lines = vec![format!("Stage: {}", task.stage)];
     lines.push(format!("Paused: {}", task.paused));
+    lines.push(format!("Pause reason: {}", task.pause_reason));
+    lines.push(format!("Plan approved: {}", task.plan_approved));
+    lines.push(format!("Validation passed: {}", task.validation_passed));
     lines.push(
         "Use this as authoritative working memory for the tracked task. Treat fragmentary follow-up messages as continuation of this task unless the user clearly starts an unrelated one."
             .to_string(),
@@ -1790,6 +1728,16 @@ pub(crate) fn render_task_block(task: &super::store::TaskContext) -> String {
         lines.push(format!(
             "Tracked-task next stages: {}. Use these only for internal task-state updates.",
             names.join(", ")
+        ));
+    }
+    lines.push(format!(
+        "Next transition requirement: {}",
+        task.next_transition_requirement()
+    ));
+    if !task.transition_block_reason.trim().is_empty() {
+        lines.push(format!(
+            "Last blocked lifecycle action: {}",
+            task.transition_block_reason.trim()
         ));
     }
     for (label, value) in [

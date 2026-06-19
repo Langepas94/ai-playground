@@ -22,9 +22,10 @@ pub use memory::{AgentMemory, MemoryConfig};
 pub use session::{describe_control, describe_goal, interactive_chat, read_terminal_line};
 pub use store::{
     AgentProfile, AgentSummary, ConversationSession, DialogMeta, LocalSessionStore, ProfileField,
-    SavedAgent, SavedMemoryConfig, TaskArtifact, TaskContext, TaskPipelineStage, TaskStage,
-    TaskWorkerAgent, TopicFileStorage, UserProfile, UserProfileBindings, add_request_metrics,
-    agent_id_from_key, session_key, unix_now, web_session_key,
+    SavedAgent, SavedMemoryConfig, TaskArtifact, TaskContext, TaskPauseReason, TaskPipelineStage,
+    TaskStage, TaskTransitionDecision, TaskWorkerAgent, TopicFileStorage, UserProfile,
+    UserProfileBindings, add_request_metrics, agent_id_from_key, session_key, unix_now,
+    web_session_key,
 };
 pub use swarm::{
     ResolvedSubAgent, ResolvedSwarm, SubAgentConfig, SubAgentRole, SwarmConfig, SwarmReport,

@@ -260,21 +260,25 @@ runtime, а не routes провайдера. Провайдер вызывае�
 
 ```text
 User Query
+  -> lifecycle guard (pause/resume/approval/invalid future stage; локально)
   -> PromptBuilder (system + [agent:domain] + [memory:long-term] +
      [user-profile дедуп] + [memory:working] + [invariants] + facts +
      [stage:rules] + окно + query)
+  -> PipelineWorkerAgent* -> [pipeline:worker-results]
   -> stage-ответчик по task.stage (Planning|Execution|Validation|Done) | General
   -> InvariantAgent: Pass -> commit | Fail -> retry ответчика (<= MAX_INVARIANT_RETRIES)
   -> commit + seed task goal/title
-  -> stage_complete? -> переход по TaskStage::allowed_next (код, не LLM)
+  -> stage_complete? -> artifact + approval/validation gates -> canonical transition
   -> пост-агенты: Memory(non-sticky) -> Summary -> Profile
   -> (ChatResponse, StatefulReport)
 ```
 
-FSM этапов: `Planning -> Execution -> Validation -> Done` (+ легальные возвраты
-`Execution->Planning`, `Validation->Execution`). Целевую стадию выбирает только
-код по таблице переходов; модель лишь помечает готовность маркером
-`<<STAGE_DONE>>`. Полная карта сущностей — секция «Рой агентов» в `README.md`.
+FSM этапов: `Clarify -> Planning -> Execution -> Validation -> Done` (+ легальные
+возвраты `Execution->Planning`, `Validation->Execution`). Planning всегда
+останавливается на явном approval; Done требует успешной Validation. Responder
+выбирается только по сохранённой текущей стадии. Модель лишь помечает готовность
+строгим marker на отдельной последней строке; worker-агенты выполняются реальными
+provider sub-request. Полная карта сущностей — секция «Рой агентов» в `README.md`.
 
 ## Что еще не реализовано
 

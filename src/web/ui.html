@@ -676,7 +676,34 @@
       border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px 10px;
       background: #f8fafc; font-size: 13px; white-space: pre-wrap; min-height: 18px;
     }
-    .task-state-grid { display: grid; gap: 10px; }
+    .lifecycle-summary { display: grid; gap: 10px; margin-top: 10px; }
+    .lifecycle-card {
+      border: 1px solid #dbe3f0; border-radius: 10px; padding: 11px 12px;
+      background: #f8fafc; display: grid; gap: 5px;
+    }
+    .lifecycle-card.next { border-color: #bfdbfe; background: #eff6ff; }
+    .lifecycle-card.blocked { border-color: #fecaca; background: #fef2f2; color: #991b1b; }
+    .lifecycle-card.ready { border-color: #bbf7d0; background: #f0fdf4; color: #166534; }
+    .lifecycle-card[hidden] { display: none !important; }
+    .lifecycle-kicker {
+      font-size: 11px; font-weight: 700; letter-spacing: .04em;
+      text-transform: uppercase; color: #64748b;
+    }
+    .lifecycle-value { font-size: 14px; font-weight: 650; line-height: 1.35; }
+    .lifecycle-route { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .lifecycle-arrow { color: #94a3b8; font-weight: 700; }
+    .swarm-activity { display: grid; gap: 7px; margin: 8px 0 14px; }
+    .swarm-run {
+      display: grid; grid-template-columns: minmax(90px, auto) 1fr auto;
+      gap: 8px; align-items: center; padding: 8px 10px;
+      border: 1px solid #e2e8f0; border-radius: 8px; background: #f8fafc;
+      font-size: 12px;
+    }
+    .swarm-run.ran { border-color: #bbf7d0; background: #f0fdf4; }
+    .swarm-run.worker { border-color: #bfdbfe; background: #eff6ff; }
+    .swarm-run-role { font-weight: 700; color: #1e3a8a; }
+    .swarm-run-note { color: #475569; }
+    .swarm-run-model { color: #64748b; text-align: right; }
     .stage-flow { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
     .stage-step {
       font-size: 12px; padding: 3px 9px; border-radius: 999px;
@@ -1047,40 +1074,42 @@
 
         <div id="tab-task" class="inspector-pane">
           <div class="group">
-            <h2>🔵 Задача (рабочая память)</h2>
+            <h2>🔵 Жизненный цикл задачи</h2>
             <div class="field-help">
-              Рабочую задачу ведёт обязательный task-агент роя. Это состояние идёт в prompt как <code>[memory:working]</code>; клиент его видит, но не двигает руками.
+              Стадию меняет только оркестратор. Текст запроса не может запустить будущего агента:
+              план требует явного approval, а финал — успешной validation.
             </div>
-            <div class="model-meta-row">
-              <span class="model-meta-label">Стадия:</span>
+            <div class="lifecycle-route">
               <span id="taskStageBadge" class="context-badge">—</span>
+              <span class="lifecycle-arrow">→</span>
+              <span id="taskNextStageView" class="context-badge">—</span>
             </div>
             <div id="taskStageFlow" class="stage-flow"></div>
-            <div class="task-state-grid">
-              <div>
-                <div class="field-title">Текущий шаг</div>
-                <div id="taskCurrentStepView" class="readonly-box">—</div>
+            <div class="lifecycle-summary">
+              <div class="lifecycle-card">
+                <div class="lifecycle-kicker">Сейчас работает</div>
+                <div id="taskCurrentStepView" class="lifecycle-value">—</div>
               </div>
-              <div>
-                <div class="field-title">Ожидаемое действие</div>
-                <div id="taskExpectedActionView" class="readonly-box">—</div>
+              <div class="lifecycle-card next">
+                <div class="lifecycle-kicker">Условие следующего перехода</div>
+                <div id="taskRequirementView" class="lifecycle-value">—</div>
               </div>
-              <div>
-                <div class="field-title">Подсказка для продолжения</div>
-                <div id="taskResumeHintView" class="readonly-box">—</div>
-              </div>
-              <div>
-                <div class="field-title">Название</div>
-                <div id="taskTitleView" class="readonly-box">—</div>
-              </div>
-              <div>
-                <div class="field-title">Цель</div>
-                <div id="taskGoalView" class="readonly-box">—</div>
-              </div>
+              <div id="taskGateStatus" class="lifecycle-card">Ожидание состояния задачи.</div>
+              <div id="taskBlockView" class="lifecycle-card blocked" hidden></div>
             </div>
             <div id="taskTransitionLine" class="field-help"></div>
-            <div id="taskStatusLine" class="field-help"></div>
-            <div id="taskBacklogView" class="field-help"></div>
+            <details class="panel">
+              <summary>Контекст и восстановление</summary>
+              <div class="panel-body">
+                <div class="field-title">Задача</div>
+                <div id="taskTitleView" class="readonly-box">—</div>
+                <div class="field-title">Цель</div>
+                <div id="taskGoalView" class="readonly-box">—</div>
+                <div class="field-title">Как продолжить после паузы</div>
+                <div id="taskResumeHintView" class="readonly-box">—</div>
+                <div id="taskBacklogView" class="field-help"></div>
+              </div>
+            </details>
           </div>
         </div>
 
@@ -1105,15 +1134,19 @@
             <h2>Рой агентов</h2>
             <div class="field-help">
               Ты видишь одно окно чата, но под капотом работает рой. Детерминированный
-              оркестратор (код, не LLM) на каждом ходу маршрутизирует работу: выбирает
-              ответчика по текущей стадии задачи (Planning → Execution → Validation → Done),
-              прогоняет проверку инвариантов с retry и переключает стадии по жёсткой таблице
-              переходов. Сервисные агенты (память, саммари, темы, профиль) обслуживают ход.
+              оркестратор (код, не LLM) запускает pipeline-workers, выбирает ответчика строго
+              по сохранённой стадии, прогоняет проверку инвариантов с retry и применяет
+              approval/artifact/validation gates. Сервисные агенты (память, саммари, темы,
+              профиль) обслуживают ход.
               Все агенты обязательны — их нельзя отключить, можно только задать свою модель и
               промпт. Пусто в provider/model = наследовать от основного агента; пусто в
               промпте = промпт роли по умолчанию.
             </div>
-            <div class="field-help"><b>Оркестратор:</b> детерминированный конечный автомат в коде. Переходы между этапами решает код по таблице allowed_next, а не модель.</div>
+            <div class="field-help"><b>Оркестратор:</b> модель завершает только текущую стадию; код проверяет artifact, approval и validation перед переходом.</div>
+            <h3>Последний фактический прогон</h3>
+            <div id="swarmActivity" class="swarm-activity">
+              <div class="field-help">После ответа здесь появятся реально вызванные stage-, service- и pipeline-worker агенты.</div>
+            </div>
             <div id="swarmRows"></div>
             <div class="actions">
               <button id="swarmSave" class="secondary" type="button">Сохранить рой</button>
@@ -2427,19 +2460,55 @@
       }).join('');
     }
 
+    function lifecycleRequirement(task) {
+      const stage = task.stage || 'clarify';
+      if (task.paused) {
+        if (task.pause_reason === 'plan_approval') return 'Напишите точно: «утверждаю план».';
+        if (task.pause_reason === 'stage_approval') return 'Напишите точно: «утверждаю результат».';
+        return 'Напишите «продолжай», чтобы снять ручную паузу.';
+      }
+      if (stage === 'clarify') return 'Clarify/Planning агент должен завершить уточнение задачи.';
+      if (stage === 'planning' && !task.plan_approved) {
+        const hasPlan = (task.artifacts || []).some((a) => a.stage === 'planning' && a.value);
+        return hasPlan
+          ? 'План сохранён. Для перехода нужен явный текст «утверждаю план».'
+          : 'PlanningAgent должен подготовить непустой план.';
+      }
+      if (stage === 'execution') return 'ExecutionAgent должен создать результат; затем автоматически запускается validation.';
+      if (stage === 'validation') return 'ValidationAgent должен успешно завершить проверку. Только после этого доступен done.';
+      return 'Задача завершена. Для новой работы создаётся новая задача.';
+    }
+
+    function lifecycleNextStage(stage) {
+      return ({ clarify: 'planning', planning: 'execution', execution: 'validation', validation: 'done' })[stage] || '—';
+    }
+
+    function renderLifecycleGate(task) {
+      const stage = task.stage || 'clarify';
+      const blocked = task.transition_block_reason || '';
+      const gate = $('taskGateStatus');
+      gate.className = 'lifecycle-card ' + (blocked ? 'blocked' : (stage === 'done' ? 'ready' : ''));
+      gate.textContent = task.paused
+        ? 'Переход остановлен: ожидается действие пользователя.'
+        : stage === 'done'
+          ? 'Validation пройдена. Lifecycle завершён.'
+          : 'Будущий stage-agent не запустится, пока условие выше не выполнено.';
+      $('taskBlockView').hidden = !blocked;
+      $('taskBlockView').textContent = blocked ? `Почему заблокировано: ${blocked}` : '';
+    }
+
     function renderTaskPane(task) {
       task = task || {};
       const stage = task.stage || 'clarify';
       $('taskStageBadge').textContent = stage;
+      $('taskNextStageView').textContent = lifecycleNextStage(stage);
       renderStageFlow(stage);
-      $('taskCurrentStepView').textContent = task.current_step || '—';
-      $('taskExpectedActionView').textContent = task.expected_action || '—';
+      $('taskCurrentStepView').textContent = task.current_step || `Работа стадии ${stage}`;
+      $('taskRequirementView').textContent = lifecycleRequirement(task);
       $('taskResumeHintView').textContent = task.resume_hint || '—';
       $('taskTitleView').textContent = task.title || '—';
       $('taskGoalView').textContent = task.goal || '—';
-      $('taskStatusLine').textContent = task.paused
-        ? 'Задача поставлена на паузу task-агентом.'
-        : 'Состояние обновляется автоматически task-агентом роя.';
+      renderLifecycleGate(task);
     }
 
     function renderInvariants(list) {
@@ -2453,22 +2522,25 @@
       if (!state) return;
       if (state.stage) {
         $('taskStageBadge').textContent = state.stage;
+        $('taskNextStageView').textContent = state.next_stage || lifecycleNextStage(state.stage);
         renderStageFlow(state.stage);
         setActiveAgentChip($('activeAgentName').textContent, state.stage);
       }
       if (state.current_step !== undefined) $('taskCurrentStepView').textContent = state.current_step || '—';
-      if (state.expected_action !== undefined) $('taskExpectedActionView').textContent = state.expected_action || '—';
-      if (state.resume_hint !== undefined) $('taskResumeHintView').textContent = state.resume_hint || '—';
-      if (state.paused !== undefined) {
-        $('taskStatusLine').textContent = state.paused
-          ? 'Задача поставлена на паузу task-агентом.'
-          : 'Состояние обновляется автоматически task-агентом роя.';
+      if (state.next_transition_requirement !== undefined) {
+        $('taskRequirementView').textContent = state.next_transition_requirement || '—';
       }
+      if (state.resume_hint !== undefined) $('taskResumeHintView').textContent = state.resume_hint || '—';
+      renderLifecycleGate({
+        stage: state.stage || $('taskStageBadge').textContent,
+        paused: state.paused,
+        transition_block_reason: state.transition_block_reason || '',
+      });
       if (state.stage_transition) {
         const t = state.stage_transition;
         $('taskTransitionLine').textContent = t.accepted
-          ? `Переход стадии: ${t.from} → ${t.to} ✓`
-          : `Переход ${t.from} → ${t.to} отклонён (нельзя перепрыгивать стадии).`;
+          ? `Переход стадии: ${t.from} → ${t.to} ✓${t.reason ? ` — ${t.reason}` : ''}`
+          : `Переход ${t.from} → ${t.to} отклонён: ${t.reason || 'условия перехода не выполнены'}.`;
       } else {
         $('taskTransitionLine').textContent = '';
       }
@@ -2671,6 +2743,28 @@
       { role: 'profile', group: 'Сервисные', label: 'Профиль', hint: 'Заполняет интервью-профиль агента из диалога.' },
       { role: 'invariant', group: 'Сервисные', label: 'Инварианты', hint: 'Проверяет ответ против инвариантов (Pass/Fail → retry).' },
     ];
+
+    function renderSwarmActivity(report) {
+      const records = report?.records || [];
+      if (!records.length) {
+        $('swarmActivity').innerHTML =
+          '<div class="field-help">В этом ходе provider-агенты не запускались: ответ мог быть локально остановлен lifecycle guard.</div>';
+        return;
+      }
+      $('swarmActivity').innerHTML = records.map((record) => {
+        const worker = record.role === 'worker';
+        const label = worker
+          ? `worker:${record.agent_id || 'unnamed'}`
+          : record.role;
+        const direction = record.direction ? ` · ${record.direction}` : '';
+        const cls = `swarm-run ${record.ran ? 'ran' : ''} ${worker ? 'worker' : ''}`;
+        return `<div class="${cls}">
+          <span class="swarm-run-role">${escapeHtml(label)}${escapeHtml(direction)}</span>
+          <span class="swarm-run-note">${escapeHtml(record.note || (record.ran ? 'выполнен' : 'не требовался'))}</span>
+          <span class="swarm-run-model">${escapeHtml(record.model || '—')}</span>
+        </div>`;
+      }).join('');
+    }
 
     function renderSwarmRows(config) {
       const container = $('swarmRows');
@@ -3357,6 +3451,7 @@
             setDebug(data.debug);
             setContextDebug(data.context_debug);
             renderAgentState(data.agent_state);
+            renderSwarmActivity(data.swarm_report);
             refreshAgentPanes();
             refreshDialogs();
             setStatus('Готово');
@@ -3476,6 +3571,7 @@
         setDebug(data.debug);
         setContextDebug(data.context_debug);
         renderAgentState(data.agent_state);
+        renderSwarmActivity(data.swarm_report);
         refreshAgentPanes();
         refreshDialogs();
         setStatus('Готово');

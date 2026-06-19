@@ -14,7 +14,7 @@ use crate::{
 };
 
 use super::super::memory::{AgentMemory, MemoryConfig};
-use super::super::store::{AgentProfile, TaskContext, TopicFileStorage, UserProfile};
+use super::super::store::{AgentProfile, TaskArtifact, TaskContext, TopicFileStorage, UserProfile};
 use super::config::SubAgentRole;
 use super::runtime::ResolvedSwarm;
 use super::{SwarmReport, SwarmRunRecord};
@@ -92,6 +92,9 @@ pub struct SwarmTurn<'a> {
     /// Invariant violations fed back into a responder retry (also covers plain
     /// chat without a task).
     pub retry_violations: Vec<String>,
+    /// Fresh outputs from real pipeline worker sub-requests. The stage responder
+    /// receives these as read-only evidence and they are persisted as artifacts.
+    pub worker_outputs: Vec<TaskArtifact>,
     /// Aggregate auxiliary token metrics across all swarm sub-requests.
     pub aux_metrics: Option<RequestMetrics>,
     /// Provider HTTP debug of the main responder request, for the web Debug tab.

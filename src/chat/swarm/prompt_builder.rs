@@ -94,6 +94,25 @@ impl PromptBuilder {
             }
         }
 
+        if !turn.worker_outputs.is_empty() {
+            let outputs = turn
+                .worker_outputs
+                .iter()
+                .map(|artifact| {
+                    format!(
+                        "{} [{}]: {}",
+                        artifact.key.trim(),
+                        artifact.stage,
+                        artifact.value.trim()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            blocks.push(system(format!(
+                "[pipeline:worker-results]\nReal worker sub-agents produced these artifacts. Synthesize and validate them; do not ignore them:\n{outputs}"
+            )));
+        }
+
         if !turn.invariants.is_empty() {
             for invariant in turn.invariants {
                 remember_context_value(&mut seen_profile_context, invariant);
