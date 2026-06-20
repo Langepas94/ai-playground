@@ -14,6 +14,8 @@ use crate::chat::memory::{
     MemoryStrategy, TopicRouteDecision, format_messages_for_summary, looks_sensitive,
 };
 
+use crate::providers::{RequestMetrics, ResponseControl};
+
 use super::super::agent::{InvariantCheckStatus, SubAgent, SubAgentOutcome, SwarmTurn};
 use super::super::config::SubAgentRole;
 use super::{
@@ -297,6 +299,108 @@ impl SubAgent for InvariantAgent {
             invariant_status,
             ..SubAgentOutcome::default()
         }
+    }
+}
+
+/// The model's proposed lifecycle direction. It proposes a DIRECTION only — the
+/// code gate (`TaskStage::allowed_next`) decides the actual target stage, so a
+/// stage can never be skipped no matter what the model says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransitionDecision {
+    /// Current stage's deliverable is complete → advance one stage (gated).
+    Advance,
+    /// The result shows the previous stage was wrong → step back one (gated).
+    Back,
+    /// More work is needed in this stage → no transition.
+    Stay,
+}
+
+pub(crate) const DEFAULT_TRANSITION_PROMPT: &str = "You are the lifecycle controller of a staged agent pipeline. Given the current stage, its goal and the latest stage output, decide the SINGLE next move. You do NOT pick a target stage — only a direction; the orchestrator code picks the legal target and rejects any skip. Reply with ONE JSON object and no prose: {\"decision\":\"advance\"|\"back\"|\"stay\",\"reason\":\"<short>\"}. advance = this stage's deliverable is complete and correct; back = the output reveals the previous stage must be redone; stay = the stage needs more work. When unsure, choose stay.";
+
+/// Lifecycle transition controller. Replaces the hardcoded `<<STAGE_DONE>>`
+/// marker as the PRIMARY advance signal: the orchestrator asks the model which
+/// way to move, then enforces the move through the deterministic FSM gate. The
+/// marker remains only as a fallback when this agent has no parseable answer.
+pub struct TransitionAgent;
+
+impl TransitionAgent {
+    /// Ask the model for a lifecycle direction given the produced stage `answer`.
+    /// Returns `None` (→ caller falls back to the marker) when there is no task,
+    /// the task is paused, the stage is terminal, the answer is empty, or the
+    /// model gives no parseable decision.
+    pub async fn decide(
+        &self,
+        turn: &mut SwarmTurn<'_>,
+        answer: &str,
+    ) -> (Option<TransitionDecision>, Option<RequestMetrics>) {
+        let Some(task) = turn.task.as_ref() else {
+            return (None, None);
+        };
+        if task.paused || answer.trim().is_empty() {
+            return (None, None);
+        }
+        let stage = task.stage;
+        let allowed = stage.allowed_next();
+        if allowed.is_empty() {
+            // Terminal stage: nothing to decide.
+            return (None, None);
+        }
+        let goal = task.goal.trim().to_string();
+        let allowed_names = allowed
+            .iter()
+            .map(|next| next.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let user_content = format!(
+            "Current stage: {stage}\nStage goal: {goal}\nLegal next stages (code-gated; you do NOT choose among them): {allowed_names}\nLatest stage output:\n{}\n\nReturn the direction.",
+            transition_excerpt(answer)
+        );
+        let Some(response) = turn
+            .sub_request(
+                SubAgentRole::Task,
+                DEFAULT_TRANSITION_PROMPT,
+                user_content,
+                ResponseControl::uncontrolled(),
+                STATEFUL_STEP_TIMEOUT,
+            )
+            .await
+        else {
+            return (None, None);
+        };
+        (
+            parse_transition_decision(&response.text),
+            Some(response.metrics),
+        )
+    }
+}
+
+fn transition_excerpt(answer: &str) -> String {
+    const MAX: usize = 2_000;
+    if answer.len() <= MAX {
+        return answer.to_string();
+    }
+    let mut end = MAX;
+    while !answer.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &answer[..end])
+}
+
+/// Tolerant parse of the controller's JSON decision. Accepts a bare object or one
+/// embedded in surrounding prose, and a few natural synonyms for each direction.
+pub(crate) fn parse_transition_decision(text: &str) -> Option<TransitionDecision> {
+    let trimmed = text.trim();
+    let value: serde_json::Value = serde_json::from_str(trimmed).ok().or_else(|| {
+        let start = trimmed.find('{')?;
+        let end = trimmed.rfind('}')?;
+        serde_json::from_str(trimmed.get(start..=end)?).ok()
+    })?;
+    let decision = value.get("decision")?.as_str()?.trim().to_lowercase();
+    match decision.as_str() {
+        "advance" | "forward" | "next" | "proceed" => Some(TransitionDecision::Advance),
+        "back" | "backward" | "previous" | "revert" => Some(TransitionDecision::Back),
+        "stay" | "hold" | "wait" | "continue" => Some(TransitionDecision::Stay),
+        _ => None,
     }
 }
 

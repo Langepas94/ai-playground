@@ -13,7 +13,7 @@ use crate::chat::swarm::{SubAgentConfig, SubAgentRole, SwarmConfig, resolve_swar
 use crate::config::{AppConfig, ProfileConfig};
 use crate::errors::AppError;
 use crate::providers::{
-    ChatRequest, ChatResponse, ProviderClient, ProviderExchangeDebug, RequestMetrics,
+    ChatMessage, ChatRequest, ChatResponse, ProviderClient, ProviderExchangeDebug, RequestMetrics,
     ResponseControl, Role,
 };
 use crate::secrets::MemorySecretStore;
@@ -27,6 +27,9 @@ struct MarkerClient {
     /// Concatenated system-message text of every request, for asserting which
     /// per-agent system prompt actually reached the provider.
     seen_system: std::sync::Mutex<Vec<String>>,
+    /// Concatenated content of every message (any role) of every request, for
+    /// asserting whether the raw chat transcript reached a stage responder.
+    seen_full: std::sync::Mutex<Vec<String>>,
 }
 
 impl MarkerClient {
@@ -35,7 +38,19 @@ impl MarkerClient {
             text: text.to_string(),
             seen_models: std::sync::Mutex::new(Vec::new()),
             seen_system: std::sync::Mutex::new(Vec::new()),
+            seen_full: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// The first recorded request whose joined text contains `needle`. Used to
+    /// single out one responder's request from the service-agent traffic.
+    fn request_with(&self, needle: &str) -> Option<String> {
+        self.seen_full
+            .lock()
+            .expect("full")
+            .iter()
+            .find(|request| request.contains(needle))
+            .cloned()
     }
 }
 
@@ -67,6 +82,13 @@ impl ProviderClient for MarkerClient {
             .collect::<Vec<_>>()
             .join("\n");
         self.seen_system.lock().expect("system").push(system);
+        let full = request
+            .messages
+            .iter()
+            .map(|message| message.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.seen_full.lock().expect("full").push(full);
         Ok(ChatResponse {
             text: self.text.clone(),
             finish_reason: Some("stop".to_string()),
@@ -142,6 +164,86 @@ impl ProviderClient for SemanticInvariantClient {
         });
         let text = if is_invariant_check {
             serde_json::json!({ "violations": self.violations }).to_string()
+        } else {
+            self.answer.clone()
+        };
+        Ok(ChatResponse {
+            text,
+            finish_reason: Some("stop".to_string()),
+            metrics: RequestMetrics {
+                elapsed_ms: 1,
+                usage: None,
+                cost: None,
+            },
+        })
+    }
+
+    async fn chat_completion_with_debug(
+        &self,
+        profile: &ProfileConfig,
+        token: &str,
+        request: ChatRequest,
+    ) -> Result<(ChatResponse, ProviderExchangeDebug), AppError> {
+        let response = self.chat_completion(profile, token, request).await?;
+        Ok((
+            response,
+            ProviderExchangeDebug {
+                request: crate::providers::HttpDebugRequest {
+                    method: "POST".to_string(),
+                    url: "https://example.test".to_string(),
+                    headers: Default::default(),
+                    body: serde_json::json!({}),
+                },
+                response: crate::providers::HttpDebugResponse {
+                    status: 200,
+                    headers: Default::default(),
+                    body: serde_json::json!({}),
+                },
+            },
+        ))
+    }
+}
+
+/// Returns a fixed JSON decision to the lifecycle-transition controller and a
+/// fixed (marker-free) answer to every other request. Lets tests drive the FSM
+/// purely from the model's transition decision — proving the orchestrator asks
+/// the model which way to move instead of relying on a hardcoded marker.
+#[derive(Debug)]
+struct DecisionClient {
+    answer: String,
+    decision: String,
+}
+
+impl DecisionClient {
+    fn new(answer: &str, decision: &str) -> Self {
+        Self {
+            answer: answer.to_string(),
+            decision: decision.to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl ProviderClient for DecisionClient {
+    async fn list_models(
+        &self,
+        _profile: &ProfileConfig,
+        _token: &str,
+    ) -> Result<Vec<String>, AppError> {
+        Ok(Vec::new())
+    }
+
+    async fn chat_completion(
+        &self,
+        _profile: &ProfileConfig,
+        _token: &str,
+        request: ChatRequest,
+    ) -> Result<ChatResponse, AppError> {
+        let is_controller = request.messages.iter().any(|message| {
+            message.role == Role::System && message.content.contains("lifecycle controller")
+        });
+        let text = if is_controller {
+            serde_json::json!({ "decision": self.decision, "reason": "test" }).to_string()
         } else {
             self.answer.clone()
         };
@@ -718,6 +820,48 @@ async fn stage_responder_uses_its_own_model() {
     );
 }
 
+/// Part B: per-stage rules are swarm-config driven, not hardcoded. A configured
+/// Execution prompt becomes the `[stage:rules]` block and the built-in Russian
+/// default is no longer injected; the prompt also appears exactly once (no
+/// `[agent:role]` + `[stage:rules]` duplication).
+#[tokio::test]
+async fn configured_stage_prompt_replaces_hardcoded_default_rules() {
+    let mut config = SwarmConfig::defaults();
+    config.set(SubAgentConfig {
+        system_prompt: "CUSTOM_EXEC_RULES_777 действуй по-своему.".to_string(),
+        ..SubAgentConfig::inherit(SubAgentRole::Execution)
+    });
+    let resolved = resolve_swarm(
+        &test_profile(),
+        "secret",
+        &config,
+        &AppConfig::default(),
+        &MemorySecretStore::default(),
+    );
+    let client = MarkerClient::new("Черновик.");
+    let mut agent = agent_with_task(TaskContext {
+        stage: TaskStage::Execution,
+        plan_approved: true,
+        ..TaskContext::default()
+    });
+    agent.set_swarm(resolved);
+
+    agent.respond(&client, "Делай".to_string()).await.unwrap();
+
+    let responder = client
+        .request_with("CUSTOM_EXEC_RULES_777")
+        .expect("configured stage prompt must reach the responder");
+    assert!(
+        !responder.contains("Ты на стадии EXECUTION"),
+        "configured prompt must REPLACE the hardcoded default, not sit beside it"
+    );
+    assert_eq!(
+        responder.matches("CUSTOM_EXEC_RULES_777").count(),
+        1,
+        "configured stage prompt must be injected exactly once (no role/rules dup)"
+    );
+}
+
 #[tokio::test]
 async fn explicit_execution_intent_is_blocked_before_plan_approval() {
     let mut config = SwarmConfig::defaults();
@@ -1092,6 +1236,173 @@ async fn step_back_from_validation_returns_to_execution() {
     assert!(!task.validation_passed);
 }
 
+/// Spec, runtime guarantee: at every stage the FSM moves at most ONE stage per
+/// turn (stepwise), can roll back exactly one stage, and never skips a stage —
+/// regardless of what the responder returns. The deterministic gate, not the
+/// LLM, owns the transition. (Static table coverage:
+/// `task_stage_transitions_enforced`,
+/// `allowed_next_table_is_the_only_source_of_legal_transitions` in
+/// `store_tests.rs`; skip-request refusal: `clarify_cannot_skip_...`.)
+#[tokio::test]
+async fn lifecycle_advances_one_stage_back_steps_one_and_never_skips() {
+    let client = MarkerClient::new("Готово.\n<<STAGE_DONE>>");
+
+    // Stepwise forward: an Execution completion lands on Validation, never on Done
+    // — even though the responder signalled "done". One step, no skip.
+    let mut agent = agent_with_task(TaskContext {
+        stage: TaskStage::Execution,
+        plan_approved: true,
+        ..TaskContext::default()
+    });
+    agent.respond(&client, "Дальше".to_string()).await.unwrap();
+    assert_eq!(
+        current_stage(&agent),
+        TaskStage::Validation,
+        "execution must advance exactly one stage, not skip to done"
+    );
+
+    // Next completion: Validation -> Done. Again exactly one stage.
+    agent.respond(&client, "Дальше".to_string()).await.unwrap();
+    assert_eq!(current_stage(&agent), TaskStage::Done);
+
+    // Terminal: Done never leaves, no matter how many completions arrive.
+    agent.respond(&client, "Дальше".to_string()).await.unwrap();
+    assert_eq!(current_stage(&agent), TaskStage::Done);
+
+    // Back-step exactly one stage: Validation -> Execution.
+    let mut back = agent_with_task(TaskContext {
+        stage: TaskStage::Validation,
+        plan_approved: true,
+        validation_passed: true,
+        ..TaskContext::default()
+    });
+    back.respond(&client, "вернись на шаг назад".to_string())
+        .await
+        .unwrap();
+    assert_eq!(
+        current_stage(&back),
+        TaskStage::Execution,
+        "back-step must move exactly one stage, not jump to clarify/planning"
+    );
+}
+
+/// The orchestrator asks the model which way to move: an `advance` decision
+/// advances the FSM even though the answer carries NO `<<STAGE_DONE>>` marker —
+/// the marker is no longer the primary signal. The gate still moves exactly one
+/// stage (execution → validation), so the model cannot skip.
+#[tokio::test]
+async fn llm_advance_decision_advances_without_marker() {
+    let client = DecisionClient::new("Черновик готов, маркера нет.", "advance");
+    let mut agent = agent_with_task(TaskContext {
+        stage: TaskStage::Execution,
+        plan_approved: true,
+        ..TaskContext::default()
+    });
+
+    agent.respond(&client, "Дальше".to_string()).await.unwrap();
+
+    assert_eq!(
+        current_stage(&agent),
+        TaskStage::Validation,
+        "an LLM advance decision must advance the FSM with no marker present"
+    );
+}
+
+/// The model's decision is PRIMARY over the marker: a `stay` decision keeps the
+/// stage even though the answer ends with `<<STAGE_DONE>>`.
+#[tokio::test]
+async fn llm_stay_decision_overrides_stage_done_marker() {
+    let client = DecisionClient::new("Готово.\n<<STAGE_DONE>>", "stay");
+    let mut agent = agent_with_task(TaskContext {
+        stage: TaskStage::Execution,
+        plan_approved: true,
+        ..TaskContext::default()
+    });
+
+    agent.respond(&client, "Дальше".to_string()).await.unwrap();
+
+    assert_eq!(
+        current_stage(&agent),
+        TaskStage::Execution,
+        "an LLM stay decision must override the stage-done marker"
+    );
+}
+
+/// A `back` decision steps the FSM back exactly one stage through the gate
+/// (validation → execution), driven by the model, not by a user command.
+#[tokio::test]
+async fn llm_back_decision_steps_back_one_stage() {
+    let client = DecisionClient::new("Результат не сходится с планом, нужно переделать.", "back");
+    let mut agent = agent_with_task(TaskContext {
+        stage: TaskStage::Validation,
+        plan_approved: true,
+        validation_passed: true,
+        ..TaskContext::default()
+    });
+
+    agent.respond(&client, "Проверь".to_string()).await.unwrap();
+
+    assert_eq!(
+        current_stage(&agent),
+        TaskStage::Execution,
+        "an LLM back decision must roll back exactly one stage through the gate"
+    );
+}
+
+/// Gate rejection: a `back` decision from a stage with no back edge (planning)
+/// is dropped — the FSM stays put. The model proposes, the gate disposes.
+#[tokio::test]
+async fn llm_back_decision_with_no_back_edge_is_ignored() {
+    let client = DecisionClient::new("Похоже план неполный.", "back");
+    let mut agent = agent_with_task(TaskContext {
+        stage: TaskStage::Planning,
+        ..TaskContext::default()
+    });
+
+    agent.respond(&client, "Проверь".to_string()).await.unwrap();
+
+    assert_eq!(
+        current_stage(&agent),
+        TaskStage::Planning,
+        "planning has no back edge — a back decision must be ignored, not crash or skip"
+    );
+}
+
+/// Robustness: an unparseable controller decision falls back to the deterministic
+/// `<<STAGE_DONE>>` marker, so the turn still advances when the answer carries it.
+#[tokio::test]
+async fn unparseable_decision_falls_back_to_marker() {
+    let client = DecisionClient::new("Готово.\n<<STAGE_DONE>>", "garbage");
+    let mut agent = agent_with_task(TaskContext {
+        stage: TaskStage::Execution,
+        plan_approved: true,
+        ..TaskContext::default()
+    });
+
+    agent.respond(&client, "Дальше".to_string()).await.unwrap();
+
+    assert_eq!(
+        current_stage(&agent),
+        TaskStage::Validation,
+        "an unparseable decision must fall back to the stage-done marker"
+    );
+}
+
+/// Robustness: no decision AND no marker → the FSM holds at the current stage.
+#[tokio::test]
+async fn unparseable_decision_without_marker_holds_stage() {
+    let client = DecisionClient::new("Черновик без маркера.", "garbage");
+    let mut agent = agent_with_task(TaskContext {
+        stage: TaskStage::Execution,
+        plan_approved: true,
+        ..TaskContext::default()
+    });
+
+    agent.respond(&client, "Дальше".to_string()).await.unwrap();
+
+    assert_eq!(current_stage(&agent), TaskStage::Execution);
+}
+
 fn agent_with_task(task: TaskContext) -> ChatAgent {
     let mut agent = ChatAgent::new(
         test_profile(),
@@ -1104,6 +1415,87 @@ fn agent_with_task(task: TaskContext) -> ChatAgent {
     );
     agent.set_task_state(Some(task));
     agent
+}
+
+fn agent_with_task_and_history(task: TaskContext, history: Vec<ChatMessage>) -> ChatAgent {
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        history,
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_task_state(Some(task));
+    agent
+}
+
+/// History scoping: a late stage (execution) must NOT receive the raw chat
+/// transcript. Its input is the prior stage's artifact, carried in the task
+/// block. Orchestrator owns history; the agent works on the previous output.
+#[tokio::test]
+async fn execution_stage_excludes_raw_transcript_keeps_prior_artifact() {
+    let client = MarkerClient::new("Черновик готов.\n<<STAGE_DONE>>");
+    let history = vec![ChatMessage {
+        role: Role::User,
+        content: "HISTORY_MARKER_XYZ это старое сообщение пользователя".to_string(),
+    }];
+    let task = TaskContext {
+        stage: TaskStage::Execution,
+        plan: vec!["Шаг 1: подготовить черновик".to_string()],
+        artifacts: vec![TaskArtifact {
+            stage: TaskStage::Planning,
+            key: "plan".to_string(),
+            value: "УТВЕРЖДЁННЫЙ_ПЛАН_ABC".to_string(),
+        }],
+        ..TaskContext::default()
+    };
+    let mut agent = agent_with_task_and_history(task, history);
+
+    agent.respond(&client, "Дальше".to_string()).await.unwrap();
+
+    let responder = client
+        .request_with("Ты на стадии EXECUTION")
+        .expect("execution responder request");
+    assert!(
+        !responder.contains("HISTORY_MARKER_XYZ"),
+        "execution stage must not receive the raw chat transcript"
+    );
+    assert!(
+        responder.contains("УТВЕРЖДЁННЫЙ_ПЛАН_ABC"),
+        "execution stage must receive the prior stage's artifact as its input"
+    );
+    assert!(
+        responder.contains("[stage:input]"),
+        "execution stage must be told it works on the prior artifact, not the transcript"
+    );
+}
+
+/// History scoping: planning is the requirement-gathering front — it DOES read
+/// the raw transcript.
+#[tokio::test]
+async fn planning_stage_receives_raw_transcript() {
+    let client = MarkerClient::new("План.\n<<STAGE_DONE>>");
+    let history = vec![ChatMessage {
+        role: Role::User,
+        content: "HISTORY_MARKER_XYZ это старое сообщение пользователя".to_string(),
+    }];
+    let task = TaskContext {
+        stage: TaskStage::Planning,
+        ..TaskContext::default()
+    };
+    let mut agent = agent_with_task_and_history(task, history);
+
+    agent.respond(&client, "Начни".to_string()).await.unwrap();
+
+    let responder = client
+        .request_with("Ты на стадии PLANNING")
+        .expect("planning responder request");
+    assert!(
+        responder.contains("HISTORY_MARKER_XYZ"),
+        "planning stage must receive the raw chat transcript to gather requirements"
+    );
 }
 
 #[tokio::test]

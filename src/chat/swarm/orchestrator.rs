@@ -1,5 +1,8 @@
-//! The deterministic orchestrator. Pure code — no LLM decides routing or FSM
-//! transitions. It drives one user turn across the swarm:
+//! The orchestrator. Routing is pure code (the responder is picked by FSM stage,
+//! never by an LLM). The stage TRANSITION is LLM-proposed but code-gated: the
+//! TransitionAgent proposes a direction (advance / back / stay) and the code gate
+//! (`allowed_next`) decides and enforces the legal target, so a stage can never
+//! be skipped regardless of the model's output. It drives one user turn:
 //!
 //! 1. (sticky-facts) MemoryAgent extracts facts before the responder.
 //! 2. (scoped) TopicAgent routes; may short-circuit with a canned answer.
@@ -10,7 +13,10 @@
 //! 4. InvariantAgent validates → retry the responder on violations (bounded).
 //!    If violations survive the retries, the answer is BLOCKED and replaced with
 //!    a refusal — invariants outrank the request, never shipped when broken.
-//! 5. Commit the answer; advance the FSM in code via `allowed_next`.
+//! 5. Commit the answer; the TransitionAgent proposes a direction and the code
+//!    gate (`allowed_next` / back edge) applies exactly one legal step, or none.
+//!    Falls back to the deterministic `<<STAGE_DONE>>` marker when the model
+//!    gives no parseable decision.
 //! 6. Post-turn service agents: Memory (non-sticky), Summary, Profile.
 
 use crate::chat::agent::{
@@ -28,7 +34,8 @@ use crate::providers::{ChatMessage, ChatRequest, ChatResponse, RequestMetrics, R
 use super::agent::{InvariantCheckStatus, SubAgent, SwarmTurn};
 use super::agents::{
     GeneralAgent, InvariantAgent, MemoryAgent, PipelineWorkerAgent, ProfileAgent, StageAgent,
-    SummaryAgent, TopicAgent, lifecycle_safe_control, strip_stage_marker, update_active_topic_file,
+    SummaryAgent, TopicAgent, TransitionAgent, TransitionDecision, lifecycle_safe_control,
+    strip_stage_marker, update_active_topic_file,
 };
 use super::config::SubAgentRole;
 use super::prompt_builder::PromptBuilder;
@@ -48,6 +55,7 @@ pub struct SwarmOrchestrator {
     profile: ProfileAgent,
     invariant: InvariantAgent,
     topic: TopicAgent,
+    transition: TransitionAgent,
 }
 
 impl Default for SwarmOrchestrator {
@@ -69,6 +77,7 @@ impl SwarmOrchestrator {
             profile: ProfileAgent,
             invariant: InvariantAgent,
             topic: TopicAgent,
+            transition: TransitionAgent,
         }
     }
 
@@ -235,9 +244,19 @@ impl SwarmOrchestrator {
         if !preserve_task_state {
             seed_task_progress(turn, &prompt, &answer);
         }
-        let transition = (!preserve_task_state)
-            .then(|| apply_stage_completion(turn, outcome.stage_complete, outcome.artifact.clone()))
-            .flatten();
+        let transition = if preserve_task_state {
+            None
+        } else {
+            let (decision, metrics) = self.transition.decide(turn, &answer).await;
+            accumulate(turn, metrics);
+            resolve_transition(
+                turn,
+                decision,
+                &answer,
+                outcome.stage_complete,
+                outcome.artifact.clone(),
+            )
+        };
         if let Some(task) = turn.task.as_mut() {
             task.violations = violations.clone();
         }
@@ -389,10 +408,11 @@ impl SwarmOrchestrator {
         };
         turn.active_scope = turn.scope_for(role);
         let (profile, _token) = turn.responder_profile(role);
-        // Same stage rules as a non-streamed turn (with the completion marker) so
-        // the FSM advances on streamed turns too; the web layer filters the
-        // marker out of the live token stream.
-        let messages = PromptBuilder::build(turn, role, super::agents::stage_rules(role));
+        // Same stage rules as a non-streamed turn (swarm-config prompt or default,
+        // with the completion marker) so the FSM advances on streamed turns too;
+        // the web layer filters the marker out of the live token stream.
+        let rules = super::agents::resolved_stage_rules(turn, role);
+        let messages = PromptBuilder::build(turn, role, rules.as_deref());
         let request = ChatRequest {
             model: profile.model.clone(),
             messages,
@@ -458,14 +478,18 @@ impl SwarmOrchestrator {
         if !preserve_task_state {
             seed_task_progress(turn, prompt, &answer);
         }
-        let transition = if !preserve_task_state {
-            apply_stage_completion(
-                turn,
-                complete,
-                complete.then(|| (key, truncate(&answer, 280))),
-            )
-        } else {
+        let transition = if preserve_task_state {
             None
+        } else {
+            let (decision, metrics) = self.transition.decide(turn, &answer).await;
+            accumulate(turn, metrics);
+            resolve_transition(
+                turn,
+                decision,
+                &answer,
+                complete,
+                complete.then(|| (key.clone(), truncate(&answer, 280))),
+            )
         };
         if turn.memory_config.strategy != MemoryStrategy::StickyFacts {
             let outcome = self.memory.run(turn).await;
@@ -910,6 +934,45 @@ fn apply_back_step(turn: &mut SwarmTurn<'_>) -> Option<(String, StageTransition)
     ))
 }
 
+/// Apply the LLM-proposed lifecycle direction through the deterministic gate. The
+/// model only proposes a direction; the gate (`apply_stage_completion` →
+/// `allowed_next`, `apply_back_step` → back edge) decides and enforces the legal
+/// target, so a skip is impossible regardless of the model's output. When the
+/// model gives no decision (`None`), fall back to the deterministic stage-done
+/// marker so streaming and offline robustness are preserved.
+fn resolve_transition(
+    turn: &mut SwarmTurn<'_>,
+    decision: Option<TransitionDecision>,
+    answer: &str,
+    marker_complete: bool,
+    marker_artifact: Option<(String, String)>,
+) -> Option<StageTransition> {
+    match decision {
+        Some(TransitionDecision::Advance) => {
+            apply_stage_completion(turn, true, Some(stage_artifact(turn, answer)))
+        }
+        Some(TransitionDecision::Back) => apply_back_step(turn).map(|(_, transition)| transition),
+        Some(TransitionDecision::Stay) => None,
+        None => apply_stage_completion(turn, marker_complete, marker_artifact),
+    }
+}
+
+/// The (key, value) artifact a completed stage records when the LLM controller —
+/// not the marker — drives the advance: the pipeline artifact key if any, else
+/// the stage name, paired with the stage's produced answer.
+fn stage_artifact(turn: &SwarmTurn<'_>, answer: &str) -> (String, String) {
+    let key = turn
+        .task
+        .as_ref()
+        .and_then(|task| task.active_pipeline_stage())
+        .map(|stage| stage.artifact_key.trim())
+        .filter(|key| !key.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| turn.task.as_ref().map(|task| task.stage.to_string()))
+        .unwrap_or_default();
+    (key, truncate(answer, 280))
+}
+
 fn lifecycle_request_rejection(turn: &SwarmTurn<'_>, prompt: &str) -> Option<(TaskStage, String)> {
     let task = turn.task.as_ref()?;
     let requested = requested_task_stage(prompt)?;
@@ -992,7 +1055,7 @@ fn explicit_approval_intent(prompt: &str, reason: TaskPauseReason) -> bool {
         return false;
     }
     let words: Vec<&str> = prompt.split_whitespace().collect();
-    let has_word = |word: &str| words.iter().any(|token| *token == word);
+    let has_word = |word: &str| words.contains(&word);
 
     // Rejection / change request is never approval — keep the gate closed.
     let rejects = has_word("нет")
