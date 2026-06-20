@@ -14,7 +14,18 @@ use crate::{
     providers::{ChatMessage, RequestCost, RequestMetrics, Role, TokenUsage},
 };
 
-use super::memory::{AgentMemory, TopicFile};
+use super::memory::{AgentMemory, MemoryLayer, TopicFile};
+
+pub use super::store_types::{
+    AgentProfile, AgentSummary, DialogMeta, LongTermMemory, ProfileField, SavedAgent,
+    SavedMemoryConfig, TaskArtifact, TaskContext, TaskPauseReason, TaskPipelineStage, TaskStage,
+    TaskTransitionDecision, TaskWorkerAgent, UserProfile, UserProfileBindings, agent_id_from_key,
+    unix_now,
+};
+use super::store_types::{
+    AgentsIndex, DialogsIndex, UserProfilesIndex, blank_str_to_none, default_task_id,
+    dialog_title_from_messages,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConversationSession {
@@ -202,6 +213,13 @@ impl LocalSessionStore {
                 format!("could not write session index: {error}"),
             )
         })?;
+        // For an agent's session, also register it in the agent's dialog index so
+        // the UI can list and switch between the agent's chats. Title is seeded
+        // from the first user message; later turns keep it.
+        if let Some(agent_id) = agent_id_from_key(profile_key) {
+            let title = dialog_title_from_messages(messages);
+            self.register_dialog(agent_id, session_id, &title)?;
+        }
         Ok(())
     }
 
@@ -232,6 +250,496 @@ impl LocalSessionStore {
             )
         })?;
         Ok(())
+    }
+
+    /// Persist the long-term facts of `memory` into the profile-shared store.
+    /// Working/short-term data is intentionally not written here.
+    pub fn save_long_term(&self, profile_key: &str, memory: &AgentMemory) -> Result<(), AppError> {
+        let facts: std::collections::BTreeMap<String, String> = memory
+            .facts_in_layer(MemoryLayer::LongTerm)
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        let path = self.long_term_path(profile_key);
+        fs::create_dir_all(self.sessions_dir()).map_err(|error| {
+            config_error(
+                self.sessions_dir(),
+                format!("could not create directory: {error}"),
+            )
+        })?;
+        let temp_path = path.with_extension("longterm.toon.tmp");
+        {
+            let mut file = fs::File::create(&temp_path).map_err(|error| {
+                config_error(temp_path.clone(), format!("create failed: {error}"))
+            })?;
+            let raw = crate::toon_codec::to_string(&LongTermMemory { facts })?;
+            writeln!(file, "{raw}").map_err(|error| {
+                config_error(temp_path.clone(), format!("write failed: {error}"))
+            })?;
+        }
+        fs::rename(&temp_path, &path).map_err(|error| {
+            config_error(
+                path.clone(),
+                format!("could not replace long-term memory file: {error}"),
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Load the profile-shared long-term facts (empty if none stored yet).
+    pub fn load_long_term(&self, profile_key: &str) -> Result<LongTermMemory, AppError> {
+        let path = self.long_term_path(profile_key);
+        if !path.exists() {
+            return Ok(LongTermMemory::default());
+        }
+        let raw = fs::read_to_string(&path)
+            .map_err(|error| config_error(path.clone(), format!("read failed: {error}")))?;
+        crate::toon_codec::from_str_or_json::<LongTermMemory>(&raw)
+    }
+
+    /// Seed `memory` with the profile's long-term facts. Existing keys in
+    /// `memory` win; seeded keys are tagged [`MemoryLayer::LongTerm`].
+    pub fn seed_long_term(
+        &self,
+        profile_key: &str,
+        memory: &mut AgentMemory,
+    ) -> Result<(), AppError> {
+        let stored = self.load_long_term(profile_key)?;
+        for (key, value) in stored.facts {
+            memory.facts.entry(key.clone()).or_insert(value);
+            memory.fact_layers.insert(key, MemoryLayer::LongTerm);
+        }
+        Ok(())
+    }
+
+    fn long_term_path(&self, profile_key: &str) -> PathBuf {
+        self.sessions_dir()
+            .join(format!("longterm-{}.memory.toon", safe_key(profile_key)))
+    }
+
+    // ----- Named persistent agents -------------------------------------------
+
+    /// List saved agents (most recently updated first). Empty if none yet.
+    pub fn list_agents(&self) -> Result<Vec<AgentSummary>, AppError> {
+        let index: AgentsIndex = self
+            .read_toon(&self.agents_index_path())?
+            .unwrap_or_default();
+        let mut agents = index.agents;
+        agents.sort_by(|left, right| right.updated_at_unix.cmp(&left.updated_at_unix));
+        Ok(agents)
+    }
+
+    pub fn load_agent(&self, id: &str) -> Result<Option<SavedAgent>, AppError> {
+        self.read_toon(&self.agent_path(id))
+    }
+
+    /// Persist an agent's settings and upsert it into the index.
+    pub fn save_agent(&self, agent: &SavedAgent) -> Result<(), AppError> {
+        if agent.id.trim().is_empty() {
+            return Err(AppError::InvalidInput("Agent id is required".to_string()));
+        }
+        self.write_toon(&self.agent_path(&agent.id), agent)?;
+        let mut index: AgentsIndex = self
+            .read_toon(&self.agents_index_path())?
+            .unwrap_or_default();
+        let summary = AgentSummary {
+            id: agent.id.clone(),
+            name: agent.name.clone(),
+            provider: agent.provider.clone(),
+            model: agent.model.clone(),
+            stage: self.load_task(&agent.id)?.stage,
+            updated_at_unix: agent.updated_at_unix,
+        };
+        if let Some(existing) = index.agents.iter_mut().find(|entry| entry.id == agent.id) {
+            *existing = summary;
+        } else {
+            index.agents.push(summary);
+        }
+        self.write_toon(&self.agents_index_path(), &index)
+    }
+
+    pub fn delete_agent(&self, id: &str) -> Result<(), AppError> {
+        // Remove the agent's dialog chats (history/metrics/memory) first.
+        for dialog in self.list_dialogs(id)? {
+            let _ = self.delete_dialog(id, &dialog.id);
+        }
+        for path in [
+            self.agent_path(id),
+            self.agent_task_path(id),
+            self.agent_profile_path(id),
+            self.agent_dialogs_path(id),
+        ] {
+            if path.exists() {
+                fs::remove_file(&path)
+                    .map_err(|error| config_error(path, format!("delete failed: {error}")))?;
+            }
+        }
+        let mut index: AgentsIndex = self
+            .read_toon(&self.agents_index_path())?
+            .unwrap_or_default();
+        index.agents.retain(|entry| entry.id != id);
+        self.write_toon(&self.agents_index_path(), &index)
+    }
+
+    pub fn load_task(&self, id: &str) -> Result<TaskContext, AppError> {
+        Ok(self
+            .read_toon(&self.agent_task_path(id))?
+            .unwrap_or_default())
+    }
+
+    pub fn load_dialog_task(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+    ) -> Result<TaskContext, AppError> {
+        let task_id = self.dialog_task_id(agent_id, session_id)?;
+        self.load_scoped_task(agent_id, &task_id)
+    }
+
+    /// Persist the working-memory task and keep the picker index's stage in sync.
+    pub fn save_task(&self, id: &str, task: &TaskContext) -> Result<(), AppError> {
+        self.write_task_checked(&self.agent_task_path(id), task)?;
+        let mut index: AgentsIndex = self
+            .read_toon(&self.agents_index_path())?
+            .unwrap_or_default();
+        if let Some(entry) = index.agents.iter_mut().find(|entry| entry.id == id) {
+            entry.stage = task.stage;
+            self.write_toon(&self.agents_index_path(), &index)?;
+        }
+        Ok(())
+    }
+
+    pub fn save_dialog_task(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        task: &TaskContext,
+    ) -> Result<(), AppError> {
+        let task_id = self.dialog_task_id(agent_id, session_id)?;
+        self.save_scoped_task(agent_id, &task_id, task)
+    }
+
+    pub fn load_scoped_task(&self, agent_id: &str, task_id: &str) -> Result<TaskContext, AppError> {
+        Ok(self
+            .read_toon(&self.agent_scoped_task_path(agent_id, task_id))?
+            .unwrap_or_default())
+    }
+
+    pub fn save_scoped_task(
+        &self,
+        agent_id: &str,
+        task_id: &str,
+        task: &TaskContext,
+    ) -> Result<(), AppError> {
+        self.write_task_checked(&self.agent_scoped_task_path(agent_id, task_id), task)
+    }
+
+    fn write_task_checked(&self, path: &Path, task: &TaskContext) -> Result<(), AppError> {
+        let current: TaskContext = self.read_toon(path)?.unwrap_or_default();
+        if current.revision != task.revision {
+            return Err(AppError::InvalidInput(format!(
+                "Task state conflict: expected revision {}, current revision {}. Reload the task before saving.",
+                task.revision, current.revision
+            )));
+        }
+        let mut next = task.clone();
+        next.revision = current.revision.saturating_add(1);
+        self.write_toon(path, &next)
+    }
+
+    pub fn dialog_task_id(&self, agent_id: &str, session_id: &str) -> Result<String, AppError> {
+        let index: DialogsIndex = self
+            .read_toon(&self.agent_dialogs_path(agent_id))?
+            .unwrap_or_default();
+        Ok(index
+            .dialogs
+            .iter()
+            .find(|dialog| dialog.id == session_id)
+            .map(|dialog| dialog.task_id.trim())
+            .filter(|task_id| !task_id.is_empty())
+            .unwrap_or("default")
+            .to_string())
+    }
+
+    pub fn assign_dialog_task(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        task_id: &str,
+    ) -> Result<(), AppError> {
+        let path = self.agent_dialogs_path(agent_id);
+        let mut index: DialogsIndex = self.read_toon(&path)?.unwrap_or_default();
+        let task_id = task_id.trim();
+        let task_id = if task_id.is_empty() {
+            "default"
+        } else {
+            task_id
+        };
+        let now = unix_now();
+        if let Some(entry) = index.dialogs.iter_mut().find(|d| d.id == session_id) {
+            entry.task_id = task_id.to_string();
+            entry.updated_at_unix = now;
+        } else {
+            index.dialogs.push(DialogMeta {
+                id: session_id.to_string(),
+                task_id: task_id.to_string(),
+                title: String::new(),
+                created_at_unix: now,
+                updated_at_unix: now,
+            });
+        }
+        self.write_toon(&path, &index)
+    }
+
+    pub fn load_profile(&self, id: &str) -> Result<AgentProfile, AppError> {
+        Ok(self
+            .read_toon(&self.agent_profile_path(id))?
+            .unwrap_or_default())
+    }
+
+    pub fn save_profile(&self, id: &str, profile: &AgentProfile) -> Result<(), AppError> {
+        self.write_toon(&self.agent_profile_path(id), profile)
+    }
+
+    pub fn list_user_profiles(&self) -> Result<Vec<UserProfile>, AppError> {
+        let index: UserProfilesIndex = self
+            .read_toon(&self.user_profiles_index_path())?
+            .unwrap_or_default();
+        let mut profiles = index.profiles;
+        profiles.sort_by(|left, right| right.updated_at_unix.cmp(&left.updated_at_unix));
+        Ok(profiles)
+    }
+
+    pub fn load_user_profile(&self, id: &str) -> Result<Option<UserProfile>, AppError> {
+        let id = id.trim();
+        if id.is_empty() {
+            return Ok(None);
+        }
+        Ok(self
+            .list_user_profiles()?
+            .into_iter()
+            .find(|profile| profile.id == id))
+    }
+
+    pub fn save_user_profile(&self, profile: &UserProfile) -> Result<(), AppError> {
+        if profile.id.trim().is_empty() {
+            return Err(AppError::InvalidInput(
+                "User profile id is required".to_string(),
+            ));
+        }
+        let mut saved = profile.clone();
+        saved.id = saved.id.trim().to_string();
+        saved.display_name = saved.display_name.trim().to_string();
+        if saved.display_name.is_empty() {
+            saved.display_name = saved.id.clone();
+        }
+        let mut index: UserProfilesIndex = self
+            .read_toon(&self.user_profiles_index_path())?
+            .unwrap_or_default();
+        if let Some(existing) = index.profiles.iter_mut().find(|entry| entry.id == saved.id) {
+            *existing = saved;
+        } else {
+            index.profiles.push(saved);
+        }
+        self.write_toon(&self.user_profiles_index_path(), &index)
+    }
+
+    pub fn delete_user_profile(&self, id: &str) -> Result<(), AppError> {
+        let id = id.trim();
+        let mut index: UserProfilesIndex = self
+            .read_toon(&self.user_profiles_index_path())?
+            .unwrap_or_default();
+        index.profiles.retain(|entry| entry.id != id);
+        self.write_toon(&self.user_profiles_index_path(), &index)?;
+        let mut bindings = self.load_user_profile_bindings()?;
+        if bindings.active_profile_id == id {
+            bindings.active_profile_id.clear();
+        }
+        bindings
+            .default_profile_per_agent
+            .retain(|_, profile_id| profile_id != id);
+        self.save_user_profile_bindings(&bindings)
+    }
+
+    pub fn load_user_profile_bindings(&self) -> Result<UserProfileBindings, AppError> {
+        Ok(self
+            .read_toon(&self.user_profile_bindings_path())?
+            .unwrap_or_default())
+    }
+
+    pub fn save_user_profile_bindings(
+        &self,
+        bindings: &UserProfileBindings,
+    ) -> Result<(), AppError> {
+        self.write_toon(&self.user_profile_bindings_path(), bindings)
+    }
+
+    pub fn resolve_user_profile(
+        &self,
+        explicit_profile_id: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> Result<Option<UserProfile>, AppError> {
+        let bindings = self.load_user_profile_bindings()?;
+        let selected = explicit_profile_id
+            .and_then(blank_str_to_none)
+            .map(str::to_string)
+            .or_else(|| {
+                agent_id
+                    .and_then(blank_str_to_none)
+                    .and_then(|id| bindings.default_profile_per_agent.get(id).cloned())
+            })
+            .or_else(|| blank_str_to_none(&bindings.active_profile_id).map(str::to_string));
+        match selected {
+            Some(id) => self.load_user_profile(&id),
+            None => Ok(None),
+        }
+    }
+
+    /// All dialogs (chats) of an agent, newest first.
+    pub fn list_dialogs(&self, agent_id: &str) -> Result<Vec<DialogMeta>, AppError> {
+        let index: DialogsIndex = self
+            .read_toon(&self.agent_dialogs_path(agent_id))?
+            .unwrap_or_default();
+        let mut dialogs = index.dialogs;
+        dialogs.sort_by(|left, right| right.updated_at_unix.cmp(&left.updated_at_unix));
+        Ok(dialogs)
+    }
+
+    /// Upsert a dialog into the agent's index and bump its `updated_at`. The title
+    /// is only set when empty (first message), so later turns don't overwrite it.
+    pub fn register_dialog(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        title: &str,
+    ) -> Result<(), AppError> {
+        let path = self.agent_dialogs_path(agent_id);
+        let mut index: DialogsIndex = self.read_toon(&path)?.unwrap_or_default();
+        let now = unix_now();
+        let title = title.trim();
+        if let Some(entry) = index.dialogs.iter_mut().find(|d| d.id == session_id) {
+            entry.updated_at_unix = now;
+            if entry.title.trim().is_empty() && !title.is_empty() {
+                entry.title = title.to_string();
+            }
+        } else {
+            index.dialogs.push(DialogMeta {
+                id: session_id.to_string(),
+                task_id: default_task_id(),
+                title: title.to_string(),
+                created_at_unix: now,
+                updated_at_unix: now,
+            });
+        }
+        self.write_toon(&path, &index)
+    }
+
+    pub fn rename_dialog(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        title: &str,
+    ) -> Result<(), AppError> {
+        let path = self.agent_dialogs_path(agent_id);
+        let mut index: DialogsIndex = self.read_toon(&path)?.unwrap_or_default();
+        if let Some(entry) = index.dialogs.iter_mut().find(|d| d.id == session_id) {
+            entry.title = title.trim().to_string();
+            entry.updated_at_unix = unix_now();
+        }
+        self.write_toon(&path, &index)
+    }
+
+    /// Remove a dialog: its session/metrics/memory files and its index entry.
+    pub fn delete_dialog(&self, agent_id: &str, session_id: &str) -> Result<(), AppError> {
+        for path in [
+            self.session_path(session_id),
+            self.metrics_path(session_id),
+            self.memory_path(session_id),
+        ] {
+            if path.exists() {
+                fs::remove_file(&path)
+                    .map_err(|error| config_error(path, format!("delete failed: {error}")))?;
+            }
+        }
+        let path = self.agent_dialogs_path(agent_id);
+        let mut index: DialogsIndex = self.read_toon(&path)?.unwrap_or_default();
+        index.dialogs.retain(|d| d.id != session_id);
+        self.write_toon(&path, &index)
+    }
+
+    fn agent_dialogs_path(&self, agent_id: &str) -> PathBuf {
+        self.sessions_dir()
+            .join(format!("agent-{}.dialogs.toon", safe_key(agent_id)))
+    }
+
+    fn agent_path(&self, id: &str) -> PathBuf {
+        self.sessions_dir()
+            .join(format!("agent-{}.agent.toon", safe_key(id)))
+    }
+
+    fn agent_task_path(&self, id: &str) -> PathBuf {
+        self.sessions_dir()
+            .join(format!("agent-{}.task.toon", safe_key(id)))
+    }
+
+    fn agent_scoped_task_path(&self, agent_id: &str, task_id: &str) -> PathBuf {
+        self.sessions_dir().join(format!(
+            "agent-{}.task-{}.toon",
+            safe_key(agent_id),
+            safe_key(task_id)
+        ))
+    }
+
+    fn agent_profile_path(&self, id: &str) -> PathBuf {
+        self.sessions_dir()
+            .join(format!("agent-{}.profile.toon", safe_key(id)))
+    }
+
+    fn agents_index_path(&self) -> PathBuf {
+        self.sessions_dir().join("agents-index.toon")
+    }
+
+    fn user_profiles_index_path(&self) -> PathBuf {
+        self.sessions_dir().join("user-profiles-index.toon")
+    }
+
+    fn user_profile_bindings_path(&self) -> PathBuf {
+        self.sessions_dir().join("user-profile-bindings.toon")
+    }
+
+    /// Atomic TOON write (temp file + rename), creating the data dir as needed.
+    fn write_toon<T: serde::Serialize>(&self, path: &Path, value: &T) -> Result<(), AppError> {
+        fs::create_dir_all(self.sessions_dir()).map_err(|error| {
+            config_error(
+                self.sessions_dir(),
+                format!("could not create directory: {error}"),
+            )
+        })?;
+        let temp_path = path.with_extension("toon.tmp");
+        {
+            let mut file = fs::File::create(&temp_path).map_err(|error| {
+                config_error(temp_path.clone(), format!("create failed: {error}"))
+            })?;
+            let raw = crate::toon_codec::to_string(value)?;
+            writeln!(file, "{raw}").map_err(|error| {
+                config_error(temp_path.clone(), format!("write failed: {error}"))
+            })?;
+        }
+        fs::rename(&temp_path, path)
+            .map_err(|error| config_error(path, format!("could not replace file: {error}")))
+    }
+
+    /// Read a TOON (with JSON fallback) value, `None` when the file is absent.
+    fn read_toon<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &Path,
+    ) -> Result<Option<T>, AppError> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let raw = fs::read_to_string(path)
+            .map_err(|error| config_error(path, format!("read failed: {error}")))?;
+        crate::toon_codec::from_str_or_json::<T>(&raw).map(Some)
     }
 
     pub fn topic_file_storage(&self, session_id: &str) -> Result<TopicFileStorage, AppError> {
@@ -592,197 +1100,5 @@ fn config_error(path: impl AsRef<Path>, message: String) -> AppError {
     AppError::Config {
         path: path.as_ref().to_path_buf(),
         message,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::providers::{CostSource, Role};
-
-    #[test]
-    fn local_session_store_roundtrips_messages() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let store = LocalSessionStore::from_root(dir.path().join("sessions"));
-        let session = store.create_session().expect("create session");
-        let messages = vec![
-            ChatMessage {
-                role: Role::User,
-                content: "hello".to_string(),
-            },
-            ChatMessage {
-                role: Role::Assistant,
-                content: "hi".to_string(),
-            },
-        ];
-
-        store
-            .save_session("profile:model", &session.id, &messages)
-            .expect("save session");
-        let loaded = store
-            .load_or_create_latest("profile:model")
-            .expect("load latest");
-
-        assert_eq!(loaded.id, session.id);
-        assert_eq!(loaded.messages, messages);
-        assert_eq!(loaded.metrics, RequestMetrics::default());
-    }
-
-    #[test]
-    fn local_session_store_roundtrips_metrics_sidecar() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let store = LocalSessionStore::from_root(dir.path().join("sessions"));
-        let session = store.create_session().expect("create session");
-        let metrics = RequestMetrics {
-            elapsed_ms: 123,
-            usage: Some(TokenUsage {
-                input_tokens: 10,
-                output_tokens: 20,
-                total_tokens: 30,
-                cache_hit_input_tokens: Some(4),
-                cache_miss_input_tokens: Some(6),
-                ..TokenUsage::default()
-            }),
-            cost: Some(RequestCost {
-                amount: 0.00042,
-                currency: "USD".to_string(),
-                source: CostSource::ConfiguredPricing,
-            }),
-        };
-
-        store
-            .save_metrics(&session.id, &metrics)
-            .expect("save metrics");
-        let loaded = store.load_metrics(&session.id).expect("load metrics");
-
-        assert_eq!(loaded, metrics);
-    }
-
-    #[test]
-    fn request_metrics_accumulate_usage_and_matching_costs() {
-        let total = RequestMetrics {
-            elapsed_ms: 100,
-            usage: Some(TokenUsage {
-                input_tokens: 10,
-                output_tokens: 5,
-                total_tokens: 15,
-                cache_hit_input_tokens: Some(3),
-                cache_miss_input_tokens: None,
-                output_reasoning_tokens: Some(4),
-                output_visible_tokens: Some(1),
-                ..TokenUsage::default()
-            }),
-            cost: Some(RequestCost {
-                amount: 0.001,
-                currency: "USD".to_string(),
-                source: CostSource::ConfiguredPricing,
-            }),
-        };
-        let request = RequestMetrics {
-            elapsed_ms: 200,
-            usage: Some(TokenUsage {
-                input_tokens: 7,
-                output_tokens: 11,
-                total_tokens: 18,
-                cache_hit_input_tokens: Some(2),
-                cache_miss_input_tokens: Some(5),
-                output_reasoning_tokens: Some(6),
-                output_visible_tokens: Some(5),
-                ..TokenUsage::default()
-            }),
-            cost: Some(RequestCost {
-                amount: 0.002,
-                currency: "USD".to_string(),
-                source: CostSource::ConfiguredPricing,
-            }),
-        };
-
-        let added = add_request_metrics(&total, &request);
-
-        assert_eq!(added.elapsed_ms, 300);
-        assert_eq!(
-            added.usage,
-            Some(TokenUsage {
-                input_tokens: 17,
-                output_tokens: 16,
-                total_tokens: 33,
-                cache_hit_input_tokens: Some(5),
-                cache_miss_input_tokens: Some(5),
-                output_reasoning_tokens: Some(10),
-                output_visible_tokens: Some(6),
-                ..TokenUsage::default()
-            })
-        );
-        assert_eq!(
-            added.cost,
-            Some(RequestCost {
-                amount: 0.003,
-                currency: "USD".to_string(),
-                source: CostSource::ConfiguredPricing,
-            })
-        );
-    }
-
-    #[test]
-    fn local_session_store_roundtrips_memory_sidecar() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let store = LocalSessionStore::from_root(dir.path().join("sessions"));
-        let session = store.create_session().expect("create session");
-        let memory = AgentMemory {
-            facts: Default::default(),
-            branch_assignments: Default::default(),
-            session_summary: Some("User prefers short technical answers.".to_string()),
-            summarized_message_count: 8,
-            ..AgentMemory::default()
-        };
-
-        store
-            .save_memory(&session.id, &memory)
-            .expect("save memory");
-        let loaded = store.load_memory(&session.id).expect("load memory");
-
-        assert_eq!(loaded, memory);
-    }
-
-    #[test]
-    fn local_session_store_roundtrips_topic_file() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let store = LocalSessionStore::from_root(dir.path().join("sessions"));
-        let session = store.create_session().expect("create session");
-        let topic_store = store.topic_file_storage(&session.id).expect("topic store");
-        let topic = TopicFile {
-            metadata: crate::chat::memory::TopicMetadata {
-                id: "rust async".to_string(),
-                title: "Rust async".to_string(),
-                short_description: "Ownership and async context.".to_string(),
-                tags: vec!["rust".to_string(), "async".to_string()],
-                message_count: 4,
-                updated_at_unix: 123,
-            },
-            context: "user: borrow checker\nassistant: use ownership boundaries".to_string(),
-        };
-
-        topic_store.save_topic_file(&topic).expect("save topic");
-        let loaded = topic_store
-            .load_topic_file("rust async")
-            .expect("load topic")
-            .expect("topic exists");
-
-        assert_eq!(loaded, topic);
-    }
-
-    #[test]
-    fn local_session_store_rejects_path_like_session_ids() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let store = LocalSessionStore::from_root(dir.path().join("sessions"));
-
-        assert!(matches!(
-            store.load_session("../secret"),
-            Err(AppError::InvalidInput(_))
-        ));
-        assert!(matches!(
-            store.load_session(""),
-            Err(AppError::InvalidInput(_))
-        ));
     }
 }

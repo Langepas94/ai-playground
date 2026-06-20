@@ -1,6 +1,43 @@
 use super::*;
 use async_trait::async_trait;
 
+#[test]
+fn requested_stage_respects_explicit_execution_deferral() {
+    assert_eq!(
+        requested_task_stage(
+            "Подготовить претензию. Заверши только текущую стадию, реализацию не начинай."
+        ),
+        Some(TaskStage::Planning)
+    );
+    assert_eq!(
+        requested_task_stage("Составь план, но не переходи к реализации."),
+        Some(TaskStage::Planning)
+    );
+    assert_eq!(
+        requested_task_stage("Подготовь и напиши готовую претензию."),
+        Some(TaskStage::Execution)
+    );
+}
+
+#[test]
+fn parse_extracted_facts_reads_agent_chosen_layer() {
+    // Preferred shape: explicit per-fact layer.
+    let facts = parse_extracted_facts(
+        r#"{"facts":[{"key":"goal","value":"ship","layer":"working"},{"key":"prefs","value":"concise","layer":"long-term"}]}"#,
+    )
+    .expect("parsed");
+    assert_eq!(facts.len(), 2);
+    assert_eq!(facts[0].key, "goal");
+    assert_eq!(facts[0].layer, Some(MemoryLayer::Working));
+    assert_eq!(facts[1].layer, Some(MemoryLayer::LongTerm));
+
+    // Legacy flat object still parses with no layer (→ default routing later).
+    let legacy = parse_extracted_facts(r#"{"favorite_color":"green","interests":"dogs"}"#)
+        .expect("legacy parsed");
+    assert_eq!(legacy.len(), 2);
+    assert!(legacy.iter().all(|fact| fact.layer.is_none()));
+}
+
 #[derive(Debug, Default)]
 struct FakeClient {
     replies: std::sync::Mutex<Vec<String>>,
@@ -74,6 +111,24 @@ impl ProviderClient for FakeClient {
     }
 }
 
+fn request_containing<'a>(seen: &'a [Vec<ChatMessage>], needle: &str) -> &'a [ChatMessage] {
+    seen.iter()
+        .find(|messages| {
+            messages
+                .last()
+                .is_some_and(|message| message.content == needle)
+        })
+        .or_else(|| {
+            seen.iter().find(|messages| {
+                messages
+                    .iter()
+                    .any(|message| message.content.contains(needle))
+            })
+        })
+        .map(Vec::as_slice)
+        .unwrap_or_else(|| panic!("request containing {needle:?} not found"))
+}
+
 fn test_profile() -> ProfileConfig {
     ProfileConfig {
         provider: crate::providers::ProviderKind::OpenAiCompatible,
@@ -81,6 +136,526 @@ fn test_profile() -> ProfileConfig {
         base_url: "https://example.test/v1".to_string(),
         token_ref: "openai-compatible".to_string(),
     }
+}
+
+#[tokio::test]
+async fn agent_injects_working_and_long_term_blocks() {
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec!["ok".to_string()]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_memory_config(MemoryConfig {
+        strategy: MemoryStrategy::SlidingWindow,
+        recent_messages: 4,
+        ..MemoryConfig::default()
+    });
+    agent.set_task_state(Some(crate::chat::store::TaskContext {
+        stage: crate::chat::store::TaskStage::Planning,
+        current_step: "change TaskContext serialization".to_string(),
+        expected_action: "agent_work".to_string(),
+        paused: false,
+        resume_hint: "continue from state machine tests".to_string(),
+        title: "ship agents".to_string(),
+        goal: "persist settings".to_string(),
+        ..crate::chat::store::TaskContext::default()
+    }));
+    agent.set_agent_profile(Some(crate::chat::store::AgentProfile {
+        fields: vec![crate::chat::store::ProfileField {
+            key: "stack".to_string(),
+            question: "Which stack?".to_string(),
+            required: true,
+            value: "Rust".to_string(),
+        }],
+        updated_at_unix: 0,
+    }));
+    agent.set_invariants(vec!["Only Rust".to_string()]);
+    agent.set_domain("rust backend assistant");
+
+    agent
+        .respond(&client, "hi".to_string())
+        .await
+        .expect("respond");
+
+    let seen = client.seen_messages.lock().unwrap();
+    let joined = seen[0]
+        .iter()
+        .map(|message| message.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("[memory:working]"), "working block missing");
+    assert!(joined.contains("Stage: planning"));
+    assert!(joined.contains("Paused: false"));
+    assert!(joined.contains("Current step: change TaskContext serialization"));
+    assert!(joined.contains("Expected action: agent_work"));
+    assert!(joined.contains("Resume hint: continue from state machine tests"));
+    assert!(joined.contains("ship agents"));
+    assert!(
+        joined.contains("[memory:long-term]"),
+        "long-term block missing"
+    );
+    assert!(joined.contains("stack: Rust"));
+    assert!(joined.contains("[invariants]"), "invariants block missing");
+    assert!(joined.contains("Only Rust"));
+    assert!(joined.contains("[agent:domain]"), "domain block missing");
+    assert!(
+        joined.contains("do not treat it as a refusal policy"),
+        "domain should not become a hard refusal boundary"
+    );
+}
+
+#[tokio::test]
+async fn runtime_user_profile_is_separate_payload_block() {
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec!["ok".to_string()]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_domain("coding-agent");
+    agent.set_user_profile(Some(crate::chat::store::UserProfile {
+        id: "artem-short-russian".to_string(),
+        display_name: "Artem short Russian".to_string(),
+        style_preferences: vec!["be concise".to_string()],
+        language_preferences: vec!["Russian".to_string()],
+        response_length: "short".to_string(),
+        custom_instructions: "avoid tables unless requested".to_string(),
+        ..crate::chat::store::UserProfile::default()
+    }));
+
+    agent
+        .respond(&client, "answer in detail this time".to_string())
+        .await
+        .expect("respond");
+
+    let seen = client.seen_messages.lock().unwrap();
+    let messages = request_containing(&seen, "answer in detail this time");
+    let joined = messages
+        .iter()
+        .map(|message| message.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("[agent:domain]"), "agent block missing");
+    assert!(
+        joined.contains("[user-profile]"),
+        "runtime user profile block missing"
+    );
+    assert!(joined.contains("be concise"));
+    assert!(joined.contains("Russian"));
+    assert!(
+        joined.contains("Do not change the agent identity, tools, workflow, or capabilities"),
+        "profile must not alter agent capabilities"
+    );
+    assert!(
+        joined.contains("current user request explicitly conflicts with this profile"),
+        "profile block must document user override precedence"
+    );
+    assert_eq!(
+        messages.last().expect("last").content,
+        "answer in detail this time"
+    );
+}
+
+#[tokio::test]
+async fn same_agent_can_use_different_user_profiles_at_runtime() {
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec!["two".to_string(), "one".to_string()]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let make_profile = |id: &str, style: &str| crate::chat::store::UserProfile {
+        id: id.to_string(),
+        display_name: id.to_string(),
+        style_preferences: vec![style.to_string()],
+        ..crate::chat::store::UserProfile::default()
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    disable_swarm_memory(&mut agent);
+    agent.set_domain("support-agent");
+    agent.set_user_profile(Some(make_profile("manager-detailed", "give details")));
+    agent
+        .respond(&client, "status?".to_string())
+        .await
+        .expect("first");
+    agent.set_user_profile(Some(make_profile("beginner-friendly", "explain gently")));
+    agent
+        .respond(&client, "status?".to_string())
+        .await
+        .expect("second");
+
+    let seen = client.seen_messages.lock().unwrap();
+    let first = seen[0]
+        .iter()
+        .map(|message| message.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let second = seen[1]
+        .iter()
+        .map(|message| message.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(first.contains("give details"));
+    assert!(!first.contains("explain gently"));
+    assert!(second.contains("explain gently"));
+    assert!(second.contains("[agent:domain] Specialization/background: support-agent"));
+}
+
+#[tokio::test]
+async fn user_profile_stays_lower_priority_than_agent_context() {
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec!["ok".to_string()]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_domain("Rust backend agent");
+    agent.set_invariants(vec!["Answer only in Russian".to_string()]);
+    agent.set_user_profile(Some(crate::chat::store::UserProfile {
+        id: "english-detailed".to_string(),
+        display_name: "English detailed".to_string(),
+        language_preferences: vec!["Always answer in English".to_string()],
+        response_length: "very detailed".to_string(),
+        ..crate::chat::store::UserProfile::default()
+    }));
+
+    agent
+        .respond(&client, "explain lifetimes".to_string())
+        .await
+        .expect("respond");
+
+    let seen = client.seen_messages.lock().unwrap();
+    let messages = request_containing(&seen, "explain lifetimes");
+    let domain_index = messages
+        .iter()
+        .position(|message| message.content.contains("[agent:domain]"))
+        .expect("domain block");
+    let invariants_index = messages
+        .iter()
+        .position(|message| message.content.contains("[invariants]"))
+        .expect("invariants block");
+    let user_profile_index = messages
+        .iter()
+        .position(|message| message.content.contains("[user-profile]"))
+        .expect("user profile block");
+
+    assert!(domain_index < user_profile_index);
+    assert!(invariants_index < user_profile_index);
+    assert!(
+        messages[user_profile_index]
+            .content
+            .contains("apply this profile to style, format, language"),
+        "profile block should be scoped to presentation preferences"
+    );
+    assert!(
+        messages[user_profile_index]
+            .content
+            .contains("Do not change the agent identity, tools, workflow, or capabilities"),
+        "profile must not override agent identity or capabilities"
+    );
+}
+
+#[tokio::test]
+async fn empty_user_profile_is_not_injected() {
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec!["ok".to_string()]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_user_profile(Some(crate::chat::store::UserProfile::default()));
+
+    agent
+        .respond(&client, "hello".to_string())
+        .await
+        .expect("respond");
+
+    let seen = client.seen_messages.lock().unwrap();
+    assert!(
+        request_containing(&seen, "hello")
+            .iter()
+            .all(|message| !message.content.contains("[user-profile]")),
+        "empty profile should not add an inert prompt block"
+    );
+}
+
+#[test]
+fn task_block_keeps_tracked_task_as_context_not_a_gate() {
+    let block = render_task_block(&crate::chat::store::TaskContext {
+        stage: crate::chat::store::TaskStage::Clarify,
+        title: "name pizzeria".to_string(),
+        goal: "invent a pizzeria name".to_string(),
+        ..crate::chat::store::TaskContext::default()
+    });
+
+    assert!(block.contains("[memory:working]"));
+    assert!(block.contains("Stage: clarify"));
+    assert!(block.contains("Paused: false"));
+    assert!(block.contains("authoritative working memory for the tracked task"));
+    assert!(block.contains("Treat fragmentary follow-up messages as continuation"));
+    assert!(block.contains("do not skip stages"));
+    assert!(
+        block.contains("unless the user clearly starts an unrelated one"),
+        "working memory must preserve adjacent-dialog escape hatch"
+    );
+}
+
+#[test]
+fn task_block_injects_pipeline_stage_prompts_workers_and_artifacts() {
+    let block = render_task_block(&crate::chat::store::TaskContext {
+        stage: crate::chat::store::TaskStage::Planning,
+        current_step: "run research workers".to_string(),
+        expected_action: "agent_work".to_string(),
+        pipeline: vec![
+            crate::chat::store::TaskPipelineStage {
+                stage: crate::chat::store::TaskStage::Planning,
+                name: "Research".to_string(),
+                system_prompt: "Research legal context before drafting.".to_string(),
+                artifact_key: "research_conclusion".to_string(),
+                worker_agents: vec![
+                    crate::chat::store::TaskWorkerAgent {
+                        id: "ru-law".to_string(),
+                        direction: "russian_law".to_string(),
+                        system_prompt: "Analyze Russian contract law.".to_string(),
+                    },
+                    crate::chat::store::TaskWorkerAgent {
+                        id: "patent-law".to_string(),
+                        direction: "patent".to_string(),
+                        system_prompt: "Analyze patent/IP constraints.".to_string(),
+                    },
+                ],
+                ..crate::chat::store::TaskPipelineStage::default()
+            },
+            crate::chat::store::TaskPipelineStage {
+                stage: crate::chat::store::TaskStage::Execution,
+                name: "Create".to_string(),
+                system_prompt: "Write the contract from the research artifact.".to_string(),
+                artifact_key: "contract_draft".to_string(),
+                requires_human_approval: true,
+                ..crate::chat::store::TaskPipelineStage::default()
+            },
+        ],
+        artifacts: vec![crate::chat::store::TaskArtifact {
+            stage: crate::chat::store::TaskStage::Planning,
+            key: "research_conclusion".to_string(),
+            value: "Russian law ok; patent risk noted".to_string(),
+        }],
+        ..crate::chat::store::TaskContext::default()
+    });
+
+    assert!(block.contains("Pipeline contract:"));
+    assert!(block.contains("- Research (planning) -> artifact: research_conclusion"));
+    assert!(block.contains("system_prompt: Research legal context before drafting."));
+    assert!(block.contains("ru-law [russian_law] prompt: Analyze Russian contract law."));
+    assert!(block.contains("patent-law [patent] prompt: Analyze patent/IP constraints."));
+    assert!(
+        block
+            .contains("- Create (execution) [requires human approval] -> artifact: contract_draft")
+    );
+    assert!(block.contains("Pipeline artifacts:"));
+    assert!(block.contains("planning:research_conclusion = Russian law ok; patent risk noted"));
+}
+
+#[tokio::test]
+async fn paused_task_resume_context_is_injected_without_reexplaining() {
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec![
+            r#"{"stage":"execution","current_step":"run validation checks","expected_action":"agent_work","resume_hint":"continue from cargo test failure analysis"}"#.to_string(),
+            "Continuing from the saved validation checks.".to_string(),
+        ]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_task_state(Some(crate::chat::store::TaskContext {
+        stage: crate::chat::store::TaskStage::Execution,
+        current_step: "run validation checks".to_string(),
+        expected_action: "agent_work".to_string(),
+        paused: true,
+        resume_hint: "continue from cargo test failure analysis".to_string(),
+        ..crate::chat::store::TaskContext::default()
+    }));
+
+    let answer = agent
+        .respond(&client, "Продолжай".to_string())
+        .await
+        .expect("respond");
+    assert!(!answer.text.to_ascii_lowercase().contains("restate"));
+    assert!(!answer.text.to_ascii_lowercase().contains("explain again"));
+
+    assert!(answer.text.contains("Задача возобновлена"));
+    assert!(
+        client.seen_messages.lock().unwrap().is_empty(),
+        "resume is a durable local lifecycle action"
+    );
+
+    // Resume now happens deterministically inside respond (orchestrator).
+    let report = agent.take_stateful_report();
+    assert_eq!(report.stage, Some(crate::chat::store::TaskStage::Execution));
+    assert_eq!(report.current_step, "run validation checks");
+    assert_eq!(report.expected_action, "agent_work");
+    assert!(!report.paused);
+    let task = agent.task_state().expect("task");
+    assert!(!task.paused);
+    assert_eq!(task.current_step, "run validation checks");
+    assert_eq!(task.expected_action, "agent_work");
+}
+
+#[tokio::test]
+async fn restored_task_state_is_injected_into_new_agent_request() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("sessions");
+    let store = crate::chat::store::LocalSessionStore::from_root(root.clone());
+    store
+        .save_session(
+            "agent:app-agent",
+            "planning-window",
+            &[ChatMessage {
+                role: Role::User,
+                content: "Хочу создать приложение".to_string(),
+            }],
+        )
+        .expect("save session");
+    store
+        .save_dialog_task(
+            "app-agent",
+            "planning-window",
+            &crate::chat::store::TaskContext {
+                stage: crate::chat::store::TaskStage::Execution,
+                current_step: "create application shell".to_string(),
+                expected_action: "agent_work".to_string(),
+                paused: true,
+                resume_hint: "name and plan approved; continue implementation".to_string(),
+                title: "create application".to_string(),
+                goal: "build the approved application".to_string(),
+                ..crate::chat::store::TaskContext::default()
+            },
+        )
+        .expect("save task");
+
+    let restarted_store = crate::chat::store::LocalSessionStore::from_root(root);
+    let restored_task = restarted_store
+        .load_dialog_task("app-agent", "any-window")
+        .expect("load shared task");
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec!["Continuing implementation.".to_string()]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_task_state(Some(restored_task));
+
+    agent
+        .respond(&client, "Продолжай".to_string())
+        .await
+        .expect("respond");
+
+    assert!(
+        client.seen_messages.lock().unwrap().is_empty(),
+        "restored resume must not depend on a provider call"
+    );
+    let task = agent.task_state().expect("task");
+    assert_eq!(task.stage, crate::chat::store::TaskStage::Execution);
+    assert!(!task.paused);
+    assert_eq!(task.current_step, "create application shell");
+}
+
+#[tokio::test]
+async fn paused_task_resumes_when_user_supplies_expected_info_without_command_word() {
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec![
+            r#"{"stage":"planning","current_step":"уточнить реквизиты договора","expected_action":"user_input","resume_hint":"continue from contract details"}"#.to_string(),
+        ]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_task_state(Some(crate::chat::store::TaskContext {
+        stage: crate::chat::store::TaskStage::Planning,
+        current_step: "уточнить реквизиты договора".to_string(),
+        expected_action: "user_input".to_string(),
+        paused: true,
+        resume_hint: "ждём реквизиты договора".to_string(),
+        goal: "подготовить досудебную претензию".to_string(),
+        ..crate::chat::store::TaskContext::default()
+    }));
+
+    agent
+        .respond(
+            &client,
+            "Нашёл договор: номер 12 от 1 апреля, заказчик ООО Ромашка.".to_string(),
+        )
+        .await
+        .expect("respond");
+    let report = agent.take_stateful_report();
+
+    assert_eq!(report.stage, Some(crate::chat::store::TaskStage::Planning));
+    assert!(!report.paused);
+    assert!(!agent.task_state().expect("task").paused);
 }
 
 #[tokio::test]
@@ -114,6 +689,7 @@ async fn sliding_window_sends_only_recent_messages_and_keeps_history() {
         recent_messages: 2,
         ..MemoryConfig::default()
     });
+    disable_swarm_memory(&mut agent);
 
     agent
         .respond(&client, "current question".to_string())
@@ -184,6 +760,57 @@ async fn sticky_facts_updates_before_request_and_sends_facts_block() {
     );
     assert!(seen[0][1].content.contains("preferences: Отвечай кратко"));
     assert!(agent.memory().facts.contains_key("goal"));
+}
+
+#[tokio::test]
+async fn saved_long_term_facts_are_sent_with_default_strategy() {
+    let client = FakeClient {
+        replies: std::sync::Mutex::new(vec!["answer".to_string()]),
+        metrics: std::sync::Mutex::new(Vec::new()),
+        seen_messages: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut memory = AgentMemory::default();
+    memory.set_fact_in_layer(
+        "project_context".to_string(),
+        "Пиццерия находится в Волгограде; город должен фигурировать в названии.".to_string(),
+        MemoryLayer::LongTerm,
+    );
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        memory,
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    agent.set_memory_config(MemoryConfig {
+        strategy: MemoryStrategy::SlidingWindow,
+        recent_messages: 4,
+        ..MemoryConfig::default()
+    });
+
+    agent
+        .respond(
+            &client,
+            "Помоги придумать название, город обязательно должен фигурировать.".to_string(),
+        )
+        .await
+        .expect("response");
+
+    let seen = client.seen_messages.lock().expect("seen messages");
+    let joined = seen[0]
+        .iter()
+        .map(|message| message.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        joined.contains("FACTS_KV:"),
+        "persisted facts block must be sent even outside Sticky Facts"
+    );
+    assert!(joined.contains("[long-term]"));
+    assert!(joined.contains("project_context"));
+    assert!(joined.contains("Волгограде"));
 }
 
 #[tokio::test]
@@ -508,6 +1135,7 @@ async fn summary_strategy_compacts_old_history_after_response() {
         summary_chunk_messages: 4,
         ..MemoryConfig::default()
     });
+    disable_swarm_memory(&mut agent);
 
     agent
         .respond(&client, "current question".to_string())
@@ -570,6 +1198,7 @@ async fn summary_strategy_sends_custom_summary_prompt_to_provider() {
         summary_prompt: "CUSTOM SUMMARY PROMPT".to_string(),
         ..MemoryConfig::default()
     });
+    disable_swarm_memory(&mut agent);
 
     agent
         .respond(&client, "current question".to_string())
@@ -660,6 +1289,7 @@ async fn branching_strategy_uses_current_branch_history_only() {
         recent_messages: 8,
         ..MemoryConfig::default()
     });
+    disable_swarm_memory(&mut agent);
 
     agent
         .respond(&client, "continue branch A".to_string())
@@ -682,7 +1312,7 @@ async fn branching_strategy_uses_current_branch_history_only() {
 
 #[tokio::test]
 async fn branching_keeps_two_branches_independent_from_same_checkpoint() {
-    let checkpoint = vec![
+    let checkpoint = [
         ChatMessage {
             role: Role::User,
             content: "checkpoint question".to_string(),
@@ -731,6 +1361,7 @@ async fn branching_keeps_two_branches_independent_from_same_checkpoint() {
         None,
     );
     branch_a.set_memory_config(config.clone());
+    disable_swarm_memory(&mut branch_a);
     let mut branch_b = ChatAgent::new(
         test_profile(),
         "secret".to_string(),
@@ -741,6 +1372,7 @@ async fn branching_keeps_two_branches_independent_from_same_checkpoint() {
         None,
     );
     branch_b.set_memory_config(config);
+    disable_swarm_memory(&mut branch_b);
 
     branch_a
         .respond(&client, "continue A".to_string())
@@ -798,6 +1430,7 @@ async fn scoped_branches_keep_one_session_but_filter_provider_context() {
         scoped_auto_route: false,
         ..MemoryConfig::default()
     });
+    disable_swarm_memory(&mut agent);
     agent
         .respond(&client, "alpha question".to_string())
         .await
@@ -998,6 +1631,7 @@ async fn topic_file_routing_classifies_with_metadata_and_loads_only_selected_top
         topic_auto_create: false,
         ..MemoryConfig::default()
     });
+    disable_swarm_memory(&mut agent);
 
     agent
         .respond(&client, "Rust async followup".to_string())
@@ -1288,10 +1922,11 @@ async fn agent_uses_custom_system_prompt_without_default_agent_prompt() {
         .expect("response");
 
     let seen = client.seen_messages.lock().expect("seen messages");
-    assert_eq!(seen[0].len(), 2);
-    assert_eq!(seen[0][0].role, Role::System);
-    assert_eq!(seen[0][0].content, "Ты эксперт по Civilization 6.");
-    assert_eq!(seen[0][1].content, "Как играть за Византию?");
+    let request = request_containing(&seen, "Как играть за Византию?");
+    assert_eq!(request.len(), 2);
+    assert_eq!(request[0].role, Role::System);
+    assert_eq!(request[0].content, "Ты эксперт по Civilization 6.");
+    assert_eq!(request[1].content, "Как играть за Византию?");
 }
 
 #[test]
@@ -1381,4 +2016,545 @@ fn agent_context_limit_can_be_updated() {
     assert!(agent.context_limit().is_none());
     agent.set_context_limit(Some(8192));
     assert_eq!(agent.context_limit(), Some(8192));
+}
+
+/// Force the Memory sub-agent onto the local keyword fallback so focused
+/// strategy/context tests do not pay for the always-on extraction LLM call.
+fn disable_swarm_memory(agent: &mut ChatAgent) {
+    let mut config = agent.memory_config();
+    config.facts_extraction_prompt.clear();
+    agent.set_memory_config(config);
+}
+
+// --- Swarm: Memory sub-agent ---------------------------------------------
+
+/// Records the model of every request so per-role overrides can be asserted.
+#[derive(Debug, Default)]
+struct RecordingClient {
+    replies: std::sync::Mutex<Vec<String>>,
+    seen_models: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl ProviderClient for RecordingClient {
+    async fn list_models(
+        &self,
+        _profile: &ProfileConfig,
+        _token: &str,
+    ) -> Result<Vec<String>, AppError> {
+        Ok(Vec::new())
+    }
+
+    async fn chat_completion(
+        &self,
+        _profile: &ProfileConfig,
+        _token: &str,
+        request: ChatRequest,
+    ) -> Result<ChatResponse, AppError> {
+        self.seen_models
+            .lock()
+            .expect("models")
+            .push(request.model.clone());
+        let text = self
+            .replies
+            .lock()
+            .expect("replies")
+            .pop()
+            .unwrap_or_else(|| "ok".to_string());
+        Ok(ChatResponse {
+            text,
+            finish_reason: Some("stop".to_string()),
+            metrics: crate::providers::RequestMetrics {
+                elapsed_ms: 1,
+                usage: None,
+                cost: None,
+            },
+        })
+    }
+
+    async fn chat_completion_with_debug(
+        &self,
+        profile: &ProfileConfig,
+        token: &str,
+        request: ChatRequest,
+    ) -> Result<(ChatResponse, ProviderExchangeDebug), AppError> {
+        let response = self.chat_completion(profile, token, request).await?;
+        Ok((
+            response,
+            ProviderExchangeDebug {
+                request: crate::providers::HttpDebugRequest {
+                    method: "POST".to_string(),
+                    url: "https://example.test/v1/chat/completions".to_string(),
+                    headers: Default::default(),
+                    body: serde_json::json!({}),
+                },
+                response: crate::providers::HttpDebugResponse {
+                    status: 200,
+                    headers: Default::default(),
+                    body: serde_json::json!({}),
+                },
+            },
+        ))
+    }
+}
+
+fn summary_agent() -> ChatAgent {
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+    // Summary strategy: extraction is NOT part of this context builder, yet the
+    // Memory sub-agent must still run (the bug being fixed).
+    agent.set_memory_config(MemoryConfig {
+        strategy: MemoryStrategy::Summary,
+        ..MemoryConfig::default()
+    });
+    agent
+}
+
+#[tokio::test]
+async fn memory_agent_updates_long_term_on_summary_strategy() {
+    // Calls per turn (Summary strategy, no context pressure): main, then
+    // post-turn extraction. `replies.pop()` is LIFO, so push extraction first,
+    // main last (main pops first).
+    let client = RecordingClient {
+        replies: std::sync::Mutex::new(vec![
+            r#"{"facts":[{"key":"location","value":"Берлин","layer":"long-term"}]}"#.to_string(),
+            "Главный ответ".to_string(),
+        ]),
+        seen_models: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = summary_agent();
+
+    agent
+        .respond(&client, "Я переехал в Берлин".to_string())
+        .await
+        .expect("respond");
+
+    assert_eq!(
+        agent.memory().facts.get("location").map(String::as_str),
+        Some("Берлин"),
+    );
+    assert_eq!(
+        agent.memory().fact_layer("location"),
+        MemoryLayer::LongTerm,
+        "the moved fact must land in long-term so it survives a new session",
+    );
+}
+
+#[tokio::test]
+async fn memory_agent_persisted_disabled_config_still_extracts() {
+    let client = RecordingClient {
+        replies: std::sync::Mutex::new(vec![
+            r#"{"facts":[{"key":"location","value":"Берлин","layer":"long-term"}]}"#.to_string(),
+            "Главный ответ".to_string(),
+        ]),
+        seen_models: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = summary_agent();
+
+    // Old saved configs may contain enabled=false, but swarm roles are
+    // mandatory and must still run.
+    let config = crate::chat::SwarmConfig {
+        agents: vec![crate::chat::SubAgentConfig {
+            role: crate::chat::SubAgentRole::Memory,
+            enabled: false,
+            ..crate::chat::SubAgentConfig::inherit(crate::chat::SubAgentRole::Memory)
+        }],
+    };
+    let resolved = crate::chat::resolve_swarm(
+        &test_profile(),
+        "secret",
+        &config,
+        &crate::config::AppConfig::default(),
+        &crate::secrets::MemorySecretStore::default(),
+    );
+    agent.set_swarm(resolved);
+
+    agent
+        .respond(&client, "Я переехал в Берлин".to_string())
+        .await
+        .expect("respond");
+
+    assert_eq!(client.seen_models.lock().expect("models").len(), 2);
+    assert_eq!(
+        agent.memory().facts.get("location").map(String::as_str),
+        Some("Берлин")
+    );
+}
+
+#[tokio::test]
+async fn memory_agent_uses_its_own_model_override() {
+    let client = RecordingClient {
+        replies: std::sync::Mutex::new(vec![
+            r#"{"facts":[{"key":"location","value":"Берлин","layer":"long-term"}]}"#.to_string(),
+            "Главный ответ".to_string(),
+        ]),
+        seen_models: std::sync::Mutex::new(Vec::new()),
+    };
+    let mut agent = summary_agent();
+
+    // Memory sub-agent gets a cheap model; same provider → reuses main token.
+    let mut config = crate::chat::SwarmConfig::defaults();
+    config.set(crate::chat::SubAgentConfig {
+        model: "cheap-extractor".to_string(),
+        ..crate::chat::SubAgentConfig::inherit(crate::chat::SubAgentRole::Memory)
+    });
+    let resolved = crate::chat::resolve_swarm(
+        &test_profile(),
+        "secret",
+        &config,
+        &crate::config::AppConfig::default(),
+        &crate::secrets::MemorySecretStore::default(),
+    );
+    agent.set_swarm(resolved);
+
+    agent
+        .respond(&client, "Я переехал в Берлин".to_string())
+        .await
+        .expect("respond");
+
+    let models = client.seen_models.lock().expect("models");
+    // Main ran first with the agent model; post-turn extraction used the override.
+    assert_eq!(models.first().map(String::as_str), Some("test-model"));
+    assert!(models.iter().any(|model| model == "cheap-extractor"));
+}
+
+#[test]
+fn legal_invariant_sanitizer_removes_unverified_citations_and_amounts() {
+    let invariants = vec!["Не выдумывать нормы права.".to_string()];
+    let answer = "Требуйте проценты по ст. 395 ГК РФ.\nГоспошлина составит 2 300 руб.\nПриложите договор и акт.";
+
+    let sanitized = sanitize_unverified_legal_claims(&invariants, answer, "");
+
+    assert!(!sanitized.contains("395"));
+    assert!(!sanitized.contains("2 300"));
+    assert!(sanitized.contains("нужно проверить"));
+    assert!(sanitized.contains("Приложите договор и акт."));
+    assert!(local_invariant_violations(&invariants, &sanitized).is_empty());
+}
+
+#[test]
+fn legal_invariant_sanitizes_even_cautious_unverified_reference() {
+    let invariants = vec!["Не выдумывать нормы права.".to_string()];
+    let answer =
+        "Применимую статью ГК РФ нужно проверить по договору и актуальной редакции закона.";
+
+    let sanitized = sanitize_unverified_legal_claims(&invariants, answer, "");
+    assert!(!sanitized.contains("ГК РФ"));
+    assert!(sanitized.contains("нужно проверить"));
+    assert!(local_invariant_violations(&invariants, &sanitized).is_empty());
+}
+
+#[test]
+fn legal_invariant_sanitizes_unverified_absolute_claims_without_citation() {
+    let invariants = vec!["Не выдумывать нормы права.".to_string()];
+    let answer = "Досудебный порядок обязателен: иначе суд может оставить иск без рассмотрения.\nСоберите договор и акт.";
+
+    let sanitized = sanitize_unverified_legal_claims(&invariants, answer, "");
+
+    assert!(!sanitized.contains("обязателен"));
+    assert!(!sanitized.contains("без рассмотрения"));
+    assert!(sanitized.contains("Соберите договор и акт."));
+}
+
+#[test]
+fn legal_invariant_replaces_year_missing_from_user_context() {
+    let invariants = vec!["Не выдумывать нормы права.".to_string()];
+    let answer = "Договор №12 от 01.04.2025 и приложение от 2026 года.";
+
+    let sanitized = sanitize_unverified_legal_claims(
+        &invariants,
+        answer,
+        "Сейчас 2026 год; договор от 1 апреля.",
+    );
+
+    assert!(sanitized.contains("01.04.[год]"));
+    assert!(sanitized.contains("2026 года"));
+    assert!(!sanitized.contains("2025"));
+}
+
+#[test]
+fn legal_invariant_keeps_user_term_but_removes_invented_deadlines() {
+    let invariants = vec!["Не выдумывать нормы права.".to_string()];
+    let answer = "По договору оплата через 5 рабочих дней.\nВ претензии потребуйте оплатить в течение 10 дней.\nОтвет обычно ждут 30 дней.";
+
+    let sanitized = sanitize_unverified_legal_claims(
+        &invariants,
+        answer,
+        "В договоре написано: оплата в течение 5 рабочих дней.",
+    );
+
+    assert!(sanitized.contains("5 рабочих дней"));
+    assert!(!sanitized.contains("10 дней"));
+    assert!(!sanitized.contains("30 дней"));
+}
+
+#[test]
+fn legal_sanitizer_restores_known_payment_term_when_unsafe_line_is_replaced() {
+    let invariants = vec!["Не выдумывать нормы права.".to_string()];
+    let answer = "Срок оплаты — 5 рабочих дней после акта, поэтому требование нужно исполнить за 10 дней.\nПроверьте договор.";
+
+    let sanitized = sanitize_unverified_legal_claims(
+        &invariants,
+        answer,
+        "Там написано: оплата в течение 5 рабочих дней после подписания акта.",
+    );
+
+    assert!(sanitized.contains("5 рабочих дней"));
+    assert!(!sanitized.contains("10 дней"));
+    assert!(sanitized.contains("Подтверждённое условие договора"));
+}
+
+#[test]
+fn legal_invariant_does_not_reuse_contract_payment_term_as_claim_deadline() {
+    let invariants = vec!["Не выдумывать нормы права.".to_string()];
+    let answer = "1. В течение 5 рабочих дней с момента получения настоящей претензии оплатить долг.\nАкт подписан [дата, например: 30 апреля].";
+
+    let sanitized = sanitize_unverified_legal_claims(
+        &invariants,
+        answer,
+        "По договору оплата в течение 5 рабочих дней после подписания акта.",
+    );
+
+    assert!(sanitized.contains("[срок требования]"));
+    assert!(!sanitized.contains("5 рабочих дней с момента получения"));
+    assert!(!sanitized.contains("30 апреля"));
+    assert!(sanitized.contains("[дата подписания акта]"));
+}
+
+#[test]
+fn legal_sanitizer_preserves_list_number_and_removes_invented_postal_index() {
+    let invariants = vec!["Не выдумывать нормы права.".to_string()];
+    let answer = "Адрес: 123456, г. Москва, ул. Примерная, 1.\n2. В течение 5 рабочих дней с момента получения настоящей претензии оплатить долг.";
+
+    let sanitized = sanitize_unverified_legal_claims(
+        &invariants,
+        answer,
+        "Адрес: Москва, улица Примерная, 1. По договору оплата в течение 5 рабочих дней после акта.",
+    );
+
+    assert!(sanitized.contains("Адрес: [почтовый индекс], г. Москва"));
+    assert!(sanitized.contains("2. В течение [срок требования]"));
+    assert!(!sanitized.contains("123456"));
+}
+
+#[test]
+fn legal_sanitizer_corrects_cross_chat_fact_contradictions() {
+    let invariants = vec!["Не выдумывать нормы права.".to_string()];
+    let answer = "Статус должника неизвестен: вы не знаете, ООО это или ИП.\nВы направили претензию, но подтверждения вручения нет.";
+    let context = "Хочу начать без суда.\nЗаказчик ООО «Ромашка».";
+
+    let sanitized = sanitize_unverified_legal_claims(&invariants, answer, context);
+
+    assert!(sanitized.contains("заказчик — ООО"));
+    assert!(sanitized.contains("Претензия ещё не направлена"));
+    assert!(!sanitized.contains("Статус должника неизвестен"));
+    assert!(!sanitized.contains("Вы направили претензию"));
+}
+
+#[test]
+fn legal_sanitizer_removes_cross_line_limitation_period_claim() {
+    let invariants = vec!["Не выдумывать нормы права.".to_string()];
+    let answer = "**Риск срока исковой давности**\nОбщий срок — 3 года, поэтому можно не спешить.\nПроверьте документы.";
+
+    let sanitized = sanitize_unverified_legal_claims(&invariants, answer, "");
+
+    assert!(!sanitized.contains("3 года"));
+    assert!(sanitized.contains("нужно проверить"));
+}
+
+#[test]
+fn legal_invariant_sanitizes_unverified_court_outcome_and_timeline() {
+    let invariants = vec!["Не выдумывать нормы права.".to_string()];
+    let answer = "Без квитанции суд откажет во взыскании расходов.\nЕсли тянуть год-полтора, срок подойдёт к концу.\nПроверьте документы.";
+
+    let sanitized = sanitize_unverified_legal_claims(&invariants, answer, "");
+
+    assert!(!sanitized.contains("суд откажет"));
+    assert!(!sanitized.contains("год-полтора"));
+    assert!(sanitized.contains("Проверьте документы."));
+}
+
+#[test]
+fn russian_invariant_rejects_token_cyrillic_in_english_answer() {
+    let invariants = vec!["Отвечать только на русском языке".to_string()];
+    let check = local_invariant_check(
+        &invariants,
+        "Here is the complete implementation and deployment guide. Готово.",
+    );
+    assert_eq!(check.violations, invariants);
+    assert!(check.unknown.is_empty());
+}
+
+#[test]
+fn russian_invariant_ignores_latin_identifiers_inside_code_block() {
+    let invariants = vec!["Отвечать только на русском языке".to_string()];
+    let answer = "Ниже краткое объяснение реализации на русском языке.\n```rust\nfn main() { println!(\"hello\"); }\n```";
+    let check = local_invariant_check(&invariants, answer);
+    assert!(check.violations.is_empty());
+    assert!(check.unknown.is_empty());
+}
+
+#[test]
+fn legal_disclaimer_is_not_a_false_positive() {
+    let invariants = vec!["Не называть ответ юридическим заключением".to_string()];
+    let check = local_invariant_check(
+        &invariants,
+        "Это не юридическое заключение, а рабочий черновик.",
+    );
+    assert!(check.violations.is_empty());
+    assert!(check.unknown.is_empty());
+}
+
+#[test]
+fn positive_legal_invariants_do_not_require_literal_headings_on_every_answer() {
+    let invariants = vec![
+        "Отделять факты от предположений.".to_string(),
+        "Отмечать недостающие документы и риски.".to_string(),
+        "Если есть срок или риск суда, явно указать срочность.".to_string(),
+    ];
+    let check = local_invariant_check(
+        &invariants,
+        "Можно начать с претензии. Уточните номер договора и дату акта.",
+    );
+    assert!(check.violations.is_empty());
+    assert!(check.unknown.is_empty());
+    assert_eq!(check.verified, invariants);
+}
+
+#[test]
+fn positive_legal_invariants_block_explicit_rejection_of_the_rule() {
+    let invariants = vec!["Отделять факты от предположений.".to_string()];
+    assert_eq!(
+        local_invariant_check(&invariants, "Не буду отделять факты от предположений.").violations,
+        invariants
+    );
+
+    let urgency = vec!["Если есть срок или риск суда, явно указать срочность.".to_string()];
+    assert_eq!(
+        local_invariant_check(
+            &urgency,
+            "Срок исковой давности истекает завтра, но срочность отмечать не нужно."
+        )
+        .violations,
+        urgency
+    );
+}
+
+#[test]
+fn generic_forbidden_literal_is_enforced_locally() {
+    let invariants = vec!["Без RxJava".to_string()];
+    let violation = local_invariant_check(&invariants, "Подключим RxJava для обработки событий.");
+    assert_eq!(violation.violations, invariants);
+    assert!(violation.unknown.is_empty());
+
+    let compliant =
+        local_invariant_check(&invariants, "RxJava не используем; оставляем coroutines.");
+    assert!(compliant.violations.is_empty());
+    assert!(compliant.unknown.is_empty());
+
+    let unrelated_negation =
+        local_invariant_check(&invariants, "Kotlin не используем. Добавим RxJava.");
+    assert_eq!(unrelated_negation.violations, invariants);
+}
+
+#[test]
+fn stack_architecture_and_business_rules_are_enforced_locally() {
+    let stack = vec!["Только Kotlin и Ktor".to_string()];
+    assert_eq!(
+        local_invariant_check(&stack, "Сделаем сервис на Rust и Axum.").violations,
+        stack
+    );
+    assert!(
+        local_invariant_check(&stack, "Оставляем Kotlin и Ktor. Rust не используем.")
+            .violations
+            .is_empty()
+    );
+
+    let architecture = vec!["Архитектура только MVI".to_string()];
+    assert_eq!(
+        local_invariant_check(&architecture, "Предлагаю MVC.").violations,
+        architecture
+    );
+
+    let business = vec!["Не обещать гарантированный исход спора".to_string()];
+    assert_eq!(
+        local_invariant_check(&business, "Гарантируем победу в суде.").violations,
+        business
+    );
+}
+
+#[test]
+fn invariant_refusal_names_every_broken_constraint() {
+    let refusal = build_invariant_refusal_for_prompt(
+        &[
+            "Только Kotlin и Ktor".to_string(),
+            "Без RxJava".to_string(),
+            "  ".to_string(), // blank lines are skipped
+        ],
+        "Сделай на Rust",
+    );
+    assert!(refusal.contains("Только Kotlin и Ktor"));
+    assert!(refusal.contains("Без RxJava"));
+    assert!(refusal.contains("Что можно сделать"));
+    // Plain-language refusal: no developer-facing jargon leaks to the user.
+    assert!(!refusal.contains("инвариант"));
+    assert!(!refusal.contains("на уровне кода"));
+    assert_eq!(
+        refusal.matches('•').count(),
+        2,
+        "blank constraint must be dropped"
+    );
+}
+
+#[test]
+fn starts_new_task_detects_explicit_and_terminal_intent() {
+    use crate::chat::store::TaskStage;
+    // Explicit new-task cue, at any stage.
+    assert!(starts_new_task(
+        TaskStage::Planning,
+        "Давай теперь сделаем договор дарения"
+    ));
+    assert!(starts_new_task(TaskStage::Execution, "Новая задача: отчёт"));
+    // From the terminal stage, any fresh actionable request is a new task.
+    assert!(starts_new_task(TaskStage::Done, "Составь претензию"));
+    // Plain continuation is NOT a new task.
+    assert!(!starts_new_task(TaskStage::Planning, "Дальше"));
+    assert!(!starts_new_task(
+        TaskStage::Execution,
+        "Поправь третий пункт"
+    ));
+    // A neutral prompt at Done stays put.
+    assert!(!starts_new_task(TaskStage::Done, "Спасибо"));
+}
+
+#[test]
+fn switch_back_target_matches_paused_task_by_title() {
+    use crate::chat::store::TaskContext;
+    let backlog = vec![
+        TaskContext {
+            title: "Претензия по акту".to_string(),
+            ..TaskContext::default()
+        },
+        TaskContext {
+            goal: "договор аренды офиса".to_string(),
+            ..TaskContext::default()
+        },
+    ];
+    assert_eq!(
+        switch_back_target("Вернёмся к задаче претензия", &backlog),
+        Some(0)
+    );
+    assert_eq!(
+        switch_back_target("назад к договору аренды", &backlog),
+        Some(1)
+    );
+    // No switch cue → no match even if words overlap.
+    assert_eq!(switch_back_target("что с претензией", &backlog), None);
 }

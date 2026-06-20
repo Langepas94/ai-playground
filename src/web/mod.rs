@@ -17,12 +17,13 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, sleep};
 
 use crate::{
-    chat::memory::{MemoryConfig, MemoryStrategy},
+    chat::memory::{MemoryConfig, MemoryLayer, MemoryStrategy},
     chat::{
-        AgentMemory, ChatAgent, LocalSessionStore, add_request_metrics, available_agents,
-        selected_agent, web_session_key,
+        AgentMemory, ChatAgent, ConversationSession, LocalSessionStore, StatefulReport,
+        SwarmConfig, add_request_metrics, available_agents, resolve_swarm, selected_agent,
+        web_session_key,
     },
-    config::ProfileConfig,
+    config::{AppConfig, ProfileConfig},
     errors::AppError,
     pricing::{LiteLlmPriceCatalog, PriceCatalogStatus, PricingResolution},
     providers::{
@@ -33,12 +34,20 @@ use crate::{
     secrets::{KeyringSecretStore, SecretStore, set_profile_token},
 };
 
+mod agents;
 mod error;
 mod parameters;
 mod tokens;
 mod util;
 
-use error::WebError;
+#[cfg(test)]
+use crate::chat::{SavedAgent, TaskContext, UserProfileBindings};
+#[cfg(test)]
+use agents::{
+    AgentsManageRequest, TaskPayload, UserProfilesManageRequest, persist_agent_initial_context,
+};
+use agents::{agents_manage, user_profiles_manage};
+use error::{ApiJson, WebError};
 use parameters::{ParameterConstraintView, parameter_constraints};
 use tokens::{resolve_web_token, token_override_belongs_to_provider, web_token_present};
 use util::{blank_str_to_none, blank_to_none, parse_provider};
@@ -53,13 +62,44 @@ struct AppState {
     prices: LiteLlmPriceCatalog,
 }
 
+struct PreparedWebChat {
+    agent_id: String,
+    profile: ProfileConfig,
+    token: String,
+    prompt: String,
+    session_key: String,
+    session: ConversationSession,
+    agent: ChatAgent,
+}
+
 pub async fn serve(addr: SocketAddr) -> Result<(), AppError> {
     let client = ReqwestProviderClient::new()?;
     let secrets: Arc<dyn SecretStore> = Arc::new(KeyringSecretStore);
     let sessions = LocalSessionStore::new()?;
     let prices = LiteLlmPriceCatalog::new()?;
     spawn_price_sync_task(client.clone(), prices.clone());
-    let app = Router::new()
+    let app = build_app(AppState {
+        client,
+        secrets,
+        sessions,
+        prices,
+    });
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(|error| AppError::Terminal(error.to_string()))?;
+    println!(
+        "Web UI: http://{}",
+        listener.local_addr().map_err(|error| {
+            AppError::Terminal(format!("could not read listener address: {error}"))
+        })?
+    );
+    axum::serve(listener, app)
+        .await
+        .map_err(|error| AppError::Terminal(error.to_string()))
+}
+
+fn build_app(state: AppState) -> Router {
+    Router::new()
         .route("/", get(index))
         .route("/api/agents", get(agents))
         .route("/api/providers", get(providers))
@@ -74,25 +114,11 @@ pub async fn serve(addr: SocketAddr) -> Result<(), AppError> {
         .route("/api/agent/chat/stream", post(chat_stream))
         .route("/api/chat/session", post(chat_session))
         .route("/api/chat", post(chat))
+        .route("/api/memory/update", post(memory_update))
+        .route("/api/agents/manage", post(agents_manage))
+        .route("/api/user-profiles/manage", post(user_profiles_manage))
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // 50 MB — для вложений
-        .with_state(AppState {
-            client,
-            secrets,
-            sessions,
-            prices,
-        });
-    let listener = TcpListener::bind(addr)
-        .await
-        .map_err(|error| AppError::Terminal(error.to_string()))?;
-    println!(
-        "Web UI: http://{}",
-        listener.local_addr().map_err(|error| {
-            AppError::Terminal(format!("could not read listener address: {error}"))
-        })?
-    );
-    axum::serve(listener, app)
-        .await
-        .map_err(|error| AppError::Terminal(error.to_string()))
+        .with_state(state)
 }
 
 fn spawn_price_sync_task(client: ReqwestProviderClient, prices: LiteLlmPriceCatalog) {
@@ -142,7 +168,7 @@ async fn providers() -> Json<ProvidersResponse> {
 
 async fn models(
     State(state): State<AppState>,
-    Json(request): Json<ModelsRequest>,
+    ApiJson(request): ApiJson<ModelsRequest>,
 ) -> Result<Json<ModelsResponse>, WebError> {
     let profile = request.profile()?;
     validate_base_url(&profile.provider.to_string(), &profile.base_url)?;
@@ -175,7 +201,7 @@ async fn pricing_sync(State(state): State<AppState>) -> Result<Json<PriceCatalog
 
 async fn pricing_resolve(
     State(state): State<AppState>,
-    Json(request): Json<PricingResolveRequest>,
+    ApiJson(request): ApiJson<PricingResolveRequest>,
 ) -> Result<Json<PricingResolveResponse>, WebError> {
     let provider = parse_provider(&request.provider)?;
     let _ = state.prices.sync_if_stale(state.client.http_client()).await;
@@ -190,7 +216,7 @@ async fn pricing_resolve(
 
 async fn token_status(
     State(state): State<AppState>,
-    Json(request): Json<ModelsRequest>,
+    ApiJson(request): ApiJson<ModelsRequest>,
 ) -> Result<Json<TokenStatusResponse>, WebError> {
     let profile = request.profile()?;
     validate_base_url(&profile.provider.to_string(), &profile.base_url)?;
@@ -206,7 +232,7 @@ async fn token_status(
 
 async fn token_save(
     State(state): State<AppState>,
-    Json(request): Json<ModelsRequest>,
+    ApiJson(request): ApiJson<ModelsRequest>,
 ) -> Result<Json<TokenStatusResponse>, WebError> {
     let profile = request.profile()?;
     validate_base_url(&profile.provider.to_string(), &profile.base_url)?;
@@ -223,10 +249,10 @@ async fn token_save(
     Ok(Json(TokenStatusResponse { saved: true }))
 }
 
-async fn chat(
-    State(state): State<AppState>,
-    Json(request): Json<ChatWebRequest>,
-) -> Result<Json<ChatWebResponse>, WebError> {
+async fn prepare_web_chat(
+    state: &AppState,
+    request: &ChatWebRequest,
+) -> Result<PreparedWebChat, WebError> {
     let agent_spec = selected_agent(request.agent_id.as_deref())?;
     let profile = request.profile()?;
     validate_base_url(&profile.provider.to_string(), &profile.base_url)?;
@@ -240,7 +266,10 @@ async fn chat(
         &request.token,
         request.token_provider.as_deref(),
     )?;
-    let session_key = web_session_key(agent_spec.id, &profile.provider.to_string(), &profile.model);
+    let session_key = effective_session_key(
+        request.saved_agent_id.as_deref(),
+        &web_session_key(agent_spec.id, &profile.provider.to_string(), &profile.model),
+    );
     let session = if request.new_session {
         state.sessions.create_session()?
     } else {
@@ -249,22 +278,22 @@ async fn chat(
             None => state.sessions.load_or_create_latest(&session_key)?,
         }
     };
-    let memory = state.sessions.load_memory(&session.id)?;
-    let control = request.control.clone().into_control();
+    let mut memory = state.sessions.load_memory(&session.id)?;
+    state.sessions.seed_long_term(&session_key, &mut memory)?;
     let memory_config = request
         .memory
         .clone()
         .unwrap_or_default()
         .into_memory_config();
     let _ = state.prices.sync_if_stale(state.client.http_client()).await;
-    let pricing = web_request_pricing(&request, &state.prices, &profile);
-    let context_limit = web_request_context_limit(&request, &state.prices, &profile);
+    let pricing = web_request_pricing(request, &state.prices, &profile);
+    let context_limit = web_request_context_limit(request, &state.prices, &profile);
     let mut agent = ChatAgent::new(
         profile.clone(),
-        token,
-        request.initial_history(session.messages),
+        token.clone(),
+        request.initial_history(session.messages.clone()),
         memory,
-        control,
+        request.control.clone().into_control(),
         pricing,
         request
             .billing
@@ -274,19 +303,79 @@ async fn chat(
     agent.set_memory_config(memory_config);
     agent.set_context_limit(context_limit);
     agent.set_topic_store(Some(state.sessions.topic_file_storage(&session.id)?));
-    let (response, provider_debug, context_metrics) = agent
-        .respond_with_debug_and_context_metrics(&state.client, prompt)
+    apply_saved_agent_memory(
+        &state.sessions,
+        request.saved_agent_id.as_deref(),
+        session.id.as_str(),
+        &mut agent,
+        &profile,
+        &token,
+        state.secrets.as_ref(),
+    )?;
+    apply_runtime_user_profile(
+        &state.sessions,
+        request.user_profile_id.as_deref(),
+        request.saved_agent_id.as_deref(),
+        &mut agent,
+    )?;
+    Ok(PreparedWebChat {
+        agent_id: agent_spec.id.to_string(),
+        profile,
+        token,
+        prompt,
+        session_key,
+        session,
+        agent,
+    })
+}
+
+async fn chat(
+    State(state): State<AppState>,
+    ApiJson(request): ApiJson<ChatWebRequest>,
+) -> Result<Json<ChatWebResponse>, WebError> {
+    let PreparedWebChat {
+        agent_id,
+        prompt,
+        session_key,
+        session,
+        mut agent,
+        ..
+    } = prepare_web_chat(&state, &request).await?;
+    let (response, provider_debug, mut context_metrics) = agent
+        .respond_with_debug_and_context_metrics(&state.client, prompt.clone())
         .await?;
+    // Stateful post-processing: fill profile, advance task stage, check invariants.
+    let (agent_state, stateful_metrics) = run_and_persist_stateful(
+        &state.sessions,
+        request.saved_agent_id.as_deref(),
+        session.id.as_str(),
+        &mut agent,
+        &state.client,
+        &prompt,
+        &response.text,
+    )
+    .await?;
+    let mut response = response;
+    if let Some(metrics) = &stateful_metrics {
+        response.metrics = add_request_metrics(&response.metrics, metrics);
+        context_metrics = Some(match context_metrics {
+            Some(current) => add_request_metrics(&current, metrics),
+            None => metrics.clone(),
+        });
+    }
     let session_metrics = add_request_metrics(&session.metrics, &response.metrics);
     state
         .sessions
         .save_session(&session_key, &session.id, agent.history())?;
     state.sessions.save_metrics(&session.id, &session_metrics)?;
     state.sessions.save_memory(&session.id, agent.memory())?;
+    state
+        .sessions
+        .save_long_term(&session_key, agent.memory())?;
     let context_debug =
         build_context_debug(agent.memory(), &agent.memory_config(), agent.history());
     Ok(Json(ChatWebResponse {
-        agent_id: agent_spec.id.to_string(),
+        agent_id,
         session_id: session.id,
         text: response.text,
         finish_reason: response.finish_reason,
@@ -299,95 +388,90 @@ async fn chat(
             provider_request: provider_debug.request,
             provider_response: provider_debug.response,
         },
+        agent_state,
+        swarm_report: agent.swarm_report().clone(),
     }))
 }
 
 async fn chat_stream(
     State(state): State<AppState>,
-    Json(request): Json<ChatWebRequest>,
+    ApiJson(request): ApiJson<ChatWebRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, WebError> {
-    let agent_spec = selected_agent(request.agent_id.as_deref())?;
-    let profile = request.profile()?;
-    validate_base_url(&profile.provider.to_string(), &profile.base_url)?;
-    if request.prompt.trim().is_empty() {
-        return Err(AppError::InvalidInput("Prompt is required".to_string()).into());
-    }
-    let prompt = build_web_prompt(&request.prompt, request.attachments.as_deref());
-    let token = resolve_web_token(
-        state.secrets.as_ref(),
-        &profile,
-        &request.token,
-        request.token_provider.as_deref(),
-    )?;
-    let session_key = web_session_key(agent_spec.id, &profile.provider.to_string(), &profile.model);
-    let session = if request.new_session {
-        state.sessions.create_session()?
-    } else {
-        match request.session_id.as_deref().and_then(blank_str_to_none) {
-            Some(session_id) => state.sessions.load_session(session_id)?,
-            None => state.sessions.load_or_create_latest(&session_key)?,
-        }
-    };
-    let memory = state.sessions.load_memory(&session.id)?;
-    let control = request.control.clone().into_control();
-    let memory_config = request
-        .memory
-        .clone()
-        .unwrap_or_default()
-        .into_memory_config();
-    let _ = state.prices.sync_if_stale(state.client.http_client()).await;
-    let pricing = web_request_pricing(&request, &state.prices, &profile);
-    let context_limit = web_request_context_limit(&request, &state.prices, &profile);
-    let mut agent = ChatAgent::new(
-        profile.clone(),
-        token.clone(),
-        request.initial_history(session.messages),
-        memory,
-        control,
-        pricing,
-        request
-            .billing
-            .clone()
-            .and_then(WebBilling::into_billing_lookup),
-    );
-    agent.set_memory_config(memory_config);
-    agent.set_context_limit(context_limit);
-    agent.set_topic_store(Some(state.sessions.topic_file_storage(&session.id)?));
+    let PreparedWebChat {
+        profile,
+        token,
+        prompt,
+        session_key,
+        session,
+        mut agent,
+        ..
+    } = prepare_web_chat(&state, &request).await?;
+    // With hard invariants, never expose unchecked partial tokens. The provider
+    // may stream internally, but the browser receives only the finalized answer
+    // after the code-level invariant gate.
+    let buffer_until_invariant_check = agent.has_invariants();
     let prepared_stream = agent.prepare_stream_request(&state.client, &prompt).await?;
     let session_id = session.id.clone();
     let session_metrics_before = session.metrics.clone();
 
     let (tx, rx) = mpsc::unbounded_channel::<String>();
     if let Some(local_response) = prepared_stream.local_response {
-        let session_metrics = add_request_metrics(&session_metrics_before, &local_response.metrics);
+        // Lifecycle guards (pause/resume/approval/rejected transitions) are
+        // local responses, but they still mutate task state. Persist and expose
+        // the same stateful report as the provider-backed streaming path.
+        let (agent_state, stateful_metrics) = run_and_persist_stateful(
+            &state.sessions,
+            request.saved_agent_id.as_deref(),
+            session_id.as_str(),
+            &mut agent,
+            &state.client,
+            &prompt,
+            &local_response.text,
+        )
+        .await?;
+        let mut response_metrics = local_response.metrics.clone();
+        let mut context_metrics = prepared_stream.context_metrics;
+        if let Some(metrics) = &stateful_metrics {
+            response_metrics = add_request_metrics(&response_metrics, metrics);
+            context_metrics = Some(match context_metrics {
+                Some(current) => add_request_metrics(&current, metrics),
+                None => metrics.clone(),
+            });
+        }
+        let session_metrics = add_request_metrics(&session_metrics_before, &response_metrics);
         state
             .sessions
             .save_session(&session_key, &session_id, agent.history())?;
         state.sessions.save_metrics(&session_id, &session_metrics)?;
         state.sessions.save_memory(&session_id, agent.memory())?;
+        state
+            .sessions
+            .save_long_term(&session_key, agent.memory())?;
         let context_debug =
             build_context_debug(agent.memory(), &agent.memory_config(), agent.history());
         let done_event = serde_json::json!({
             "done": true,
             "session_id": session_id,
-            "metrics": local_response.metrics,
-            "context_metrics": prepared_stream.context_metrics,
+            "metrics": response_metrics,
+            "context_metrics": context_metrics,
             "session_metrics": session_metrics,
             "messages": agent.history(),
             "context_debug": context_debug,
             "debug": ChatDebugView {
                 provider_request: crate::providers::HttpDebugRequest {
                     method: "LOCAL".to_string(),
-                    url: "local://topic-file-routing/not-found".to_string(),
+                    url: "local://lifecycle-or-topic-guard".to_string(),
                     headers: Default::default(),
                     body: serde_json::json!({}),
                 },
                 provider_response: crate::providers::HttpDebugResponse {
                     status: 200,
                     headers: Default::default(),
-                    body: serde_json::json!({ "finish_reason": "topic_not_found" }),
+                    body: serde_json::json!({ "finish_reason": "local_guard" }),
                 },
             },
+            "agent_state": agent_state,
+            "swarm_report": agent.swarm_report(),
         });
         let _ = tx.send(local_response.text);
         let _ = tx.send(format!("\x00DONE\x00{done_event}"));
@@ -400,28 +484,99 @@ async fn chat_stream(
     let context_metrics = prepared_stream.context_metrics;
     let client = state.client.clone();
     let sessions = state.sessions.clone();
+    let saved_agent_id = request.saved_agent_id.clone();
+    let stateful_session_id = session_id.clone();
 
     tokio::spawn(async move {
         let tx_token = tx.clone();
+        // Filter the stage-completion marker out of the live token stream: hold
+        // back the trailing partial line (the marker is emitted on its own last
+        // line), splitting only on '\n' so we never cut a multibyte char. The
+        // held-back tail is flushed (marker-stripped) once the stream ends.
+        let pending = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let marker = crate::chat::swarm::agents::STAGE_DONE_MARKER;
+        let pending_cb = pending.clone();
+        let guarded_stream = buffer_until_invariant_check;
         let result = client
             .stream_chat_completion_with_debug(&profile, &token, chat_request, move |chunk| {
-                let _ = tx_token.send(chunk.to_string());
+                let mut buf = pending_cb.lock().expect("stream buffer");
+                buf.push_str(chunk);
+                if guarded_stream {
+                    return;
+                }
+                if let Some(nl) = buf.rfind('\n') {
+                    let mut flush: String = buf.drain(..=nl).collect();
+                    if let Some(i) = flush.find(marker) {
+                        flush.replace_range(i..i + marker.len(), "");
+                    }
+                    let _ = tx_token.send(flush);
+                }
             })
             .await;
+        // Flush the final partial line, stripped of the marker.
+        {
+            let mut buf = pending.lock().expect("stream buffer");
+            if !buffer_until_invariant_check {
+                if let Some(i) = buf.find(marker) {
+                    buf.replace_range(i..i + marker.len(), "");
+                }
+                if !buf.is_empty() {
+                    let _ = tx.send(std::mem::take(&mut buf));
+                }
+            } else {
+                buf.clear();
+            }
+        }
         match result {
             Ok((response, provider_debug)) => {
-                let assistant_text = response.text.clone();
+                // Finalize through the swarm: strips marker, commits the cleaned
+                // answer, advances the FSM, runs post agents. Returns clean text.
+                let (assistant_text, _stream_aux) = agent
+                    .finalize_stream(&client, &prompt, &response.text)
+                    .await;
+                if buffer_until_invariant_check {
+                    let _ = tx.send(assistant_text.clone());
+                }
+                let persisted = run_and_persist_stateful(
+                    &sessions,
+                    saved_agent_id.as_deref(),
+                    stateful_session_id.as_str(),
+                    &mut agent,
+                    &client,
+                    &prompt,
+                    &assistant_text,
+                )
+                .await;
+                let (agent_state, stateful_metrics) = match persisted {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let _ = tx.send(format!("\x00ERR\x00{error}"));
+                        return;
+                    }
+                };
                 let mut response_metrics = response.metrics.clone();
-                let context_metrics = context_metrics.clone();
+                let mut context_metrics = context_metrics.clone();
                 if let Some(context_metrics) = &context_metrics {
                     response_metrics = add_request_metrics(&response_metrics, context_metrics);
                 }
+                if let Some(metrics) = &stateful_metrics {
+                    response_metrics = add_request_metrics(&response_metrics, metrics);
+                    context_metrics = Some(match context_metrics {
+                        Some(current) => add_request_metrics(&current, metrics),
+                        None => metrics.clone(),
+                    });
+                }
                 let session_metrics =
                     add_request_metrics(&session_metrics_before, &response_metrics);
-                agent.record_stream_response(prompt, assistant_text);
-                let _ = sessions.save_session(&session_key, &session_id, agent.history());
-                let _ = sessions.save_metrics(&session_id, &session_metrics);
-                let _ = sessions.save_memory(&session_id, agent.memory());
+                let persist_result = sessions
+                    .save_session(&session_key, &session_id, agent.history())
+                    .and_then(|_| sessions.save_metrics(&session_id, &session_metrics))
+                    .and_then(|_| sessions.save_memory(&session_id, agent.memory()))
+                    .and_then(|_| sessions.save_long_term(&session_key, agent.memory()));
+                if let Err(error) = persist_result {
+                    let _ = tx.send(format!("\x00ERR\x00{error}"));
+                    return;
+                }
                 let context_debug =
                     build_context_debug(agent.memory(), &agent.memory_config(), agent.history());
                 let done_event = serde_json::json!({
@@ -436,6 +591,8 @@ async fn chat_stream(
                         provider_request: provider_debug.request,
                         provider_response: provider_debug.response,
                     },
+                    "agent_state": agent_state,
+                    "swarm_report": agent.swarm_report(),
                 });
                 let _ = tx.send(format!("\x00DONE\x00{done_event}"));
                 drop(tx);
@@ -455,10 +612,10 @@ fn sse_event_stream(
     stream::unfold(rx, |mut rx| async move {
         let msg = rx.recv().await?;
         if let Some(payload) = msg.strip_prefix("\x00DONE\x00") {
-            let event = Event::default().event("done").data(payload.to_string());
+            let event = Event::default().event("done").data(payload);
             Some((Ok(event), rx))
         } else if let Some(payload) = msg.strip_prefix("\x00ERR\x00") {
-            let event = Event::default().event("error").data(payload.to_string());
+            let event = Event::default().event("error").data(payload);
             Some((Ok(event), rx))
         } else {
             let event = Event::default().event("token").data(msg);
@@ -469,13 +626,18 @@ fn sse_event_stream(
 
 async fn chat_session(
     State(state): State<AppState>,
-    Json(request): Json<ChatSessionRequest>,
+    ApiJson(request): ApiJson<ChatSessionRequest>,
 ) -> Result<Json<ChatSessionResponse>, WebError> {
     let agent = selected_agent(request.agent_id.as_deref())?;
     let provider = parse_provider(&request.provider)?;
     let model = blank_to_none(Some(request.model))
         .ok_or_else(|| AppError::InvalidInput("Model is required".to_string()))?;
-    let session_key = web_session_key(agent.id, &provider.to_string(), &model);
+    // For a saved agent, key sessions on `agent:<id>` so chat_session, chat, and
+    // the dialog index all share one key (consistent dialog list per agent).
+    let session_key = effective_session_key(
+        request.saved_agent_id.as_deref(),
+        &web_session_key(agent.id, &provider.to_string(), &model),
+    );
     let session = if request.new_session {
         let session = state.sessions.create_session()?;
         state
@@ -498,6 +660,238 @@ async fn chat_session(
         messages: session.messages,
         metrics: session.metrics,
     }))
+}
+
+/// Session key for a request: a stable `agent:<id>` key when a saved agent is
+/// active, otherwise the provider/model-derived key.
+fn effective_session_key(saved_agent_id: Option<&str>, fallback: &str) -> String {
+    match saved_agent_id.and_then(blank_str_to_none) {
+        Some(id) => format!("agent:{id}"),
+        None => fallback.to_string(),
+    }
+}
+
+/// Load the saved agent's stateful layers (dialog task + stage, profile, invariants,
+/// domain) and attach them so they are injected into the next request and so the
+/// stateful post-processing can mutate + persist them.
+fn apply_saved_agent_memory(
+    store: &LocalSessionStore,
+    saved_agent_id: Option<&str>,
+    session_id: &str,
+    agent: &mut ChatAgent,
+    profile: &ProfileConfig,
+    token: &str,
+    secrets: &dyn SecretStore,
+) -> Result<(), AppError> {
+    // Plain chats (no saved agent) still get the all-on/inherit swarm, so the
+    // Memory sub-agent keeps long-term memory fresh on every strategy.
+    let mut swarm_config = SwarmConfig::defaults();
+    if let Some(id) = saved_agent_id.and_then(blank_str_to_none) {
+        let mut task = store.load_dialog_task(id, session_id)?;
+        if task.repair_lifecycle_integrity().is_some() {
+            store.save_dialog_task(id, session_id, &task)?;
+            task = store.load_dialog_task(id, session_id)?;
+        }
+        agent.set_task_state(Some(task));
+        agent.set_agent_profile(Some(store.load_profile(id)?));
+        if let Some(saved) = store.load_agent(id)? {
+            agent.set_invariants(saved.invariants);
+            agent.set_domain(saved.domain);
+            swarm_config = saved.swarm.normalized();
+        }
+    }
+    // Web has no persisted AppConfig; cross-provider sub-agent tokens are
+    // resolved from the keyring and fall back to the main token otherwise.
+    let resolved = resolve_swarm(
+        profile,
+        token,
+        &swarm_config,
+        &AppConfig::default(),
+        secrets,
+    );
+    agent.set_swarm(resolved);
+    Ok(())
+}
+
+fn apply_runtime_user_profile(
+    store: &LocalSessionStore,
+    explicit_profile_id: Option<&str>,
+    saved_agent_id: Option<&str>,
+    agent: &mut ChatAgent,
+) -> Result<(), AppError> {
+    if explicit_profile_id == Some("__none__") {
+        agent.set_user_profile(None);
+        return Ok(());
+    }
+    let profile = store.resolve_user_profile(explicit_profile_id, saved_agent_id)?;
+    agent.set_user_profile(profile);
+    Ok(())
+}
+
+/// After a turn, run the agent's stateful post-processing and persist any changes
+/// to its working (task + stage) and long-term (profile) layers. Returns a debug
+/// view of what happened, plus the auxiliary token metrics.
+async fn run_and_persist_stateful(
+    store: &LocalSessionStore,
+    saved_agent_id: Option<&str>,
+    session_id: &str,
+    agent: &mut ChatAgent,
+    client: &dyn crate::providers::ProviderClient,
+    user_prompt: &str,
+    answer: &str,
+) -> Result<
+    (
+        Option<StatefulDebugView>,
+        Option<crate::providers::RequestMetrics>,
+    ),
+    AppError,
+> {
+    let _ = (client, user_prompt, answer);
+    let Some(id) = saved_agent_id.and_then(blank_str_to_none) else {
+        return Ok((None, None));
+    };
+    // The swarm orchestrator already ran the stateful turn (deterministic stage
+    // advance + invariant retry + profile fill). Read its report; do not re-run.
+    let report = agent.take_stateful_report();
+    if let Some(task) = agent.task_state() {
+        store.save_dialog_task(id, session_id, task)?;
+    }
+    if let Some(profile) = agent.agent_profile() {
+        store.save_profile(id, profile)?;
+    }
+    let metrics = report.metrics.clone();
+    Ok((Some(stateful_debug_view(&report)), metrics))
+}
+
+fn stateful_debug_view(report: &StatefulReport) -> StatefulDebugView {
+    StatefulDebugView {
+        stage: report.stage.map(|stage| stage.to_string()),
+        current_step: report.current_step.clone(),
+        expected_action: report.expected_action.clone(),
+        paused: report.paused,
+        resume_hint: report.resume_hint.clone(),
+        transition_block_reason: report.transition_block_reason.clone(),
+        next_stage: report.next_stage.map(|stage| stage.to_string()),
+        next_transition_requirement: report.next_transition_requirement.clone(),
+        pending_questions: report.pending_questions.clone(),
+        violations: report.violations.clone(),
+        invariant_status: report.invariant_status.clone(),
+        invariant_summary: report.invariant_summary.clone(),
+        backlog: report.backlog.clone(),
+        stage_transition: report
+            .stage_transition
+            .as_ref()
+            .map(|transition| StageTransitionView {
+                from: transition.from.to_string(),
+                to: transition.to.to_string(),
+                accepted: transition.accepted,
+                reason: transition.reason.clone(),
+            }),
+    }
+}
+
+async fn memory_update(
+    State(state): State<AppState>,
+    ApiJson(request): ApiJson<MemoryUpdateRequest>,
+) -> Result<Json<MemoryUpdateResponse>, WebError> {
+    let agent = selected_agent(request.agent_id.as_deref())?;
+    let provider = parse_provider(&request.provider)?;
+    let model = blank_to_none(Some(request.model.clone()))
+        .ok_or_else(|| AppError::InvalidInput("Model is required".to_string()))?;
+    let session_key = effective_session_key(
+        request.saved_agent_id.as_deref(),
+        &web_session_key(agent.id, &provider.to_string(), &model),
+    );
+    let session = match request.session_id.as_deref().and_then(blank_str_to_none) {
+        Some(session_id) => state.sessions.load_session(session_id)?,
+        None => state.sessions.load_or_create_latest(&session_key)?,
+    };
+    let mut memory = state.sessions.load_memory(&session.id)?;
+    state.sessions.seed_long_term(&session_key, &mut memory)?;
+    let memory_config = request
+        .memory
+        .clone()
+        .unwrap_or_default()
+        .into_memory_config();
+
+    match request.action.as_str() {
+        "set" => {
+            let key = request.key.clone().unwrap_or_default().trim().to_string();
+            let value = request.value.clone().unwrap_or_default().trim().to_string();
+            if key.is_empty() || value.is_empty() {
+                return Err(
+                    AppError::InvalidInput("Key and value are required".to_string()).into(),
+                );
+            }
+            let layer = request
+                .layer
+                .as_deref()
+                .unwrap_or("long-term")
+                .parse::<MemoryLayer>()
+                .map_err(|_| AppError::InvalidInput("Unknown memory layer".to_string()))?;
+            if layer == MemoryLayer::ShortTerm {
+                return Err(AppError::InvalidInput(
+                    "Short-term layer holds the dialog window, not KV facts".to_string(),
+                )
+                .into());
+            }
+            if layer == MemoryLayer::LongTerm
+                && (crate::chat::memory::looks_sensitive(&key)
+                    || crate::chat::memory::looks_sensitive(&value))
+            {
+                return Err(AppError::InvalidInput(
+                    "Sensitive values must not be stored in long-term memory".to_string(),
+                )
+                .into());
+            }
+            memory.set_fact_in_layer(key, value, layer);
+        }
+        "delete" => {
+            let key = request.key.clone().unwrap_or_default();
+            memory.remove_fact(key.trim());
+        }
+        "clear-layer" => {
+            let layer = request
+                .layer
+                .as_deref()
+                .unwrap_or_default()
+                .parse::<MemoryLayer>()
+                .map_err(|_| AppError::InvalidInput("Unknown memory layer".to_string()))?;
+            memory.clear_layer(layer);
+        }
+        other => {
+            return Err(AppError::InvalidInput(format!("Unknown memory action: {other}")).into());
+        }
+    }
+
+    state.sessions.save_memory(&session.id, &memory)?;
+    state.sessions.save_long_term(&session_key, &memory)?;
+
+    let context_debug = build_context_debug(&memory, &memory_config, &session.messages);
+    Ok(Json(MemoryUpdateResponse {
+        session_id: session.id,
+        context_debug,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryUpdateRequest {
+    agent_id: Option<String>,
+    saved_agent_id: Option<String>,
+    provider: String,
+    model: String,
+    session_id: Option<String>,
+    action: String,
+    key: Option<String>,
+    value: Option<String>,
+    layer: Option<String>,
+    memory: Option<WebMemoryConfig>,
+}
+
+#[derive(Debug, Serialize)]
+struct MemoryUpdateResponse {
+    session_id: String,
+    context_debug: ContextDebugView,
 }
 
 #[derive(Debug, Serialize)]
@@ -626,6 +1020,10 @@ struct ChatWebRequest {
     memory: Option<WebMemoryConfig>,
     pricing: Option<WebPricing>,
     billing: Option<WebBilling>,
+    #[serde(default)]
+    saved_agent_id: Option<String>,
+    #[serde(default)]
+    user_profile_id: Option<String>,
 }
 
 impl ChatWebRequest {
@@ -671,6 +1069,8 @@ struct ChatSessionRequest {
     model: String,
     session_id: Option<String>,
     new_session: bool,
+    #[serde(default)]
+    saved_agent_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -762,10 +1162,11 @@ impl WebMemoryConfig {
         MemoryConfig {
             strategy: match self.strategy.as_deref() {
                 Some("summary") => MemoryStrategy::Summary,
+                Some("sliding-window") => MemoryStrategy::SlidingWindow,
                 Some("sticky-facts") => MemoryStrategy::StickyFacts,
                 Some("branching") => MemoryStrategy::Branching,
                 Some("scoped-branches") => MemoryStrategy::ScopedBranches,
-                _ => MemoryStrategy::SlidingWindow,
+                _ => defaults.strategy,
             },
             recent_messages: self.recent_messages.unwrap_or(defaults.recent_messages),
             summarize_after_messages: self
@@ -893,15 +1294,42 @@ struct ChatWebResponse {
     messages: Vec<ChatMessage>,
     context_debug: ContextDebugView,
     debug: ChatDebugView,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_state: Option<StatefulDebugView>,
+    swarm_report: crate::chat::SwarmReport,
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct ContextDebugView {
     strategy: String,
     facts: FactsDebugView,
+    layers: MemoryLayersDebugView,
     active_topic: String,
     scoped_auto_route: bool,
     scoped_topics: Vec<ScopedTopicDebugView>,
+}
+
+/// Explicit 3-layer memory model for UI debug + control.
+#[derive(Debug, Clone, Serialize)]
+struct MemoryLayersDebugView {
+    short_term: ShortTermLayerView,
+    working: LayerFactsView,
+    long_term: LayerFactsView,
+}
+
+/// Краткосрочная: текущий диалог (окно сообщений + session summary). Эфемерно.
+#[derive(Debug, Clone, Serialize)]
+struct ShortTermLayerView {
+    session_summary: Option<String>,
+    summarized_message_count: usize,
+    recent_window: usize,
+    recent_messages_sent: usize,
+}
+
+/// Рабочая / Долговременная: набор KV-фактов слоя.
+#[derive(Debug, Clone, Serialize)]
+struct LayerFactsView {
+    facts: Vec<FactDebugView>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -916,6 +1344,7 @@ struct FactsDebugView {
 struct FactDebugView {
     key: String,
     value: String,
+    layer: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -929,6 +1358,34 @@ struct ScopedTopicDebugView {
 struct ChatDebugView {
     provider_request: HttpDebugRequest,
     provider_response: HttpDebugResponse,
+}
+
+/// Stateful-agent view: current task stage, pending interview questions, the
+/// stage transition decided this turn, and any invariant violations.
+#[derive(Debug, Clone, Default, Serialize)]
+struct StatefulDebugView {
+    stage: Option<String>,
+    current_step: String,
+    expected_action: String,
+    paused: bool,
+    resume_hint: String,
+    transition_block_reason: String,
+    next_stage: Option<String>,
+    next_transition_requirement: String,
+    pending_questions: Vec<String>,
+    violations: Vec<String>,
+    invariant_status: String,
+    invariant_summary: String,
+    backlog: Vec<String>,
+    stage_transition: Option<StageTransitionView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct StageTransitionView {
+    from: String,
+    to: String,
+    accepted: bool,
+    reason: String,
 }
 
 fn build_context_debug(
@@ -951,14 +1408,31 @@ fn build_context_debug(
             message_count,
         })
         .collect();
-    let persisted = memory
+    let mut persisted = memory
         .facts
         .iter()
         .map(|(key, value)| FactDebugView {
+            layer: memory.fact_layer(key).to_string(),
             key: key.clone(),
             value: value.clone(),
         })
         .collect::<Vec<_>>();
+    // Per-agent private memory: surface each partition's facts, tagged by scope,
+    // so the debug view reflects the default-private model (not just the shared
+    // store).
+    for (scope, partition) in &memory.partitions {
+        for (key, value) in &partition.facts {
+            persisted.push(FactDebugView {
+                layer: partition
+                    .fact_layers
+                    .get(key)
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "working".to_string()),
+                key: format!("[{scope}] {key}"),
+                value: value.clone(),
+            });
+        }
+    }
     let recent_messages_sent = if config.strategy == MemoryStrategy::StickyFacts {
         history
             .iter()
@@ -968,8 +1442,34 @@ fn build_context_debug(
     } else {
         0
     };
+    let layer_facts = |layer: crate::chat::memory::MemoryLayer| LayerFactsView {
+        facts: memory
+            .facts_in_layer(layer)
+            .into_iter()
+            .map(|(key, value)| FactDebugView {
+                layer: layer.to_string(),
+                key: key.to_string(),
+                value: value.to_string(),
+            })
+            .collect(),
+    };
+    let non_system_count = history
+        .iter()
+        .filter(|message| message.role != Role::System)
+        .count();
+    let layers = MemoryLayersDebugView {
+        short_term: ShortTermLayerView {
+            session_summary: memory.session_summary.clone(),
+            summarized_message_count: memory.summarized_message_count,
+            recent_window: config.recent_messages,
+            recent_messages_sent: non_system_count.min(config.recent_messages),
+        },
+        working: layer_facts(crate::chat::memory::MemoryLayer::Working),
+        long_term: layer_facts(crate::chat::memory::MemoryLayer::LongTerm),
+    };
     ContextDebugView {
         strategy: config.strategy.to_string(),
+        layers,
         facts: FactsDebugView {
             persisted,
             extraction_prompt: if config.strategy == MemoryStrategy::StickyFacts {
@@ -977,11 +1477,7 @@ fn build_context_debug(
             } else {
                 None
             },
-            request_block: if config.strategy == MemoryStrategy::StickyFacts {
-                memory.facts_block(config.facts_prompt.as_str())
-            } else {
-                None
-            },
+            request_block: memory.facts_block(config.facts_prompt.as_str()),
             recent_messages_sent,
         },
         active_topic: active_topic.to_string(),

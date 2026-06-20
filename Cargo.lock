@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "ai-playground"
-version = "1.12.3"
+version = "1.26.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -30,13 +30,14 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "tower",
  "uuid",
  "wiremock",
 ]
 
 [[package]]
 name = "aiteach"
-version = "1.12.3"
+version = "1.26.0"
 dependencies = [
  "ai-playground",
  "anyhow",

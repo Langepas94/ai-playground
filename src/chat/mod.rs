@@ -4,10 +4,15 @@ pub mod history;
 pub mod memory;
 pub mod session;
 pub mod store;
+#[cfg(test)]
+mod store_tests;
+mod store_types;
+pub mod swarm;
 pub mod token_accounting;
 
 pub use agent::{
-    AgentDescriptor, ChatAgent, LOCAL_SESSION_AGENT_ID, available_agents, selected_agent,
+    AgentDescriptor, ChatAgent, LOCAL_SESSION_AGENT_ID, StageTransition, StatefulReport,
+    available_agents, build_profile_schema, selected_agent,
 };
 pub use goal::{
     ConversationGoal, ConversationStopMode, GoalComparison, GoalRun, GoalState, run_goal_once,
@@ -16,8 +21,15 @@ pub use history::save_history;
 pub use memory::{AgentMemory, MemoryConfig};
 pub use session::{describe_control, describe_goal, interactive_chat, read_terminal_line};
 pub use store::{
-    ConversationSession, LocalSessionStore, TopicFileStorage, add_request_metrics, session_key,
+    AgentProfile, AgentSummary, ConversationSession, DialogMeta, LocalSessionStore, ProfileField,
+    SavedAgent, SavedMemoryConfig, TaskArtifact, TaskContext, TaskPauseReason, TaskPipelineStage,
+    TaskStage, TaskTransitionDecision, TaskWorkerAgent, TopicFileStorage, UserProfile,
+    UserProfileBindings, add_request_metrics, agent_id_from_key, session_key, unix_now,
     web_session_key,
+};
+pub use swarm::{
+    ResolvedSubAgent, ResolvedSwarm, SubAgentConfig, SubAgentRole, SwarmConfig, SwarmReport,
+    SwarmRunRecord, resolve_swarm,
 };
 pub use token_accounting::{
     ContextStatus, TokenCostEstimate, TokenEstimate, TokenGrowthReport, TokenGrowthRow,

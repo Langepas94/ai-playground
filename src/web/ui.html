@@ -155,6 +155,46 @@
       font-size: 12px;
       line-height: 1.35;
     }
+    .swarm-group-title {
+      margin: 12px 0 4px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+    }
+    .swarm-role-title { font-weight: 600; }
+    .swarm-kind-tag {
+      margin-left: 8px;
+      padding: 1px 7px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      color: #1e3a8a;
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+    }
+    details.code-check .swarm-kind-tag {
+      color: #3f3f46;
+      background: #f4f4f5;
+      border-color: #d4d4d8;
+    }
+    details.code-check > summary { color: #3f3f46; }
+    .swarm-default-prompt { margin: 4px 0 2px; }
+    .swarm-default-prompt > summary { font-size: 11px; color: var(--muted); cursor: pointer; }
+    .swarm-default-text {
+      margin-top: 4px;
+      padding: 6px 8px;
+      font-size: 11px;
+      line-height: 1.4;
+      color: #475569;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      white-space: pre-wrap;
+    }
     input, select, textarea, button {
       font: inherit;
     }
@@ -442,6 +482,44 @@
       font-size: 12px;
       line-height: 1.45;
     }
+    .memory-layer {
+      padding: 7px 9px;
+      margin-bottom: 6px;
+      border: 1px solid #d4e2e4;
+      border-radius: 8px;
+      background: #fbfdfc;
+    }
+    .memory-layer-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 4px;
+    }
+    .memory-layer-control {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+    .memory-layer-control input,
+    .memory-layer-control select {
+      flex: 1 1 140px;
+      min-width: 120px;
+    }
+    .mem-del,
+    .mem-clear {
+      padding: 1px 7px;
+      font-size: 11px;
+      border-radius: 6px;
+      border: 1px solid #cbd5e1;
+      background: #fff;
+      color: #475569;
+      cursor: pointer;
+    }
+    .mem-clear {
+      margin-left: auto;
+    }
     .facts-preview {
       min-height: 42px;
       max-height: 120px;
@@ -599,6 +677,88 @@
       font-weight: 600;
       color: #3a5cc7;
     }
+    .brand { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+    .active-agent-bar { display: flex; align-items: center; gap: 10px; }
+    .active-agent-chip {
+      font-size: 13px; font-weight: 600; color: #1f2d4d;
+      background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 999px;
+      padding: 4px 12px;
+    }
+    .active-agent-chip .topic-chip { margin-left: 6px; }
+    .agent-gate {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 20px;
+      align-items: start; padding: 24px; max-width: 1100px; margin: 0 auto;
+    }
+    .gate-card {
+      background: #fff; border: 1px solid #e2e8f0; border-radius: 14px;
+      padding: 20px; display: flex; flex-direction: column; gap: 10px;
+    }
+    .gate-card h2 { margin: 0 0 4px; }
+    @media (max-width: 880px) { .agent-gate { grid-template-columns: 1fr; } }
+    .profile-fields { display: flex; flex-direction: column; gap: 8px; }
+    .profile-field {
+      display: flex; justify-content: space-between; gap: 10px;
+      border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px 10px; font-size: 13px;
+    }
+    .profile-field.missing { border-color: #f0c36d; background: #fffbf0; }
+    .profile-field .pf-key { font-weight: 600; color: #3a5cc7; }
+    .profile-field .pf-val { color: #1f2d4d; text-align: right; }
+    .readonly-box {
+      border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px 10px;
+      background: #f8fafc; font-size: 13px; white-space: pre-wrap; min-height: 18px;
+    }
+    .lifecycle-summary { display: grid; gap: 10px; margin-top: 10px; }
+    .lifecycle-card {
+      border: 1px solid #dbe3f0; border-radius: 10px; padding: 11px 12px;
+      background: #f8fafc; display: grid; gap: 5px;
+    }
+    .lifecycle-card.next { border-color: #bfdbfe; background: #eff6ff; }
+    .lifecycle-card.blocked { border-color: #fecaca; background: #fef2f2; color: #991b1b; }
+    .lifecycle-card.ready { border-color: #bbf7d0; background: #f0fdf4; color: #166534; }
+    .lifecycle-card[hidden] { display: none !important; }
+    .lifecycle-kicker {
+      font-size: 11px; font-weight: 700; letter-spacing: .04em;
+      text-transform: uppercase; color: #64748b;
+    }
+    .lifecycle-value { font-size: 14px; font-weight: 650; line-height: 1.35; }
+    .lifecycle-route { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .lifecycle-arrow { color: #94a3b8; font-weight: 700; }
+    .swarm-activity { display: grid; gap: 7px; margin: 8px 0 14px; }
+    .swarm-run {
+      display: grid; grid-template-columns: minmax(90px, auto) 1fr auto;
+      gap: 8px; align-items: center; padding: 8px 10px;
+      border: 1px solid #e2e8f0; border-radius: 8px; background: #f8fafc;
+      font-size: 12px;
+    }
+    .swarm-run.ran { border-color: #bbf7d0; background: #f0fdf4; }
+    .swarm-run.worker { border-color: #bfdbfe; background: #eff6ff; }
+    .swarm-run-role { font-weight: 700; color: #1e3a8a; }
+    .swarm-run-note { color: #475569; }
+    .swarm-run-model { color: #64748b; text-align: right; }
+    .stage-flow { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+    .stage-step {
+      font-size: 12px; padding: 3px 9px; border-radius: 999px;
+      background: #f1f5f9; color: #64748b; border: 1px solid #e2e8f0;
+    }
+    .stage-step.current { background: #3a5cc7; color: #fff; border-color: #3a5cc7; }
+    .stage-step.passed { background: #dcfce7; color: #166534; border-color: #bbf7d0; }
+    .violation-item { color: #b91c1c; font-weight: 600; }
+    .dialogs-bar {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      padding: 8px 0 4px; border-top: 1px solid #eef0f4; margin-top: 6px;
+    }
+    .dialogs-label { font-size: 12px; color: #64748b; font-weight: 600; }
+    .dialogs-list { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; }
+    .dialog-chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12px; padding: 4px 10px; border-radius: 999px;
+      background: #f1f5f9; color: #334155; border: 1px solid #e2e8f0; cursor: pointer;
+      max-width: 220px;
+    }
+    .dialog-chip .dc-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 170px; }
+    .dialog-chip.active { background: #3a5cc7; color: #fff; border-color: #3a5cc7; }
+    .dialog-chip .dc-del { opacity: 0.6; font-weight: 700; }
+    .dialog-chip .dc-del:hover { opacity: 1; }
     .debug-doc-row {
       display: flex;
       align-items: center;
@@ -757,11 +917,63 @@
 <body>
   <main>
     <header>
-      <h1>ai playground</h1>
+      <div class="brand">
+        <h1>ai playground</h1>
+        <div id="activeAgentBar" class="active-agent-bar" style="display:none">
+          <span class="active-agent-chip">🤖 <strong id="activeAgentName">—</strong> <span id="activeAgentStage" class="topic-chip">clarify</span></span>
+          <button id="switchAgent" class="secondary" type="button" title="Сменить агента">Сменить агента</button>
+          <button id="newAgent" class="secondary" type="button" title="Создать нового агента">Новый агент</button>
+        </div>
+      </div>
       <div id="status" class="status">Готово</div>
     </header>
 
-    <div class="layout">
+    <div id="agentGate" class="agent-gate">
+      <div class="gate-card">
+        <h2>Войти в агента</h2>
+        <div class="field-help">Агент — отдельная сущность: помнит provider/model, профиль (интервью), задачу со стадией и инварианты. Выбери существующего или создай нового — без агента рабочее пространство закрыто.</div>
+        <label>Сохранённые агенты<select id="gateAgentList" size="6"><option value="">— пока нет —</option></select></label>
+        <div class="actions">
+          <button id="gateEnter" type="button">Войти</button>
+          <button id="gateDelete" class="secondary" type="button">Удалить</button>
+        </div>
+        <div id="gateListStatus" class="field-help"></div>
+      </div>
+      <div class="gate-card">
+        <h2>Создать агента</h2>
+        <label>Имя<input id="gateName" spellcheck="false" placeholder="напр. Android-ассистент"></label>
+        <label>Provider<select id="gateProvider"></select></label>
+        <label>Model<select id="gateModel"></select></label>
+        <div class="actions">
+          <button id="gateLoadModels" class="secondary" type="button">Загрузить модели</button>
+        </div>
+        <details class="panel">
+          <summary>Другая модель</summary>
+          <div class="panel-body">
+            <label>Custom model id<input id="gateCustomModel" spellcheck="false" placeholder="Если нужной модели нет в списке"></label>
+          </div>
+        </details>
+        <label>Base URL<input id="gateBaseUrl" spellcheck="false" placeholder="оставь пустым для дефолта провайдера"></label>
+        <label>Информация о проекте и агенте<textarea id="gateDomain" rows="5" placeholder="напр. агент-ресторатор для пиццерии в Волгограде: помогает с меню, рекламой и продвижением. Важно обыгрывать реку Волгу, локальный вайб и молодую аудиторию. Работает только на русском языке."></textarea></label>
+        <label>Стартовые факты вкладки Профиль<textarea id="gateInitialContext" rows="3" placeholder="Повторяемые факты для long-term памяти агента: юрисдикция, роль клиента, типовые ограничения. Не вводите токены или секреты."></textarea></label>
+        <label>Что агент должен уточнить (опционально)<textarea id="gateSeed" rows="2" placeholder="напр. город, аудитория, бюджет, ограничения"></textarea></label>
+        <label>Инварианты — жёсткие ограничения (по одному на строку)<textarea id="gateInvariants" rows="3" placeholder="только Kotlin&#10;архитектура только MVI&#10;никаких платных API"></textarea></label>
+        <div class="actions">
+          <button id="gateBuildSchema" class="secondary" type="button">Сгенерировать интервью</button>
+        </div>
+        <div id="gateSchemaWrap" style="display:none">
+          <div class="field-help">Вопросы интервью — агент сам спросит юзера и заполнит. Можно править/удалять.</div>
+          <div id="gateSchema"></div>
+          <button id="gateSchemaAdd" class="secondary icon-btn" type="button">+ поле</button>
+        </div>
+        <div class="actions">
+          <button id="gateCreate" type="button">Создать и войти</button>
+        </div>
+        <div id="gateCreateStatus" class="field-help"></div>
+      </div>
+    </div>
+
+    <div class="layout" id="workspace" style="display:none">
       <section class="prompt">
         <div class="chat-header">
           <h2>Диалог</h2>
@@ -770,6 +982,11 @@
             <span>История<strong id="historyLabel">0 сообщений</strong></span>
             <span>Хранилище<strong id="storageLabel">—</strong></span>
           </div>
+        </div>
+        <div id="dialogsBar" class="dialogs-bar" style="display:none">
+          <span class="dialogs-label">Чаты:</span>
+          <div id="dialogsList" class="dialogs-list"></div>
+          <button id="dialogNew" class="secondary icon-btn" type="button" title="Новый чат у этого агента">+ чат</button>
         </div>
         <div id="conversation" class="conversation" aria-live="polite">
           <p class="conversation-empty">Ответ появится здесь.</p>
@@ -787,7 +1004,7 @@
             <div class="send-row">
               <button id="send" type="button">Отправить</button>
               <button id="stopBtn" class="secondary" type="button" style="display:none">Стоп</button>
-              <button id="clear" class="secondary" type="button">Новая сессия</button>
+              <button id="clear" class="secondary" type="button">Новый чат</button>
               <label class="stream-toggle" title="По чанкам — слова появляются в реальном времени. Одним ответом — ждать готовый текст целиком.">
                 <input id="streamMode" type="checkbox" checked> Стримить по чанкам
               </label>
@@ -798,7 +1015,12 @@
 
       <section class="controls">
         <div class="inspector-tabs" role="tablist" aria-label="Inspector">
-          <button class="tab-button active" type="button" data-tab="profile">Профиль</button>
+          <button class="tab-button active" type="button" data-tab="profile">Модель</button>
+          <button class="tab-button" type="button" data-tab="userprofile">Пользователь</button>
+          <button class="tab-button" type="button" data-tab="aprofile">Профиль</button>
+          <button class="tab-button" type="button" data-tab="task">Задача</button>
+          <button class="tab-button" type="button" data-tab="invariants">Инварианты</button>
+          <button class="tab-button" type="button" data-tab="swarm">Рой</button>
           <button class="tab-button" type="button" data-tab="params">Параметры</button>
           <button class="tab-button" type="button" data-tab="metrics">Метрики</button>
           <button class="tab-button" type="button" data-tab="debug">Debug</button>
@@ -807,7 +1029,6 @@
         <div id="tab-profile" class="inspector-pane active">
           <div class="group">
             <h2>Провайдер</h2>
-            <label>agent<select id="agentMode"></select></label>
             <label>Provider<select id="provider"></select></label>
             <label>Model<select id="model"></select></label>
             <div class="model-meta-row">
@@ -830,6 +1051,143 @@
           </div>
         </div>
 
+        <div id="tab-userprofile" class="inspector-pane">
+          <div class="group">
+            <h2>Профиль пользователя</h2>
+            <div class="field-help">
+              Reusable настройки пользователя подмешиваются к любому агенту на runtime. Переключение не меняет agent definition.
+            </div>
+            <label>Активный профиль<select id="userProfileSelect"><option value="">— без профиля —</option></select></label>
+            <div class="actions">
+              <button id="userProfileBind" class="secondary" type="button">Применить к чату</button>
+              <button id="userProfileDefaultForAgent" class="secondary" type="button">Default для агента</button>
+              <button id="userProfileDelete" class="secondary" type="button">Удалить профиль</button>
+            </div>
+            <details class="panel">
+              <summary>Создать / обновить профиль</summary>
+              <div class="panel-body">
+                <label>Название<input id="userProfileName" spellcheck="false" placeholder="напр. artem-short-russian"></label>
+                <label>Как отвечать пользователю<textarea id="userProfileInstructions" rows="7" placeholder="Например: отвечай по-русски, коротко и практично. Если вопрос про бизнес, сначала дай готовый вариант, потом пояснение. Не используй таблицы без просьбы."></textarea></label>
+                <label>Длина ответа<input id="userProfileLength" spellcheck="false" placeholder="например: коротко / подробно"></label>
+                <button id="userProfileSave" type="button">Сохранить профиль</button>
+              </div>
+            </details>
+            <div id="userProfileStatus" class="field-help"></div>
+          </div>
+        </div>
+
+        <div id="tab-aprofile" class="inspector-pane">
+          <div class="group">
+            <h2>🟢 Профиль (долговременная память)</h2>
+            <div class="field-help">
+              Схема интервью заполняется агентом из диалога. Дополнительные долговременные факты можно записать вручную ниже; они идут в каждый запрос блоком <code>[memory:long-term]</code>.
+            </div>
+            <h3>Контекст агента в запросе</h3>
+            <div id="profileAgentContext" class="topic-debug">Войди в агента, чтобы увидеть сохранённый контекст.</div>
+            <label>Domain / project context<textarea id="profileAgentDomain" rows="5" placeholder="Контекст, который уходит как [agent:domain]"></textarea></label>
+            <label>Инварианты<textarea id="profileAgentInvariants" rows="3" placeholder="по одному на строку"></textarea></label>
+            <button id="profileAgentContextSave" type="button">Сохранить контекст агента</button>
+            <div id="profileAgentContextStatus" class="field-help"></div>
+            <h3>Известная информация</h3>
+            <div id="profileFields" class="profile-fields">Войди в агента, чтобы увидеть профиль.</div>
+            <h3>Недостающие вопросы интервью</h3>
+            <div class="field-help">Поля профиля, которые агент ещё не узнал. Он сам задаст эти вопросы пользователю по ходу диалога и заполнит их — это онбординг-интервью, а не ручная форма.</div>
+            <div id="profilePending" class="topic-debug">Вопросы появятся после входа в агента.</div>
+            <h3>Факты long-term</h3>
+            <div id="profileLongTermFacts" class="topic-debug">Факты появятся после первого запроса или ручной записи.</div>
+            <div class="memory-layer-control">
+              <input id="profileLongTermKey" spellcheck="false" placeholder="ключ, напр. project_context">
+              <input id="profileLongTermValue" spellcheck="false" placeholder="значение">
+              <button id="profileLongTermAdd" type="button">Записать</button>
+            </div>
+            <div id="profileLongTermStatus" class="field-help"></div>
+          </div>
+        </div>
+
+        <div id="tab-task" class="inspector-pane">
+          <div class="group">
+            <h2>🔵 Жизненный цикл задачи</h2>
+            <div class="field-help">
+              Стадию меняет только оркестратор. Текст запроса не может запустить будущего агента:
+              план требует явного approval, а финал — успешной validation.
+            </div>
+            <div class="lifecycle-route">
+              <span id="taskStageBadge" class="context-badge">—</span>
+              <span class="lifecycle-arrow">→</span>
+              <span id="taskNextStageView" class="context-badge">—</span>
+            </div>
+            <div id="taskStageFlow" class="stage-flow"></div>
+            <div class="lifecycle-summary">
+              <div class="lifecycle-card">
+                <div class="lifecycle-kicker">Сейчас работает</div>
+                <div id="taskCurrentStepView" class="lifecycle-value">—</div>
+              </div>
+              <div class="lifecycle-card next">
+                <div class="lifecycle-kicker">Условие следующего перехода</div>
+                <div id="taskRequirementView" class="lifecycle-value">—</div>
+              </div>
+              <div id="taskGateStatus" class="lifecycle-card">Ожидание состояния задачи.</div>
+              <div id="taskBlockView" class="lifecycle-card blocked" hidden></div>
+            </div>
+            <div id="taskTransitionLine" class="field-help"></div>
+            <details class="panel">
+              <summary>Контекст и восстановление</summary>
+              <div class="panel-body">
+                <div class="field-title">Задача</div>
+                <div id="taskTitleView" class="readonly-box">—</div>
+                <div class="field-title">Цель</div>
+                <div id="taskGoalView" class="readonly-box">—</div>
+                <div class="field-title">Как продолжить после паузы</div>
+                <div id="taskResumeHintView" class="readonly-box">—</div>
+                <div id="taskBacklogView" class="field-help"></div>
+              </div>
+            </details>
+          </div>
+        </div>
+
+        <div id="tab-invariants" class="inspector-pane">
+          <div class="group">
+            <h2>⛔ Инварианты</h2>
+            <div class="field-help">
+              Жёсткие ограничения агента. Инъектятся в каждый запрос и проверяются по ответу в коде — нарушения видны ниже и подаются агенту как фидбэк на следующий ход.
+            </div>
+            <label>Список (по одному на строку)<textarea id="invariantsBox" rows="6" placeholder="только Kotlin&#10;архитектура только MVI"></textarea></label>
+            <div class="actions">
+              <button id="invariantsSave" class="secondary" type="button">Сохранить инварианты</button>
+            </div>
+            <div id="invariantsStatusLine" class="field-help"></div>
+            <div id="invariantCheckView" class="field-help"></div>
+            <div id="violationsView" class="field-help"></div>
+          </div>
+        </div>
+
+        <div id="tab-swarm" class="inspector-pane">
+          <div class="group">
+            <h2>Рой агентов и код-проверки</h2>
+            <div class="field-help">
+              Ты видишь одно окно чата, но под капотом работает детерминированный
+              оркестратор (код, не LLM): он выбирает ответчика строго по сохранённой стадии,
+              запускает pipeline-workers и применяет approval/artifact/validation gates.
+              <b>Не всё здесь — агент.</b> Ниже честно разделено: <b>LLM-агенты</b> делают
+              реальные запросы к провайдеру (им можно задать модель и промпт), а
+              <b>код-проверки</b> выполняются прямо в коде — без LLM и без провайдера, поэтому
+              у них нет полей модели/промпта.
+              Пусто в provider/model = наследовать от основного агента; пусто в промпте =
+              промпт роли по умолчанию.
+            </div>
+            <div class="field-help"><b>Инварианты — это код-проверка, а не агент:</b> детерминированный линтер ответа. Стадийные правила («сначала план», «финал только после проверки») обеспечивает FSM. Правила, которые нельзя проверить кодом, передаются модели как рекомендация (advisory) и не блокируют ответ.</div>
+            <h3>Последний фактический прогон</h3>
+            <div id="swarmActivity" class="swarm-activity">
+              <div class="field-help">После ответа здесь появятся реально вызванные stage-, service- и pipeline-worker агенты.</div>
+            </div>
+            <div id="swarmRows"></div>
+            <div class="actions">
+              <button id="swarmSave" class="secondary" type="button">Сохранить рой</button>
+            </div>
+            <div id="swarmStatusLine" class="field-help"></div>
+          </div>
+        </div>
+
         <div id="tab-params" class="inspector-pane">
           <div class="group">
             <h2>Основные параметры</h2>
@@ -848,11 +1206,11 @@
                   <select id="memoryStrategy">
                     <option value="summary">Summary</option>
                     <option value="sliding-window">Sliding Window</option>
-                    <option value="sticky-facts">Sticky Facts</option>
+                    <option value="sticky-facts" selected>Sticky Facts</option>
                     <option value="branching">Branching</option>
                     <option value="scoped-branches">Scoped Branches</option>
                   </select>
-                  <span id="memoryStrategyHelp" class="field-help">Summary + последние N raw сообщений. Старое сжимается отдельным запросом.</span>
+                  <span id="memoryStrategyHelp" class="field-help">Facts + последние N сообщений. Facts обновляются из явных целей, ограничений, предпочтений и решений.</span>
                 </label>
                 <label>
                   <span id="memoryRecentTitle" class="field-title">Raw сообщений рядом с summary</span>
@@ -886,8 +1244,8 @@
                 <div id="factsPreviewWrap" style="display:none">
                   <label>
                     <span class="field-title">Facts extraction prompt</span>
-                    <textarea id="memoryFactsExtractionPrompt">You update local Sticky Facts memory for a chat agent. Extract only durable facts requested by this prompt as key-value pairs. Default categories: goals, constraints, preferences, decisions, agreements, person profile, interests, favorite colors, pets. Return ONLY a JSON object with snake_case keys and short string values. Use {} if there is nothing durable. Do not include secrets, tokens, passwords, or API keys. Do not store the whole user message.</textarea>
-                    <span class="field-help">Это prompt сборщика памяти: какие KV-факты сохранять после каждого сообщения пользователя. Например: “collect only constraints” или “collect person profile and favorite colors”.</span>
+                    <textarea id="memoryFactsExtractionPrompt">You maintain the layered local memory of a chat agent. After each user message, extract only durable facts AND explicitly choose a memory layer for each. Layers: "working" = data of the CURRENT task (active goals, constraints, todos, what we are doing right now); "long-term" = stable knowledge that should survive across sessions (user profile, preferences, decisions, agreements, person profile, interests, favorite colors, pets). Return ONLY JSON of the form {"facts":[{"key":"snake_case","value":"short string","layer":"working|long-term"}]}. Use {"facts":[]} if there is nothing durable. Never include secrets, tokens, passwords, or API keys. Do not store the whole user message.</textarea>
+                    <span class="field-help">Это prompt сборщика памяти: какие KV-факты сохранять после каждого сообщения и в какой слой (working/long-term). Агент сам классифицирует факт по слою. Можно сузить, напр. “collect only constraints”.</span>
                   </label>
                   <label>
                     <span class="field-title">Facts preamble</span>
@@ -895,8 +1253,20 @@
                     <span class="field-help">Это только преамбула read-only facts block для основного provider request. Она не выбирает, какие facts собирать.</span>
                   </label>
                   <span class="field-title">Persisted KV facts</span>
+                  <div class="field-help">
+                    Память делится на 3 слоя, каждый факт помечен бейджем:
+                    <span class="topic-chip">short-term</span> окно диалога + summary, эфемерно;
+                    <span class="topic-chip">working</span> данные текущей задачи (<code>goal</code>, <code>constraints</code>), живут в рамках сессии;
+                    <span class="topic-chip">long-term</span> устойчивые знания (<code>preferences</code>, <code>decisions</code>, профиль), переносятся в новые сессии.
+                  </div>
+                  <div class="field-help">
+                    Слой выбирает сам агент при извлечении факта (Facts extraction prompt): задача → <b>working</b>,
+                    устойчивые знания → <b>long-term</b>. Ниже можно переопределить вручную или удалить.
+                    Начните новый чат (New session) — <b>long-term</b> факты останутся, <b>short-term</b> и <b>working</b> очистятся.
+                  </div>
                   <div id="factsKvPreview" class="facts-preview">Пока пусто. Напишите “цель: …”, “constraint: …”, “предпочтение: …”, “решили: …”.</div>
                   <span class="field-title">Provider facts block</span>
+                  <div class="field-help">Facts block сгруппирован по слоям (<code>[working]</code> / <code>[long-term]</code>) — видно, из какого слоя факт ушёл провайдеру.</div>
                   <div id="factsPreview" class="facts-preview">Будет показан точный facts block, который ушел в provider request.</div>
                 </div>
                 <div id="scopedBranchWrap" class="topic-panel" style="display:none">
@@ -1043,6 +1413,24 @@
               <h3>Context topics</h3>
               <div id="contextDebugPanel" class="topic-debug">Выберите Scoped Branches, чтобы увидеть авто-разделение тем.</div>
             </div>
+            <div class="debug-item">
+              <h3>Модель памяти — слои</h3>
+              <div class="field-help">
+                Память агента разделена минимум на 3 типа. Факт можно записать вручную в выбранный слой,
+                удалить (✕) или очистить весь слой. Краткосрочная хранит окно диалога + summary (KV-факты туда не пишутся).
+              </div>
+              <div id="memoryLayersPanel" class="topic-debug">Контекст еще не собран.</div>
+              <div class="memory-layer-control">
+                <select id="memoryLayerSelect" title="Слой памяти">
+                  <option value="working">рабочая (working) — данные текущей задачи</option>
+                  <option value="long-term" selected>долговременная (long-term) — профиль/решения/знания</option>
+                </select>
+                <input id="memoryLayerKey" spellcheck="false" placeholder="ключ, напр. preferences">
+                <input id="memoryLayerValue" spellcheck="false" placeholder="значение">
+                <button id="memoryFactAdd" type="button">Записать факт</button>
+              </div>
+              <div id="memoryLayerStatus" class="field-help"></div>
+            </div>
           </details>
         </div>
       </section>
@@ -1063,8 +1451,15 @@
     let chatHistory = [];
     let chatSessionId = null;
     let forceNewSession = false;
+    let activeAgentId = localStorage.getItem('ai_active_agent') || null;
+    let activeAgent = null;
+    let activeTaskId = 'default';
+    let activeUserProfileId = localStorage.getItem('ai_active_user_profile') || '';
+    let userProfiles = [];
     let pendingAttachments = []; // [{name, content}]
     let branchState = { checkpoint: null, branches: [], activeId: null };
+    let loadedModelIds = []; // model ids from the last /api/models load, for swarm dropdowns
+    let swarmRoleDefaults = {}; // role -> built-in default system prompt (from swarm-load)
 
     function pricingCacheKey(provider, modelId) {
       return `ai_pricing:${provider}:${modelId}`;
@@ -1113,6 +1508,9 @@
       document.querySelectorAll('.inspector-pane').forEach((pane) => {
         pane.classList.toggle('active', pane.id === `tab-${name}`);
       });
+      if (name === 'swarm') {
+        loadSwarm();
+      }
     }
 
     function numberValue(id) {
@@ -1307,15 +1705,21 @@
     }
 
     function sessionCacheKey() {
-      return `ai_chat_session:${$('agentMode').value}:${currentProvider()}:${selectedModel()}`;
+      const scope = activeAgentId ? `agent:${activeAgentId}` : `${backendAgentId() || 'agent'}:${currentProvider()}:${selectedModel()}`;
+      return `ai_chat_session:${scope}`;
     }
 
     function branchCacheKey() {
-      return `ai_chat_branches:${$('agentMode').value}:${currentProvider()}:${selectedModel()}`;
+      const scope = activeAgentId ? `agent:${activeAgentId}` : `${backendAgentId() || 'agent'}:${currentProvider()}:${selectedModel()}`;
+      return `ai_chat_branches:${scope}`;
     }
 
     function selectedAgent() {
-      return agents.find((agent) => agent.id === $('agentMode').value) || agents[0] || null;
+      return agents[0] || null;
+    }
+
+    function backendAgentId() {
+      return selectedAgent()?.id || null;
     }
 
     function isBranchingMode() {
@@ -1329,7 +1733,7 @@
 
     function chatPayload() {
       return {
-        agent_id: $('agentMode').value,
+        agent_id: backendAgentId(),
         ...providerPayload(),
         model: selectedModel(),
         context_limit: modelContextById.get(selectedModel()) ?? null,
@@ -1339,6 +1743,8 @@
         session_id: currentBranch()?.sessionId || chatSessionId,
         new_session: currentBranch() ? !currentBranch().sessionId : forceNewSession,
         messages: currentBranch()?.messages || chatHistory,
+        saved_agent_id: activeAgentId || null,
+        user_profile_id: activeUserProfileId || '__none__',
         memory: memoryPayload(),
         pricing: pricingPayload(),
         billing: billingPayload(),
@@ -1500,11 +1906,12 @@
 
     function sessionPayload(newSession = false) {
       return {
-        agent_id: $('agentMode').value,
+        agent_id: backendAgentId(),
         provider: currentProvider(),
         model: selectedModel(),
         session_id: newSession ? null : localStorage.getItem(sessionCacheKey()),
-        new_session: newSession
+        new_session: newSession,
+        saved_agent_id: activeAgentId || null,
       };
     }
 
@@ -1532,9 +1939,11 @@
         panel.textContent = 'Контекст еще не собран.';
         scopedPanel.textContent = 'Темы появятся после первого ответа в стратегии Scoped Branches.';
         renderFactsDebug(null);
+        renderMemoryLayers(null);
         return;
       }
       renderFactsDebug(contextDebug.facts);
+      renderMemoryLayers(contextDebug.layers);
       if (contextDebug.strategy !== 'scoped-branches') {
         panel.textContent = `strategy: ${contextDebug.strategy}`;
         scopedPanel.textContent = 'Auto topics активны только в стратегии Scoped Branches.';
@@ -1553,6 +1962,980 @@
       }
     }
 
+    function memoryLayerSection(title, hint, facts, layerKey) {
+      const items = facts.length
+        ? facts.map((fact) => `<span class="metric-line"><em>${escapeHtml(fact.key)}</em><b>${escapeHtml(fact.value)}</b> <button type="button" class="mem-del" data-key="${escapeHtml(fact.key)}" title="Удалить факт">✕</button></span>`).join('')
+        : '<span class="field-help">пусто</span>';
+      return `<div class="memory-layer"><div class="memory-layer-head"><strong>${title}</strong> <span class="field-help">${hint}</span> <button type="button" class="mem-clear" data-layer="${layerKey}">Очистить слой</button></div><div class="metric-lines">${items}</div></div>`;
+    }
+
+    function renderProfileLongTermFacts(facts) {
+      const panel = $('profileLongTermFacts');
+      if (!panel) return;
+      facts = facts || [];
+      panel.innerHTML = facts.length
+        ? `<div class="metric-lines">${facts.map((fact) => `<span class="metric-line"><em>${escapeHtml(fact.key)}</em><b>${escapeHtml(fact.value)}</b> <button type="button" class="profile-mem-del" data-key="${escapeHtml(fact.key)}" title="Удалить факт">✕</button></span>`).join('')}</div>`
+        : '<span class="field-help">Пока нет ручных или автоматически сохранённых long-term фактов.</span>';
+      panel.querySelectorAll('.profile-mem-del').forEach((btn) => {
+        btn.onclick = () => memoryUpdate('delete', { key: btn.dataset.key }, 'profileLongTermStatus');
+      });
+    }
+
+    function renderMemoryLayers(layers) {
+      const panel = $('memoryLayersPanel');
+      if (!panel) return;
+      if (!layers) {
+        panel.textContent = 'Контекст еще не собран.';
+        return;
+      }
+      const st = layers.short_term || {};
+      const summaryInfo = st.session_summary
+        ? `есть (@${st.summarized_message_count})`
+        : 'нет';
+      const shortBody = `<div class="field-help">summary: ${summaryInfo} · окно N=${st.recent_window ?? 0} · отправлено сообщений=${st.recent_messages_sent ?? 0}</div>`;
+      const shortHtml = `<div class="memory-layer"><div class="memory-layer-head"><strong>🟡 Краткосрочная</strong> <span class="field-help">текущий диалог; эфемерно</span> <button type="button" class="mem-clear" data-layer="short-term">Очистить</button></div>${shortBody}</div>`;
+      panel.innerHTML = [
+        shortHtml,
+        memoryLayerSection('🔵 Рабочая', 'данные текущей задачи (goal, constraints)', (layers.working && layers.working.facts) || [], 'working'),
+        memoryLayerSection('🟢 Долговременная', 'профиль, решения, знания', (layers.long_term && layers.long_term.facts) || [], 'long-term'),
+      ].join('');
+      panel.querySelectorAll('.mem-del').forEach((btn) => {
+        btn.onclick = () => memoryUpdate('delete', { key: btn.dataset.key });
+      });
+      panel.querySelectorAll('.mem-clear').forEach((btn) => {
+        btn.onclick = () => memoryUpdate('clear-layer', { layer: btn.dataset.layer });
+      });
+      renderProfileLongTermFacts((layers.long_term && layers.long_term.facts) || []);
+    }
+
+    async function memoryUpdate(action, opts, statusId = 'memoryLayerStatus') {
+      const status = $(statusId);
+      const model = selectedModel();
+      if (!model) {
+        status.textContent = 'Сначала выберите модель.';
+        return;
+      }
+      status.textContent = 'Сохраняю…';
+      try {
+        const response = await fetch('/api/memory/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            agent_id: backendAgentId(),
+            saved_agent_id: activeAgentId || null,
+            provider: currentProvider(),
+            model,
+            session_id: chatSessionId,
+            action,
+            key: opts.key || null,
+            value: opts.value || null,
+            layer: opts.layer || null,
+            memory: memoryPayload(),
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          status.textContent = 'Ошибка: ' + (data.error || response.status);
+          return;
+        }
+        chatSessionId = data.session_id || chatSessionId;
+        if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
+        setContextDebug(data.context_debug);
+        status.textContent = 'Готово.';
+      } catch (error) {
+        status.textContent = 'Ошибка: ' + error.message;
+      }
+    }
+
+    async function agentsManage(body) {
+      const response = await fetch('/api/agents/manage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || ('HTTP ' + response.status));
+      }
+      return data;
+    }
+
+    async function userProfilesManage(body) {
+      const response = await fetch('/api/user-profiles/manage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || ('HTTP ' + response.status));
+      }
+      return data;
+    }
+
+    const TASK_STAGES = ['clarify', 'planning', 'execution', 'validation', 'done'];
+    let currentInvariants = [];
+
+    // ---- Gate ↔ workspace visibility -------------------------------------
+    function showGate() {
+      $('agentGate').style.display = 'grid';
+      $('workspace').style.display = 'none';
+      $('activeAgentBar').style.display = 'none';
+      $('dialogsBar').style.display = 'none';
+      refreshGateList();
+    }
+
+    function resetGateCreateForm() {
+      $('gateName').value = '';
+      $('gateDomain').value = '';
+      $('gateInitialContext').value = '';
+      $('gateSeed').value = '';
+      $('gateInvariants').value = '';
+      $('gateCustomModel').value = '';
+      $('gateSchema').innerHTML = '';
+      $('gateSchemaWrap').style.display = 'none';
+      $('gateCreateStatus').textContent = '';
+      applyGateProviderDefaults();
+    }
+
+    function showCreateAgentGate() {
+      showGate();
+      resetGateCreateForm();
+      setTimeout(() => {
+        $('gateName').focus();
+        $('gateName').scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }, 0);
+    }
+
+    function showWorkspace() {
+      $('agentGate').style.display = 'none';
+      $('workspace').style.display = '';
+      $('activeAgentBar').style.display = 'flex';
+    }
+
+    function setActiveAgentChip(name, stage) {
+      $('activeAgentName').textContent = name || '—';
+      $('activeAgentStage').textContent = stage || 'clarify';
+    }
+
+    function lineToList(id) {
+      return $(id).value.split('\n').map((s) => s.trim()).filter(Boolean);
+    }
+
+    function listToLines(list) {
+      return (list || []).join('\n');
+    }
+
+    function renderUserProfiles(bindings) {
+      const select = $('userProfileSelect');
+      select.innerHTML = '<option value="">— без профиля —</option>' + userProfiles
+        .map((profile) => `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.display_name || profile.id)}</option>`)
+        .join('');
+      const agentDefault = activeAgentId && bindings?.default_profile_per_agent
+        ? bindings.default_profile_per_agent[activeAgentId]
+        : '';
+      const selected = activeUserProfileId || agentDefault || bindings?.active_profile_id || '';
+      if (selected && userProfiles.some((profile) => profile.id === selected)) {
+        activeUserProfileId = selected;
+        select.value = selected;
+        localStorage.setItem('ai_active_user_profile', selected);
+      } else {
+        activeUserProfileId = '';
+        select.value = '';
+        localStorage.removeItem('ai_active_user_profile');
+      }
+      $('userProfileStatus').textContent = activeUserProfileId
+        ? 'Профиль будет добавлен в runtime payload отдельно от агента.'
+        : 'Профиль не выбран.';
+    }
+
+    async function refreshUserProfiles() {
+      try {
+        const data = await userProfilesManage({ action: 'list' });
+        userProfiles = data.profiles || [];
+        renderUserProfiles(data.bindings || {});
+      } catch (error) {
+        $('userProfileStatus').textContent = 'Ошибка профилей: ' + error.message;
+      }
+    }
+
+    function userProfilePayload() {
+      return {
+        id: $('userProfileSelect').value || null,
+        display_name: $('userProfileName').value.trim(),
+        style_preferences: [],
+        format_preferences: [],
+        constraints: [],
+        language_preferences: [],
+        response_length: $('userProfileLength').value.trim(),
+        custom_instructions: $('userProfileInstructions').value.trim()
+      };
+    }
+
+    async function saveUserProfile() {
+      const payload = userProfilePayload();
+      if (!payload.display_name) { $('userProfileStatus').textContent = 'Укажи название профиля.'; return; }
+      try {
+        const data = await userProfilesManage({ action: 'save', profile: payload });
+        activeUserProfileId = data.profile?.id || '';
+        if (activeUserProfileId) localStorage.setItem('ai_active_user_profile', activeUserProfileId);
+        userProfiles = data.profiles || [];
+        renderUserProfiles(data.bindings || {});
+        $('userProfileStatus').textContent = 'Профиль сохранен.';
+      } catch (error) {
+        $('userProfileStatus').textContent = 'Ошибка сохранения: ' + error.message;
+      }
+    }
+
+    async function bindActiveUserProfile(defaultForAgent = false) {
+      activeUserProfileId = $('userProfileSelect').value || '';
+      if (activeUserProfileId) localStorage.setItem('ai_active_user_profile', activeUserProfileId);
+      else localStorage.removeItem('ai_active_user_profile');
+      try {
+        const body = defaultForAgent
+          ? { action: 'bind', agent_id: activeAgentId || null, default_profile_id: activeUserProfileId }
+          : { action: 'bind', active_profile_id: activeUserProfileId };
+        const data = await userProfilesManage(body);
+        userProfiles = data.profiles || userProfiles;
+        renderUserProfiles(data.bindings || {});
+        $('userProfileStatus').textContent = defaultForAgent
+          ? 'Default profile для агента обновлен без изменения agent definition.'
+          : 'Активный профиль обновлен.';
+      } catch (error) {
+        $('userProfileStatus').textContent = 'Ошибка binding: ' + error.message;
+      }
+    }
+
+    async function deleteUserProfile() {
+      const id = $('userProfileSelect').value || '';
+      if (!id) { $('userProfileStatus').textContent = 'Сначала выбери профиль.'; return; }
+      try {
+        const data = await userProfilesManage({ action: 'delete', id });
+        if (activeUserProfileId === id) {
+          activeUserProfileId = '';
+          localStorage.removeItem('ai_active_user_profile');
+        }
+        userProfiles = data.profiles || [];
+        renderUserProfiles(data.bindings || {});
+        $('userProfileName').value = '';
+        $('userProfileLength').value = '';
+        $('userProfileInstructions').value = '';
+        $('userProfileStatus').textContent = 'Профиль удалён.';
+      } catch (error) {
+        $('userProfileStatus').textContent = 'Ошибка удаления: ' + error.message;
+      }
+    }
+
+    function loadSelectedUserProfileIntoForm() {
+      const profile = userProfiles.find((item) => item.id === $('userProfileSelect').value);
+      if (!profile) {
+        $('userProfileName').value = '';
+        $('userProfileLength').value = '';
+        $('userProfileInstructions').value = '';
+        return;
+      }
+      $('userProfileName').value = profile.display_name || '';
+      $('userProfileLength').value = profile.response_length || '';
+      $('userProfileInstructions').value = compactUserProfileInstructions(profile);
+    }
+
+    function compactUserProfileInstructions(profile) {
+      const chunks = [];
+      const legacy = []
+        .concat(profile.style_preferences || [])
+        .concat(profile.format_preferences || [])
+        .concat(profile.constraints || [])
+        .concat(profile.language_preferences || [])
+        .map((item) => (item || '').trim())
+        .filter(Boolean);
+      if (legacy.length) chunks.push(legacy.join('\n'));
+      if ((profile.custom_instructions || '').trim()) chunks.push(profile.custom_instructions.trim());
+      return chunks.join('\n\n');
+    }
+
+    // ---- Gate: list + create --------------------------------------------
+    async function refreshGateList() {
+      try {
+        const data = await agentsManage({ action: 'list' });
+        const agents = data.agents || [];
+        const select = $('gateAgentList');
+      select.innerHTML = agents.length
+        ? agents.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)} · ${escapeHtml(a.provider)}/${escapeHtml(a.model)} · ${escapeHtml(a.stage || 'clarify')}</option>`).join('')
+        : '<option value="">— пока нет —</option>';
+      if (activeAgentId && agents.some((a) => a.id === activeAgentId)) select.value = activeAgentId;
+      else if (agents.length) select.value = agents[0].id;
+      $('gateListStatus').textContent = agents.length ? '' : 'Создай первого агента справа.';
+      } catch (error) {
+        $('gateListStatus').textContent = 'Ошибка списка: ' + error.message;
+      }
+    }
+
+    function applyGateProviderDefaults() {
+      const item = (providers || []).find((p) => p.id === $('gateProvider').value);
+      if (!item) return;
+      $('gateBaseUrl').value = item.default_base_url || '';
+      $('gateCustomModel').value = '';
+      setGateModelOptions(restoreModelListFor(item.id) || [{ id: item.default_model, pricing: null }], item.default_model);
+    }
+
+    function populateGateProviders() {
+      if (!providers || !providers.length) return;
+      $('gateProvider').innerHTML = providers.map((item) => `<option value="${item.id}">${item.name}</option>`).join('');
+      applyGateProviderDefaults();
+    }
+
+    function gateProviderPayload() {
+      return {
+        provider: $('gateProvider').value,
+        base_url: $('gateBaseUrl').value.trim(),
+        token: $('token').value.trim(),
+        token_provider: $('gateProvider').value
+      };
+    }
+
+    function setGateModelOptions(models, selectedModel) {
+      const normalized = models.map((model) => typeof model === 'string' ? { id: model, pricing: null } : model).filter((model) => model?.id);
+      const uniqueModels = [...new Map(normalized.map((model) => [model.id, model])).values()];
+      $('gateModel').innerHTML = uniqueModels.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.id)}</option>`).join('');
+      if (selectedModel && uniqueModels.some((model) => model.id === selectedModel)) {
+        $('gateModel').value = selectedModel;
+      }
+    }
+
+    async function gateLoadModels() {
+      if (!$('gateProvider').value) { $('gateCreateStatus').textContent = 'Выбери provider.'; return; }
+      $('gateLoadModels').disabled = true;
+      $('gateCreateStatus').textContent = 'Загружаю модели…';
+      try {
+        const data = await requestJson('/api/models', gateProviderPayload());
+        const models = data.models || [];
+        const ids = models.map((model) => model.id).filter(Boolean);
+        if (ids.length) localStorage.setItem(`ai_models:${$('gateProvider').value}`, JSON.stringify(ids));
+        const current = $('gateModel').value;
+        const fallback = ids[0] || current;
+        setGateModelOptions(models, ids.includes(current) ? current : fallback);
+        $('gateCreateStatus').textContent = ids.length ? `Загружено моделей: ${ids.length}` : 'Провайдер вернул пустой список моделей.';
+      } catch (error) {
+        $('gateCreateStatus').textContent = 'Ошибка загрузки моделей: ' + error.message;
+      } finally {
+        $('gateLoadModels').disabled = false;
+      }
+    }
+
+    function gatePayload() {
+      return {
+        name: $('gateName').value.trim(),
+        provider: $('gateProvider').value,
+        model: $('gateCustomModel').value.trim() || $('gateModel').value.trim(),
+        base_url: $('gateBaseUrl').value.trim(),
+        domain: $('gateDomain').value.trim(),
+        initial_context: $('gateInitialContext').value.trim(),
+        seed_fields: lineToList('gateSeed'),
+        invariants: lineToList('gateInvariants'),
+      };
+    }
+
+    function addSchemaRow(field) {
+      field = field || { key: '', question: '', required: true };
+      const row = document.createElement('div');
+      row.className = 'profile-field schema-row';
+      row.innerHTML = `
+        <input class="pf-key-in" placeholder="ключ" value="${escapeHtml(field.key)}" style="width:30%">
+        <input class="pf-q-in" placeholder="вопрос юзеру" value="${escapeHtml(field.question)}" style="flex:1">
+        <label style="display:flex;align-items:center;gap:4px;font-size:12px">обяз.<input type="checkbox" class="pf-req-in" ${field.required ? 'checked' : ''}></label>
+        <button type="button" class="secondary icon-btn pf-del">✕</button>`;
+      row.querySelector('.pf-del').addEventListener('click', () => row.remove());
+      $('gateSchema').appendChild(row);
+    }
+
+    function readSchemaRows() {
+      return Array.from($('gateSchema').querySelectorAll('.schema-row')).map((row) => ({
+        key: row.querySelector('.pf-key-in').value.trim(),
+        question: row.querySelector('.pf-q-in').value.trim(),
+        required: row.querySelector('.pf-req-in').checked,
+      })).filter((f) => f.key);
+    }
+
+    async function gateBuildSchema() {
+      const payload = gatePayload();
+      if (!payload.domain) { $('gateCreateStatus').textContent = 'Укажи домен.'; return; }
+      if (!payload.provider || !payload.model) { $('gateCreateStatus').textContent = 'Нужны provider и model.'; return; }
+      $('gateBuildSchema').disabled = true;
+      $('gateCreateStatus').textContent = 'Генерирую интервью…';
+      try {
+        const data = await agentsManage({ action: 'build-schema', agent: payload, token: $('token').value });
+        $('gateSchema').innerHTML = '';
+        (data.profile?.fields || []).forEach(addSchemaRow);
+        $('gateSchemaWrap').style.display = '';
+        $('gateCreateStatus').textContent = 'Схема готова — проверь и создавай.';
+      } catch (error) {
+        $('gateCreateStatus').textContent = 'Ошибка генерации: ' + error.message;
+      } finally {
+        $('gateBuildSchema').disabled = false;
+      }
+    }
+
+    async function createAgentFromGate() {
+      const payload = gatePayload();
+      if (!payload.name) { $('gateCreateStatus').textContent = 'Укажи имя.'; return; }
+      if (!payload.provider || !payload.model) { $('gateCreateStatus').textContent = 'Нужны provider и model.'; return; }
+      payload.id = null;
+      payload.system_prompt = null;
+      payload.memory = memoryPayload();
+      const schema = readSchemaRows();
+      if (schema.length) payload.profile_schema = schema;
+      try {
+        const data = await agentsManage({ action: 'save', agent: payload });
+        await enterAgent(data.agent.id);
+      } catch (error) {
+        $('gateCreateStatus').textContent = 'Ошибка создания: ' + error.message;
+      }
+    }
+
+    function applyAgentMemoryToForm(memory) {
+      if (!memory) return;
+      const set = (id, value) => { if (value !== undefined && value !== null) $(id).value = value; };
+      set('memoryStrategy', memory.strategy || 'sticky-facts');
+      set('memoryRecentMessages', memory.recent_messages);
+      set('memorySummarizeAfterMessages', memory.summarize_after_messages);
+      set('memorySummaryChunkMessages', memory.summary_chunk_messages);
+      set('memorySummarizeAtContextPercent', memory.summarize_at_context_percent);
+      set('memorySummaryPrompt', memory.summary_prompt);
+      set('memoryFactsExtractionPrompt', memory.facts_extraction_prompt);
+      set('memoryFactsPrompt', memory.facts_prompt);
+      set('memoryActiveBranch', memory.active_branch);
+      $('memoryScopedAutoRoute').checked = !!memory.scoped_auto_route;
+      $('memoryStrategy').dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    function applyTransportDefaultsForAgent(_agent) {
+      // Streaming is the default for every provider, including DeepSeek:
+      // users see useful text while post-turn profile/state agents finish.
+    }
+
+    // ---- Workspace panes -------------------------------------------------
+    function renderProfilePane(profile) {
+      const wrap = $('profileFields');
+      const fields = (profile && profile.fields) || [];
+      if (!fields.length) {
+        wrap.innerHTML = '<span class="field-help">У этого агента нет заполненной схемы интервью.</span>';
+        $('profilePending').innerHTML = '<span class="field-help">Нет обязательных вопросов в схеме. Используй long-term факты ниже для повторяемого контекста.</span>';
+        return;
+      }
+      const known = fields.filter((f) => (f.value || '').trim());
+      const pendingFields = fields.filter((f) => f.required && !(f.value || '').trim());
+      wrap.innerHTML = known.length ? known.map((f) => {
+        const filled = (f.value || '').trim();
+        const req = f.required ? ' *' : '';
+        return `<div class="profile-field"><span class="pf-key">${escapeHtml(f.key)}${req}</span><span class="pf-val">${escapeHtml(filled)}</span></div>`;
+      }).join('') : '<span class="field-help">Пока нет заполненных полей интервью.</span>';
+      $('profilePending').innerHTML = pendingFields.length
+        ? pendingFields.map((f) => {
+            const question = (f.question || f.key || '').trim();
+            const detail = question && question !== (f.key || '').trim()
+              ? `<span class="pf-val">${escapeHtml(question)}</span>`
+              : '';
+            return `<div class="profile-field missing"><span class="pf-key">${escapeHtml(f.key)}</span>${detail}</div>`;
+          }).join('')
+        : '<span class="field-help">Все обязательные вопросы закрыты.</span>';
+    }
+
+    function renderProfileAgentContext(agent) {
+      const panel = $('profileAgentContext');
+      if (!panel) return;
+      agent = agent || {};
+      activeAgent = agent;
+      $('profileAgentDomain').value = agent.domain || '';
+      $('profileAgentInvariants').value = (agent.invariants || []).join('\n');
+      const rows = [];
+      if ((agent.domain || '').trim()) {
+        rows.push(`<span class="metric-line"><em>[agent:domain]</em><b>${escapeHtml(agent.domain.trim())}</b></span>`);
+      }
+      const invariants = agent.invariants || [];
+      if (invariants.length) {
+        rows.push(`<span class="metric-line"><em>[invariants]</em><b>${invariants.map(escapeHtml).join('<br>')}</b></span>`);
+      }
+      panel.innerHTML = rows.length
+        ? `<div class="metric-lines">${rows.join('')}</div>`
+        : '<span class="field-help">У агента нет сохранённого domain/invariants. Ниже можно записать отдельные long-term факты.</span>';
+    }
+
+    function agentContextPayload() {
+      return {
+        id: activeAgentId,
+        name: activeAgent?.name || $('activeAgentName').textContent,
+        provider: currentProvider(),
+        base_url: $('baseUrl').value.trim(),
+        model: selectedModel(),
+        system_prompt: textValue('systemPrompt'),
+        domain: $('profileAgentDomain').value.trim(),
+        invariants: lineToList('profileAgentInvariants'),
+        memory: memoryPayload(),
+      };
+    }
+
+    async function saveAgentContextFromProfile() {
+      if (!activeAgentId) { $('profileAgentContextStatus').textContent = 'Сначала войди в агента.'; return; }
+      try {
+        const data = await agentsManage({ action: 'save', agent: agentContextPayload() });
+        activeAgent = data.agent;
+        renderProfileAgentContext(data.agent);
+        renderInvariants(data.agent.invariants);
+        $('profileAgentContextStatus').textContent = 'Контекст агента сохранён.';
+      } catch (error) {
+        $('profileAgentContextStatus').textContent = 'Ошибка: ' + error.message;
+      }
+    }
+
+    function renderStageFlow(stage) {
+      const idx = TASK_STAGES.indexOf(stage || 'clarify');
+      $('taskStageFlow').innerHTML = TASK_STAGES.map((s, i) => {
+        const cls = i === idx ? 'stage-step current' : (i < idx ? 'stage-step passed' : 'stage-step');
+        return `<span class="${cls}">${s}</span>`;
+      }).join('');
+    }
+
+    function lifecycleRequirement(task) {
+      const stage = task.stage || 'clarify';
+      if (task.paused) {
+        if (task.pause_reason === 'plan_approval') return 'Напишите точно: «утверждаю план».';
+        if (task.pause_reason === 'stage_approval') return 'Напишите точно: «утверждаю результат».';
+        return 'Напишите «продолжай», чтобы снять ручную паузу.';
+      }
+      if (stage === 'clarify') return 'Clarify/Planning агент должен завершить уточнение задачи.';
+      if (stage === 'planning' && !task.plan_approved) {
+        const hasPlan = (task.artifacts || []).some((a) => a.stage === 'planning' && a.value);
+        return hasPlan
+          ? 'План сохранён. Для перехода нужен явный текст «утверждаю план».'
+          : 'PlanningAgent должен подготовить непустой план.';
+      }
+      if (stage === 'execution') return 'ExecutionAgent должен создать результат; затем автоматически запускается validation.';
+      if (stage === 'validation') return 'ValidationAgent должен успешно завершить проверку. Только после этого доступен done.';
+      return 'Задача завершена. Для новой работы создаётся новая задача.';
+    }
+
+    function lifecycleNextStage(stage) {
+      return ({ clarify: 'planning', planning: 'execution', execution: 'validation', validation: 'done' })[stage] || '—';
+    }
+
+    function renderLifecycleGate(task) {
+      const stage = task.stage || 'clarify';
+      const blocked = task.transition_block_reason || '';
+      const gate = $('taskGateStatus');
+      gate.className = 'lifecycle-card ' + (blocked ? 'blocked' : (stage === 'done' ? 'ready' : ''));
+      gate.textContent = task.paused
+        ? 'Переход остановлен: ожидается действие пользователя.'
+        : stage === 'done'
+          ? 'Validation пройдена. Lifecycle завершён.'
+          : 'Будущий stage-agent не запустится, пока условие выше не выполнено.';
+      $('taskBlockView').hidden = !blocked;
+      $('taskBlockView').textContent = blocked ? `Почему заблокировано: ${blocked}` : '';
+    }
+
+    function renderTaskPane(task) {
+      task = task || {};
+      const stage = task.stage || 'clarify';
+      $('taskStageBadge').textContent = stage;
+      $('taskNextStageView').textContent = lifecycleNextStage(stage);
+      renderStageFlow(stage);
+      $('taskCurrentStepView').textContent = task.current_step || `Работа стадии ${stage}`;
+      $('taskRequirementView').textContent = lifecycleRequirement(task);
+      $('taskResumeHintView').textContent = task.resume_hint || '—';
+      $('taskTitleView').textContent = task.title || '—';
+      $('taskGoalView').textContent = task.goal || '—';
+      renderLifecycleGate(task);
+    }
+
+    function renderInvariants(list) {
+      currentInvariants = list || [];
+      $('invariantsBox').value = currentInvariants.join('\n');
+      $('invariantCheckView').textContent = '';
+      $('violationsView').textContent = '';
+    }
+
+    function renderAgentState(state) {
+      if (!state) return;
+      if (state.stage) {
+        $('taskStageBadge').textContent = state.stage;
+        $('taskNextStageView').textContent = state.next_stage || lifecycleNextStage(state.stage);
+        renderStageFlow(state.stage);
+        setActiveAgentChip($('activeAgentName').textContent, state.stage);
+      }
+      if (state.current_step !== undefined) $('taskCurrentStepView').textContent = state.current_step || '—';
+      if (state.next_transition_requirement !== undefined) {
+        $('taskRequirementView').textContent = state.next_transition_requirement || '—';
+      }
+      if (state.resume_hint !== undefined) $('taskResumeHintView').textContent = state.resume_hint || '—';
+      renderLifecycleGate({
+        stage: state.stage || $('taskStageBadge').textContent,
+        paused: state.paused,
+        transition_block_reason: state.transition_block_reason || '',
+      });
+      if (state.stage_transition) {
+        const t = state.stage_transition;
+        $('taskTransitionLine').textContent = t.accepted
+          ? `Переход стадии: ${t.from} → ${t.to} ✓${t.reason ? ` — ${t.reason}` : ''}`
+          : `Переход ${t.from} → ${t.to} отклонён: ${t.reason || 'условия перехода не выполнены'}.`;
+      } else {
+        $('taskTransitionLine').textContent = '';
+      }
+      if ((state.violations || []).length) {
+        $('violationsView').innerHTML = 'Нарушены инварианты:<br>' +
+          state.violations.map((v) => `<span class="violation-item">• ${escapeHtml(v)}</span>`).join('<br>');
+      } else {
+        $('violationsView').textContent = '';
+      }
+      if (state.invariant_summary) {
+        const status = (state.invariant_status || 'not_run').toUpperCase();
+        $('invariantCheckView').textContent = `Invariant check ${status}: ${state.invariant_summary}`;
+      } else {
+        $('invariantCheckView').textContent = '';
+      }
+      if ((state.backlog || []).length) {
+        $('taskBacklogView').textContent =
+          'Параллельные задачи (на паузе): ' + state.backlog.join('; ');
+      } else {
+        $('taskBacklogView').textContent = '';
+      }
+      if ((state.pending_questions || []).length) {
+        $('profilePending').innerHTML = state.pending_questions
+          .map((question) => `<div class="profile-field missing"><span class="pf-key">${escapeHtml(question)}</span></div>`)
+          .join('');
+      }
+    }
+
+    // ---- Enter / refresh / delete ---------------------------------------
+    async function enterAgent(id) {
+      if (!id) return;
+      try {
+        const data = await agentsManage({ action: 'load', id });
+        const agent = data.agent || {};
+        activeAgent = agent;
+        activeAgentId = agent.id || id;
+        localStorage.setItem('ai_active_agent', activeAgentId);
+        // Reports are turn-scoped and agent-scoped. Never show the previous
+        // agent's activity while the new agent has not run a turn yet.
+        renderSwarmActivity(null);
+        if (agent.provider) { $('provider').value = agent.provider; $('provider').dispatchEvent(new Event('change', { bubbles: true })); }
+        if (agent.base_url) $('baseUrl').value = agent.base_url;
+        if (agent.model) {
+          $('model').value = agent.model;
+          if ($('model').value !== agent.model) $('customModel').value = agent.model;
+        }
+        applyAgentMemoryToForm(agent.memory);
+        applyTransportDefaultsForAgent(agent);
+        renderProfileAgentContext(agent);
+        renderProfilePane(data.profile);
+        renderProfileLongTermFacts(data.long_term_facts || []);
+        activeTaskId = data.task_id || 'default';
+        renderTaskPane(data.task);
+        renderInvariants(agent.invariants);
+        setActiveAgentChip(agent.name, (data.task && data.task.stage) || 'clarify');
+        showWorkspace();
+        await refreshUserProfiles();
+        // bind a fresh session for this agent (loadChatSession derives the system
+        // prompt from stored messages, so restore it AFTER the load)
+        chatSessionId = null;
+        chatHistory = [];
+        renderChatHistory();
+        await loadChatSession();
+        $('systemPrompt').value = agent.system_prompt || '';
+        await refreshAgentPanes();
+        await refreshDialogs();
+      } catch (error) {
+        $('gateListStatus').textContent = 'Ошибка входа: ' + error.message;
+      }
+    }
+
+    // Reload the agent's stored layers after a turn (profile/stage may have moved).
+    async function refreshAgentPanes() {
+      if (!activeAgentId) return;
+      try {
+        const data = await agentsManage({ action: 'load', id: activeAgentId, session_id: chatSessionId || null });
+        renderProfileAgentContext(data.agent);
+        renderProfilePane(data.profile);
+        activeTaskId = data.task_id || activeTaskId || 'default';
+        renderTaskPane(data.task);
+        setActiveAgentChip($('activeAgentName').textContent, (data.task && data.task.stage) || 'clarify');
+      } catch (_) { /* non-fatal */ }
+    }
+
+    // ---- Dialogs (chats) of the active agent ----------------------------
+    async function refreshDialogs() {
+      const bar = $('dialogsBar');
+      if (!activeAgentId) { bar.style.display = 'none'; return; }
+      bar.style.display = 'flex';
+      try {
+        const data = await agentsManage({ action: 'dialogs', id: activeAgentId });
+        renderDialogs(data.dialogs || []);
+      } catch (_) { /* non-fatal */ }
+    }
+
+    function renderDialogs(dialogs) {
+      const list = $('dialogsList');
+      if (!dialogs.length) {
+        list.innerHTML = '<span class="dialogs-label">пока один чат</span>';
+        return;
+      }
+      list.innerHTML = dialogs.map((d) => {
+        const active = d.id === chatSessionId ? ' active' : '';
+        const title = (d.title && d.title.trim()) || ('чат ' + d.id.slice(0, 6));
+        return `<span class="dialog-chip${active}" data-id="${escapeHtml(d.id)}" title="${escapeHtml(title)}">`
+          + `<span class="dc-title" data-act="switch">${escapeHtml(title)}</span>`
+          + `<span class="dc-del" data-act="del" title="Удалить чат">✕</span></span>`;
+      }).join('');
+      list.querySelectorAll('.dialog-chip').forEach((chip) => {
+        const id = chip.dataset.id;
+        chip.querySelector('[data-act="switch"]').addEventListener('click', () => switchDialog(id));
+        chip.querySelector('[data-act="del"]').addEventListener('click', (e) => { e.stopPropagation(); deleteDialog(id); });
+      });
+    }
+
+    async function switchDialog(sessionId) {
+      if (!sessionId || sessionId === chatSessionId) return;
+      resetBranches();
+      try {
+        const data = await requestJson('/api/agent/session', {
+          agent_id: backendAgentId(),
+          provider: currentProvider(),
+          model: selectedModel(),
+          session_id: sessionId,
+          new_session: false,
+          saved_agent_id: activeAgentId || null,
+        });
+        chatSessionId = data.session_id || sessionId;
+        forceNewSession = false;
+        chatHistory = data.messages || [];
+        restoreSystemPromptFromHistory(chatHistory);
+        setSessionMetrics(data.metrics);
+        if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
+        renderChatHistory();
+        await refreshAgentPanes();
+        await refreshDialogs();
+      } catch (error) {
+        setStatus('Ошибка переключения чата: ' + error.message, true);
+      }
+    }
+
+    async function newDialog() {
+      if (!activeAgentId) return;
+      await startNewChatSession();
+      await refreshDialogs();
+    }
+
+    async function deleteDialog(sessionId) {
+      if (!activeAgentId || !sessionId) return;
+      try {
+        const data = await agentsManage({ action: 'dialog-delete', id: activeAgentId, session_id: sessionId });
+        const remaining = data.dialogs || [];
+        if (sessionId === chatSessionId) {
+          if (remaining.length) { await switchDialog(remaining[0].id); }
+          else { await startNewChatSession(); }
+        }
+        renderDialogs(remaining.length ? remaining : []);
+        await refreshDialogs();
+      } catch (error) {
+        setStatus('Ошибка удаления чата: ' + error.message, true);
+      }
+    }
+
+    async function deleteFromGate() {
+      const id = $('gateAgentList').value;
+      if (!id) return;
+      try {
+        await agentsManage({ action: 'delete', id });
+        if (activeAgentId === id) { activeAgentId = null; localStorage.removeItem('ai_active_agent'); }
+        await refreshGateList();
+        $('gateListStatus').textContent = 'Агент удалён.';
+      } catch (error) {
+        $('gateListStatus').textContent = 'Ошибка удаления: ' + error.message;
+      }
+    }
+
+    async function saveInvariants() {
+      if (!activeAgentId) { $('invariantsStatusLine').textContent = 'Сначала войди в агента.'; return; }
+      try {
+        $('profileAgentInvariants').value = $('invariantsBox').value;
+        const data = await agentsManage({
+          action: 'save',
+          agent: agentContextPayload(),
+        });
+        activeAgent = data.agent;
+        renderProfileAgentContext(data.agent);
+        renderInvariants(data.agent.invariants);
+        $('invariantsStatusLine').textContent = 'Инварианты сохранены.';
+      } catch (error) {
+        $('invariantsStatusLine').textContent = 'Ошибка: ' + error.message;
+      }
+    }
+
+    // kind: 'llm' = настоящий агент с запросом к провайдеру (есть модель/промпт);
+    //       'code' = детерминированная проверка в коде (нет LLM и провайдера).
+    const SWARM_ROLES = [
+      { role: 'planning', group: 'Этапы задачи (LLM-агенты)', kind: 'llm', label: 'Planning', hint: 'Собирает требования и утверждает план (сюда сворачивается Clarify).' },
+      { role: 'execution', group: 'Этапы задачи (LLM-агенты)', kind: 'llm', label: 'Execution', hint: 'Пишет код / создаёт артефакты в рамках текущего шага.' },
+      { role: 'validation', group: 'Этапы задачи (LLM-агенты)', kind: 'llm', label: 'Validation', hint: 'Тесты, ревью, соответствие плану.' },
+      { role: 'done', group: 'Этапы задачи (LLM-агенты)', kind: 'llm', label: 'Done', hint: 'Фиксирует итог. Терминальная стадия.' },
+      { role: 'general', group: 'Ответчик (LLM-агент)', kind: 'llm', label: 'General', hint: 'Дефолтный ответчик для обычного чата без задачи.' },
+      { role: 'memory', group: 'Сервисные LLM-агенты', kind: 'llm', label: 'Память', hint: 'Извлекает факты и обновляет долговременную память на любой стратегии.' },
+      { role: 'summary', group: 'Сервисные LLM-агенты', kind: 'llm', label: 'Саммари', hint: 'Сжимает старую историю в summary.' },
+      { role: 'topic', group: 'Сервисные LLM-агенты', kind: 'llm', label: 'Темы', hint: 'Авто-роутинг по scoped-branches — локально; при включённой классификации тем зовёт LLM.' },
+      { role: 'profile', group: 'Сервисные LLM-агенты', kind: 'llm', label: 'Профиль', hint: 'Заполняет интервью-профиль агента из диалога.' },
+    ];
+
+    function renderSwarmActivity(report) {
+      const records = report?.records || [];
+      if (!records.length) {
+        $('swarmActivity').innerHTML =
+          '<div class="field-help">В этом ходе provider-агенты не запускались: ответ мог быть локально остановлен lifecycle guard.</div>';
+        return;
+      }
+      $('swarmActivity').innerHTML = records.map((record) => {
+        const worker = record.role === 'worker';
+        const label = worker
+          ? `worker:${record.agent_id || 'unnamed'}`
+          : record.role;
+        const direction = record.direction ? ` · ${record.direction}` : '';
+        const cls = `swarm-run ${record.ran ? 'ran' : ''} ${worker ? 'worker' : ''}`;
+        return `<div class="${cls}">
+          <span class="swarm-run-role">${escapeHtml(label)}${escapeHtml(direction)}</span>
+          <span class="swarm-run-note">${escapeHtml(record.note || (record.ran ? 'выполнен' : 'не требовался'))}</span>
+          <span class="swarm-run-model">${escapeHtml(record.model || '—')}</span>
+        </div>`;
+      }).join('');
+    }
+
+    function renderSwarmRows(config) {
+      const container = $('swarmRows');
+      const byRole = new Map((config?.agents || []).map((agent) => [agent.role, agent]));
+      let lastGroup = null;
+      container.innerHTML = SWARM_ROLES.map((meta) => {
+        const agent = byRole.get(meta.role) || { provider: '', base_url: '', model: '', system_prompt: '' };
+        let header = '';
+        if (meta.group !== lastGroup) {
+          lastGroup = meta.group;
+          header = `<div class="swarm-group-title">${escapeHtml(meta.group)}</div>`;
+        }
+        const def = (swarmRoleDefaults[meta.role] || '').trim();
+        const scopeHint = meta.role === 'general'
+          ? 'Пусто — общая (основная) память агента. Своё имя scope — приватная.'
+          : 'Пусто — СВОЯ приватная память (по умолчанию). Впиши «shared», чтобы делить общую память.';
+        const defaultBlock = def
+          ? `<details class="swarm-default-prompt"><summary>Промт роли по умолчанию</summary><div class="swarm-default-text">${escapeHtml(def)}</div></details>`
+          : '';
+        return `${header}
+          <details class="panel" data-role="${meta.role}" data-kind="llm">
+            <summary>
+              <span class="swarm-role-title">${escapeHtml(meta.label)}</span>
+              <span class="swarm-kind-tag">LLM</span>
+            </summary>
+            <div class="panel-body">
+              <div class="field-help">${escapeHtml(meta.hint)}</div>
+              <label>Provider (пусто = как у агента)<input class="swarm-provider" spellcheck="false" value="${escapeHtml(agent.provider || '')}" placeholder="openai-compatible / deepseek / openrouter ..."></label>
+              <label>Base URL<input class="swarm-base-url" spellcheck="false" value="${escapeHtml(agent.base_url || '')}" placeholder="пусто = как у агента"></label>
+              <label>Model${swarmModelSelectHtml(agent.model || '')}</label>
+              <label>System prompt<textarea class="swarm-prompt" rows="3" placeholder="${def ? 'пусто = промт роли по умолчанию (см. ниже)' : 'пусто = промт роли по умолчанию'}">${escapeHtml(agent.system_prompt || '')}</textarea></label>
+              ${defaultBlock}
+              <label>Память (scope)<input class="swarm-memory-scope" spellcheck="false" value="${escapeHtml(agent.memory_scope || '')}" placeholder="пусто = своя приватная; 'shared' = общая"></label>
+              <div class="field-help">${escapeHtml(scopeHint)} Факты изолированы между агентами; обмен только через оркестратор.</div>
+            </div>
+          </details>`;
+      }).join('');
+    }
+
+    // Model field as a dropdown (same list as the main form) + a "свой id" option,
+    // so the user picks from the list instead of typing the id by hand.
+    function swarmModelSelectHtml(current) {
+      const ids = [...loadedModelIds];
+      if (current && !ids.includes(current)) ids.unshift(current);
+      const options = ['<option value="">пусто = как у агента</option>']
+        .concat(ids.map((id) => `<option value="${escapeHtml(id)}"${id === current ? ' selected' : ''}>${escapeHtml(id)}</option>`))
+        .concat('<option value="__custom__">— свой id…</option>')
+        .join('');
+      const showCustom = current && !loadedModelIds.includes(current);
+      return `<select class="swarm-model">${options}</select>`
+        + `<input class="swarm-model-custom" spellcheck="false" value="${showCustom ? escapeHtml(current) : ''}" placeholder="свой id модели" style="display:${showCustom ? 'block' : 'none'};margin-top:4px;">`;
+    }
+
+    // Re-fill the model <select> options after a fresh /api/models load without
+    // losing the current per-agent selection.
+    function refreshSwarmModelOptions() {
+      document.querySelectorAll('#swarmRows details[data-kind="llm"]').forEach((row) => {
+        const select = row.querySelector('.swarm-model');
+        const custom = row.querySelector('.swarm-model-custom');
+        if (!select) return;
+        const current = select.value === '__custom__' ? (custom ? custom.value.trim() : '') : select.value;
+        const ids = [...loadedModelIds];
+        if (current && !ids.includes(current)) ids.unshift(current);
+        select.innerHTML = ['<option value="">пусто = как у агента</option>']
+          .concat(ids.map((id) => `<option value="${escapeHtml(id)}"${id === current ? ' selected' : ''}>${escapeHtml(id)}</option>`))
+          .concat('<option value="__custom__">— свой id…</option>')
+          .join('');
+      });
+    }
+
+    async function loadSwarm() {
+      if (!activeAgentId) {
+        $('swarmRows').innerHTML = '';
+        $('swarmStatusLine').textContent = 'Рой настраивается для сохранённого агента. Сначала войди в агента.';
+        return;
+      }
+      try {
+        const data = await agentsManage({ action: 'swarm-load', id: activeAgentId });
+        swarmRoleDefaults = {};
+        for (const item of (data.swarm_role_defaults || [])) swarmRoleDefaults[item.role] = item.prompt;
+        renderSwarmRows(data.swarm);
+        $('swarmStatusLine').textContent = '';
+      } catch (error) {
+        $('swarmStatusLine').textContent = 'Ошибка: ' + error.message;
+      }
+    }
+
+    function collectSwarmPayload() {
+      // Code-checks have no provider/model/prompt — only LLM agents are configurable.
+      const agents = Array.from($('swarmRows').querySelectorAll('details[data-kind="llm"]')).map((row) => ({
+        role: row.dataset.role,
+        enabled: true,
+        provider: row.querySelector('.swarm-provider').value.trim(),
+        base_url: row.querySelector('.swarm-base-url').value.trim(),
+        model: swarmModelValue(row),
+        system_prompt: row.querySelector('.swarm-prompt').value,
+        memory_scope: row.querySelector('.swarm-memory-scope').value.trim(),
+      }));
+      return { agents };
+    }
+
+    // Resolve the model for one swarm row: the dropdown value, or the custom-id
+    // input when "— свой id…" is chosen.
+    function swarmModelValue(row) {
+      const select = row.querySelector('.swarm-model');
+      if (!select) return '';
+      if (select.value === '__custom__') {
+        const custom = row.querySelector('.swarm-model-custom');
+        return custom ? custom.value.trim() : '';
+      }
+      return select.value.trim();
+    }
+
+    // Toggle the custom-id input when the user picks "— свой id…".
+    $('swarmRows').addEventListener('change', (event) => {
+      if (!event.target.classList.contains('swarm-model')) return;
+      const row = event.target.closest('details[data-kind="llm"]');
+      const custom = row && row.querySelector('.swarm-model-custom');
+      if (custom) custom.style.display = event.target.value === '__custom__' ? 'block' : 'none';
+    });
+
+    async function saveSwarm() {
+      if (!activeAgentId) { $('swarmStatusLine').textContent = 'Сначала войди в агента.'; return; }
+      try {
+        const data = await agentsManage({ action: 'swarm-save', id: activeAgentId, swarm: collectSwarmPayload() });
+        renderSwarmRows(data.swarm);
+        $('swarmStatusLine').textContent = 'Рой сохранён.';
+      } catch (error) {
+        $('swarmStatusLine').textContent = 'Ошибка: ' + error.message;
+      }
+    }
+
     function renderFactsDebug(factsDebug) {
       const kvPanel = $('factsKvPreview');
       const blockPanel = $('factsPreview');
@@ -1560,7 +2943,7 @@
       if (!persisted.length) {
         kvPanel.textContent = 'Пока пусто. Facts обновляются после каждого user message.';
       } else {
-        kvPanel.innerHTML = `<div class="metric-lines">${persisted.map((fact) => `<span class="metric-line"><em>${escapeHtml(fact.key)}</em><b>${escapeHtml(fact.value)}</b></span>`).join('')}</div>`;
+        kvPanel.innerHTML = `<div class="metric-lines">${persisted.map((fact) => `<span class="metric-line"><em>${escapeHtml(fact.key)} <span class="topic-chip">${escapeHtml(fact.layer || 'long-term')}</span></em><b>${escapeHtml(fact.value)}</b></span>`).join('')}</div>`;
       }
       if (factsDebug?.request_block) {
         blockPanel.textContent = `EXTRACTION_PROMPT:\n${factsDebug.extraction_prompt || '(default)'}\n\nFACTS_BLOCK:\n${factsDebug.request_block}\n\nRECENT_MESSAGES_SENT: ${factsDebug.recent_messages_sent}`;
@@ -1807,6 +3190,7 @@
       setSessionMetrics(data.metrics);
       if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
       renderChatHistory();
+      await refreshAgentPanes();
     }
 
     function setMetrics(metrics, contextMetrics = null) {
@@ -1940,7 +3324,9 @@
       }
     }
     function restoreModelList() {
-      const provider = currentProvider();
+      return restoreModelListFor(currentProvider());
+    }
+    function restoreModelListFor(provider) {
       const raw = localStorage.getItem(`ai_models:${provider}`);
       if (!raw) return null;
       try { return JSON.parse(raw).map((id) => ({ id, pricing: null })); } catch { return null; }
@@ -1980,6 +3366,9 @@
         if (model.context_length != null) modelContextById.set(model.id, model.context_length);
       }
       $('model').innerHTML = uniqueModels.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.id)}</option>`).join('');
+      // Cache ids so swarm-agent cards can offer the same dropdown as the main form.
+      loadedModelIds = uniqueModels.map((model) => model.id);
+      if (typeof refreshSwarmModelOptions === 'function') refreshSwarmModelOptions();
       if (selectedModel && uniqueModels.some((model) => model.id === selectedModel)) {
         $('model').value = selectedModel;
       }
@@ -2026,9 +3415,7 @@
       $('rubRate').addEventListener('input', () => localStorage.setItem('rubRate', $('rubRate').value));
       const agentData = await requestJson('/api/agents');
       agents = agentData.agents || [];
-      $('agentMode').innerHTML = agents.map((agent) => `<option value="${escapeHtml(agent.id)}">${escapeHtml(agent.name)}</option>`).join('');
       if (!agents.length) throw new Error('Нет доступных агентов');
-      $('agentMode').value = agents[0].id;
       const data = await requestJson('/api/providers');
       providers = data.providers;
       providerSelect.innerHTML = providers.map((item) => `<option value="${item.id}">${item.name}</option>`).join('');
@@ -2036,9 +3423,14 @@
       applyProviderDefaults();
       updateProviderDocLink();
       renderBranchControls();
+      populateGateProviders();
       await refreshTokenStatus();
-      await loadChatSession();
       await loadModels().catch(() => {}); // автозагрузка; ошибка не критична
+      await refreshUserProfiles();
+      // Agent-centric entry: always show the chooser/create gate on load.
+      // The last agent is selected in the list, but chat opens only after
+      // an explicit "Войти" or "Создать и войти" action.
+      showGate();
       setStatus('Готово');
     }
 
@@ -2066,6 +3458,19 @@
     }
 
     let activeAbortController = null;
+
+    function parseSseEventBlock(block) {
+      let type = '';
+      const data = [];
+      for (const line of block.replaceAll('\r\n', '\n').split('\n')) {
+        if (line.startsWith('event:')) {
+          type = line.slice(6).trim();
+        } else if (line.startsWith('data:')) {
+          data.push(line.slice(5).replace(/^ /, ''));
+        }
+      }
+      return type ? { type, data: data.join('\n') } : null;
+    }
 
     async function sendPrompt() {
       if (!$('streamMode').checked) {
@@ -2129,47 +3534,61 @@
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let sseBuffer = '';
+        let gotDoneEvent = false;
+
+        const handleSseEvent = (parsed) => {
+          if (!parsed) return;
+          const eventType = parsed.type;
+          const eventData = parsed.data;
+          if (eventType === 'token') {
+            lastTokenAt = Date.now();
+            accText += eventData;
+            updateStreamingMessage(assistantEl, accText);
+          } else if (eventType === 'done') {
+            gotDoneEvent = true;
+            const data = JSON.parse(eventData);
+            chatSessionId = data.session_id || chatSessionId;
+            forceNewSession = false;
+            if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
+            chatHistory = data.messages || chatHistory;
+            updateActiveBranchFromResponse(chatSessionId, chatHistory);
+            restoreSystemPromptFromHistory(chatHistory);
+            renderChatHistory(); // финальный рендер с метаданными
+            setMetrics(data.metrics, data.context_metrics);
+            setSessionMetrics(data.session_metrics);
+            setDebug(data.debug);
+            setContextDebug(data.context_debug);
+            renderAgentState(data.agent_state);
+            renderSwarmActivity(data.swarm_report);
+            refreshAgentPanes();
+            refreshDialogs();
+            setStatus('Готово');
+          } else if (eventType === 'error') {
+            throw new Error(eventData);
+          }
+        };
 
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          sseBuffer += decoder.decode(value, { stream: true });
-          const lines = sseBuffer.split('\n');
-          sseBuffer = lines.pop(); // последняя неполная строка
-
-          let eventType = null;
-          let eventData = null;
-          for (const line of lines) {
-            if (line.startsWith('event: ')) {
-              eventType = line.slice(7).trim();
-            } else if (line.startsWith('data: ')) {
-              eventData = line.slice(6);
-            } else if (line === '' && eventType && eventData !== null) {
-              if (eventType === 'token') {
-                lastTokenAt = Date.now();
-                accText += eventData;
-                updateStreamingMessage(assistantEl, accText);
-              } else if (eventType === 'done') {
-                const data = JSON.parse(eventData);
-                chatSessionId = data.session_id || chatSessionId;
-                forceNewSession = false;
-                if (chatSessionId) localStorage.setItem(sessionCacheKey(), chatSessionId);
-                chatHistory = data.messages || chatHistory;
-                updateActiveBranchFromResponse(chatSessionId, chatHistory);
-                restoreSystemPromptFromHistory(chatHistory);
-                renderChatHistory(); // финальный рендер с метаданными
-                setMetrics(data.metrics, data.context_metrics);
-                setSessionMetrics(data.session_metrics);
-                setDebug(data.debug);
-                setContextDebug(data.context_debug);
-                setStatus('Готово');
-              } else if (eventType === 'error') {
-                throw new Error(eventData);
-              }
-              eventType = null;
-              eventData = null;
-            }
+          sseBuffer += decoder.decode(value, { stream: true }).replaceAll('\r\n', '\n');
+          let boundary;
+          while ((boundary = sseBuffer.indexOf('\n\n')) !== -1) {
+            const block = sseBuffer.slice(0, boundary);
+            sseBuffer = sseBuffer.slice(boundary + 2);
+            handleSseEvent(parseSseEventBlock(block));
           }
+        }
+        sseBuffer += decoder.decode();
+        if (sseBuffer.trim()) {
+          handleSseEvent(parseSseEventBlock(sseBuffer));
+        }
+        if (!gotDoneEvent && accText && assistantEl) {
+          assistantEl.classList.remove('streaming');
+          assistantEl.textContent = accText;
+          chatHistory = [...chatHistory, { role: 'assistant', content: accText }];
+          renderChatHistory();
+          setStatus('Готово: стрим завершился без финального события', true);
         }
         await refreshTokenStatus();
       } catch (error) {
@@ -2178,11 +3597,12 @@
           // Partial response — keep what arrived, finalize streaming bubble
           if (assistantEl) {
             assistantEl.classList.remove('streaming');
+            assistantEl.title = 'Частичный ответ остановлен локально и не сохранён в истории сервера.';
             assistantEl.textContent = accText;
           }
           chatHistory = [...chatHistory, { role: 'assistant', content: accText }];
           renderChatHistory();
-          setStatus('Остановлено', true);
+          setStatus('Остановлено: частичный ответ не сохранён', true);
         } else {
           if (!accText) {
             chatHistory = chatHistory.slice(0, -1);
@@ -2258,6 +3678,10 @@
         setSessionMetrics(data.session_metrics);
         setDebug(data.debug);
         setContextDebug(data.context_debug);
+        renderAgentState(data.agent_state);
+        renderSwarmActivity(data.swarm_report);
+        refreshAgentPanes();
+        refreshDialogs();
         setStatus('Готово');
         await refreshTokenStatus();
       } catch (error) {
@@ -2369,6 +3793,55 @@
     }
 
     $('attachBtn').addEventListener('click', () => $('fileInput').click());
+    $('switchAgent').addEventListener('click', showGate);
+    $('newAgent').addEventListener('click', showCreateAgentGate);
+    $('gateEnter').addEventListener('click', () => enterAgent($('gateAgentList').value));
+    $('gateDelete').addEventListener('click', deleteFromGate);
+    $('gateAgentList').addEventListener('dblclick', () => enterAgent($('gateAgentList').value));
+    $('gateProvider').addEventListener('change', applyGateProviderDefaults);
+    $('gateLoadModels').addEventListener('click', gateLoadModels);
+    $('gateBuildSchema').addEventListener('click', gateBuildSchema);
+    $('gateSchemaAdd').addEventListener('click', () => addSchemaRow());
+    $('gateCreate').addEventListener('click', createAgentFromGate);
+    $('invariantsSave').addEventListener('click', saveInvariants);
+    $('swarmSave').addEventListener('click', saveSwarm);
+    $('profileAgentContextSave').addEventListener('click', saveAgentContextFromProfile);
+    $('dialogNew').addEventListener('click', newDialog);
+    $('userProfileSelect').addEventListener('change', () => {
+      activeUserProfileId = $('userProfileSelect').value || '';
+      loadSelectedUserProfileIntoForm();
+      bindActiveUserProfile(false);
+    });
+    $('userProfileBind').addEventListener('click', () => bindActiveUserProfile(false));
+    $('userProfileDefaultForAgent').addEventListener('click', () => bindActiveUserProfile(true));
+    $('userProfileSave').addEventListener('click', saveUserProfile);
+    $('userProfileDelete').addEventListener('click', deleteUserProfile);
+
+    $('memoryFactAdd').addEventListener('click', () => {
+      const key = $('memoryLayerKey').value.trim();
+      const value = $('memoryLayerValue').value.trim();
+      if (!key || !value) {
+        $('memoryLayerStatus').textContent = 'Укажите ключ и значение.';
+        return;
+      }
+      memoryUpdate('set', { layer: $('memoryLayerSelect').value, key, value }).then(() => {
+        $('memoryLayerKey').value = '';
+        $('memoryLayerValue').value = '';
+      });
+    });
+    $('profileLongTermAdd').addEventListener('click', () => {
+      const key = $('profileLongTermKey').value.trim();
+      const value = $('profileLongTermValue').value.trim();
+      if (!key || !value) {
+        $('profileLongTermStatus').textContent = 'Укажите ключ и значение.';
+        return;
+      }
+      memoryUpdate('set', { layer: 'long-term', key, value }, 'profileLongTermStatus').then(() => {
+        $('profileLongTermKey').value = '';
+        $('profileLongTermValue').value = '';
+      });
+    });
+
     $('fileInput').addEventListener('change', async (e) => {
       const files = e.target.files;
       if (!files || files.length === 0) return;
@@ -2394,7 +3867,6 @@
     });
     $('token').addEventListener('input', markTokenOverrideProvider);
     $('saveToken').addEventListener('click', saveTokenOverride);
-    $('agentMode').addEventListener('change', () => { chatSessionId = null; chatHistory = []; branchState = { checkpoint: null, branches: [], activeId: null }; renderChatHistory(); loadChatSession(); });
     $('model').addEventListener('change', () => { resolveSelectedModelPricing(); updateContextBadge(); persistSelectedModel(); loadChatSession(); });
     $('customModel').addEventListener('input', () => { resolveSelectedModelPricing(); updateContextBadge(); persistSelectedModel(); loadChatSession(); });
     $('memoryStrategy').addEventListener('change', () => {
@@ -2434,7 +3906,7 @@ $('stopBtn').addEventListener('click', () => { if (activeAbortController) active
     $('clear').addEventListener('click', async () => {
       try {
         await startNewChatSession();
-        setStatus('Новая сессия создана');
+        setStatus('Новый чат создан');
       } catch (error) {
         localStorage.removeItem(sessionCacheKey());
         chatSessionId = null;

@@ -9,10 +9,12 @@
 - `agent_tests.rs` - unit-тесты `ChatAgent`.
 - `session.rs` - интерактивный `ai chat`, slash-команды и terminal I/O.
 - `goal.rs` - `ConversationGoal`, `GoalState`, stop modes и сравнение goal режимов.
-- `memory.rs` - `AgentMemory`, `MemoryConfig`, summary, sticky facts и выбор сообщений для context strategies.
+- `memory.rs` - `AgentMemory`, `MemoryConfig`, `MemoryLayer`, summary, sticky facts, слои памяти и выбор сообщений для context strategies.
 - `memory_tests.rs` - unit-тесты `AgentMemory`.
 - `token_accounting.rs` - локальная оценка токенов запроса, истории, ответа, стоимости и overflow по context limit.
 - `store.rs` - `LocalSessionStore`: TOON-сессии, context sidecar, индекс последней сессии.
+- `store_types.rs` - persisted DTO/stateful-agent/task/user-profile types used by the store and web API.
+- `store_tests.rs` - unit-тесты `LocalSessionStore` и persisted state types.
 - `history.rs` - сохранение истории в файл.
 - `AGENT_RUNTIME.md` - подробная модель локального agent runtime.
 
@@ -53,8 +55,7 @@ Sticky Facts
   -> хранит facts в `AgentMemory.facts` как local key-value sidecar
   -> использует настраиваемый facts extraction prompt, чтобы выбрать категории KV
   -> извлекает атомарные KV-факты, а не сохраняет весь user prompt по слову-триггеру
-  -> отправляет отдельный read-only facts block + последние N сообщений, включая текущий user prompt
-  -> Web debug показывает persisted KV facts и точный facts block для provider request
+  -> последние N сообщений включают текущий user prompt
 
 Branching
   -> работает с независимой веткой истории
@@ -68,6 +69,233 @@ Scoped Branches
   -> в provider request попадает только автоматически выбранная тема + system/facts
 ```
 
+## Слои памяти (memory layers)
+
+`MemoryLayer` задаёт явную модель памяти поверх существующих типов. Минимум 3 слоя:
+
+```text
+short-term
+  -> recent message window + AgentMemory.session_summary (Summary/SlidingWindow)
+  -> lifetime: текущий диалог; эфемерно, в новую сессию НЕ переносится
+  -> в контексте помечается блоком "[memory:short-term] ..."
+
+working
+  -> данные текущей задачи: goal, constraints (+ ConversationGoal/GoalState в goal.rs)
+  -> lifetime: текущая сессия; хранится в per-session memory sidecar
+  -> в новой сессии пусто
+
+long-term
+  -> устойчивые знания: preferences, decisions, профиль (location/age/interests/...)
+  -> lifetime: между сессиями; дублируется в profile-shared store
+     (`longterm-<profile>.memory.toon`) и seed-ится в каждую новую сессию
+```
+
+Persisted KV facts (`working`/`long-term`) отправляются в provider request как
+read-only facts block при любой context strategy. `Sticky Facts` отвечает только
+за автоматическое извлечение/обновление этих facts из сообщений.
+
+- Явный выбор слоя — это работа агента: при Sticky Facts экстрактор
+  (`facts_extraction_prompt`) возвращает для каждого факта `layer`
+  (`{"facts":[{"key","value","layer"}]}`), и `merge_extracted_facts_with_layers`
+  пишет факт в выбранный слой. `ShortTerm` от модели демотируется в `Working`
+  (short-term не хранит KV). Это и есть "агент сам решает, что и куда сохранять".
+- Fallback-роутинг, когда слой не задан (legacy/flat JSON или keyword-путь без
+  LLM): `default_fact_layer(key)` -> `goal`/`constraints` = `working`, всё
+  остальное = `long-term`. `short-term` не хранит KV-факты.
+- Ручное переопределение слоя при записи:
+  `AgentMemory::set_fact_in_layer(key, value, layer)`.
+  Слой каждого ключа -> `AgentMemory::fact_layer(key)`; факты слоя ->
+  `facts_in_layer(layer)`. Ручное управление: `remove_fact(key)`,
+  `clear_layer(layer)` (для `short-term` также чистит summary). `looks_sensitive()`
+  — публичный guard, чтобы не писать секреты в `long-term` (web `/api/memory/update`).
+- `facts_block` группирует KV по слоям с метками `[working]` / `[long-term]`, так
+  что в provider request видно, из какого слоя пришёл факт.
+- trace: установите env `AI_MEMORY_TRACE=1`, чтобы в stderr печаталось
+  `[memory] fact <key> → layer <layer>` при каждой записи.
+- Персист: `LocalSessionStore::save_long_term` / `load_long_term` /
+  `seed_long_term` (профильный файл). `save_memory` хранит per-session sidecar
+  как раньше. Сценарий «новая сессия»: long-term остаётся, short-term пуст
+  (тест `long_term_survives_new_session_short_term_does_not` в `store_tests.rs`).
+
+## Stateful-агенты (SavedAgent)
+
+Персистентная сущность агента поверх трёх слоёв памяти (`store_types.rs` + storage в `store.rs`). Память
+**заполняется самим агентом**, не вручную: юзер задаёт только домен + инварианты.
+
+- `SavedAgent` — настройки (provider/base_url/model/system_prompt + `domain` +
+  `invariants` + `SavedMemoryConfig`). Токен НЕ хранится (keyring).
+- `TaskContext` — **рабочая** память: `stage` (FSM) + title/goal/plan/results/notes
+  + `violations` + `backlog`. Стадия ведётся автоматически и хранится на рабочую
+  задачу/фичу, к которой могут быть привязаны один или несколько диалогов.
+  `backlog` — параллельные задачи (каждая на паузе, со своей стадией/планом), не
+  теряются при переключении. `start_new_task` паркует активную задачу в backlog и
+  заводит свежий `clarify`; `switch_to_backlog` возвращает приостановленную.
+  Оркестратор делает это детерминированно (`apply_task_switching`): новая задача
+  по интенту — единственный способ уйти со терминальной стадии `done` (у неё нет
+  исходящих переходов), а «вернёмся к …» резюмит нужную задачу из backlog.
+- `AgentProfile` (`Vec<ProfileField>`) — **долговременная** память: схема интервью
+  (key/question/required) + заполненные агентом значения.
+- **краткосрочная** память — обычная сессия чата, `session_key = "agent:<id>"`.
+
+`TaskStage` (`clarify`, `planning`, `execution`, `validation`, `done`) — переходы
+валидируются кодом (`can_transition`/`allowed_next`), нелегальные отклоняются.
+Основной путь `clarify→planning→execution→validation→done`, но FSM также допускает
+разрешенные завершения в `done` и возвраты `execution→planning` /
+`validation→execution`. Сериализуется как строка (как `MemoryLayer`), чтобы TOON
+хранил её как plain-значение.
+
+Lifecycle принуждается не только таблицей:
+
+- responder всегда выбирается по сохранённой `TaskContext.stage`; intent запроса
+  не может запустить будущего stage-agent;
+- завершение Planning сохраняет plan artifact и ставит
+  `pause_reason=plan_approval`; переход в Execution возможен только после точного
+  пользовательского approval (`утверждаю план`);
+- Execution должна сохранить непустой artifact до Validation;
+- Done достижим только после непустого validation artifact и
+  `validation_passed=true`;
+- отклонённый запрос возвращает локальный отказ с причиной и не вызывает
+  будущего responder;
+- `revision` обеспечивает optimistic concurrency: stale task writer получает
+  conflict вместо silent overwrite.
+
+`TaskContext.pipeline` задает stage-level pipeline contract: у каждой стадии есть
+`system_prompt`, список `worker_agents` (id/direction/system_prompt), ожидаемый
+`artifact_key` и флаг `requires_human_approval`. Когда стадия рождает artifact,
+`complete_pipeline_stage` детерминированно переводит задачу к следующей стадии или
+ставит `paused=true` и `expected_action=user_input`, если требуется human approval.
+Artifacts сохраняются в `TaskContext.artifacts` и инъектятся в `[memory:working]`
+для main-agent/orchestrator.
+
+Pipeline обязан содержать ровно `planning→execution→validation`. Каждый
+`worker_agent` теперь является реальным provider sub-request:
+`PipelineWorkerAgent` запускается до stage responder, сохраняет
+`worker.<id>` artifact, а результаты всех workers инъектятся stage responder в
+`[pipeline:worker-results]`. Пустой/упавший worker fail-closed блокирует стадию.
+
+Хранение через `LocalSessionStore`: `agent-<id>.agent.toon`, legacy/default
+`*.task.toon`, task-scoped `agent-<id>.task-<task>.toon`,
+`*.profile.toon`, `*.dialogs.toon`, индекс `agents-index.toon` (со стадией). Методы
+`list_agents`, `load_agent`, `save_agent`, `delete_agent`,
+`load_dialog_task`/`save_dialog_task` (через `DialogMeta.task_id`),
+`assign_dialog_task`, legacy `load_task`/`save_task`, `load_profile`/`save_profile`;
+общий atomic-io `write_toon`/`read_toon`.
+
+**Несколько диалогов на агента**: `DialogMeta` (id/title/timestamps), индекс
+`agent-<id>.dialogs.toon`. Все чаты агента делят долговременный профиль и
+инварианты; рабочая задача задается `DialogMeta.task_id`, поэтому несколько чатов
+могут работать над одной фичей, а разные фичи могут быть разнесены по разным
+`task_id`. История остается per-dialog (`session_id`). `save_session`
+авто-регистрирует диалог, если ключ — `agent:*` (`agent_id_from_key`), title — из
+первого user-сообщения. Методы `list_dialogs`, `register_dialog`, `rename_dialog`,
+`delete_dialog` (чистит session/metrics/memory, но не shared task).
+
+`ChatAgent` собирает stateful prompt через prompt builder
+(`inject_memory_layers`): `[agent:domain]`, `[memory:long-term]` (профиль + что
+ещё спросить), `[memory:working]` (стадия + allowed-next + план/current step как
+авторитетное состояние), `[invariants]` (+ прошлые нарушения как фидбэк),
+`[user-profile]`, затем текущий user query. Runtime-профиль пользователя
+дедуплицируется относительно профиля агента и инвариантов, чтобы одинаковые
+строки не попадали в system prompt дважды.
+
+Reusable `UserProfile` хранится отдельно от `SavedAgent` и `AgentProfile`.
+Он описывает пользователя (стиль, формат, язык, ограничения ответа) и
+подмешивается только на runtime блоком `[user-profile]`; agent definition не
+владеет им и не дублирует его предпочтения.
+
+Перед сохранением обычного non-streaming ответа главный агент делает
+orchestrator validation pass: проверяет ответ против инвариантов и, если нужно,
+делает скрытые corrective retry (до `MAX_INVARIANT_RETRIES`). Если нарушения
+переживают ретраи и санитайзер, ответ **блокируется** и заменяется детерминированным
+отказом (`build_invariant_refusal`): инварианты приоритетнее запроса и никогда не
+отдаются нарушенными. Произвольный инвариант, который локальный checker не умеет
+проверить сам, требует валидный JSON-результат `InvariantAgent`; таймаут,
+недоступность или невалидная схема работают fail-closed: исходный ответ не
+показывается, вместо него агент просит формализовать ограничение или повторить
+проверку. В историю попадает только исправленный, отказной или уточняющий ответ.
+Известные code-level positive rules (`факты/предположения`, `документы/риски`,
+`срочность`) не требуют буквальных заголовков в каждом ответе: код блокирует
+явное отрицание правила, а обычный краткий ответ считается допустимым.
+Compliance/refusal-ответ не двигает task FSM и не меняет title/goal/artifacts.
+`StatefulReport` несёт безопасный `invariant_status`/`invariant_summary` для UI
+без раскрытия chain-of-thought. Stateful lifecycle полностью выполняется внутри
+`SwarmOrchestrator`; `ChatAgent` только сохраняет полученный `StatefulReport`
+(pending-вопросы, стадия, gate requirement, `StageTransition`, нарушения,
+метрики). `build_profile_schema()` — LLM-генерация схемы интервью из домена.
+Каждый provider-backed шаг gated на наличии данных.
+
+## Рой агентов (swarm)
+
+Клиент видит одно окно главного агента, но под капотом каждый ход исполняет
+обязательный рой настоящих сущностей (`swarm/`). **Агент = класс** (`trait
+SubAgent`), а не галочка; роли нельзя отключить — только настроить их
+provider/model + system prompt. Конфиг (`SwarmConfig`, token-free) хранится в
+`SavedAgent.swarm` (`#[serde(default)]` → старые агенты грузятся как `defaults()`;
+legacy-поле `enabled` нормализуется в `true`).
+
+Сущности:
+
+- **Stage-ответчики** (строго по текущей стадии FSM): `PlanningAgent`, `ExecutionAgent`,
+  `ValidationAgent`, `DoneAgent`. Clarify сворачивается в Planning. У каждого свой
+  system prompt = работа стадии; завершение стадии модель помечает строкой
+  `<<STAGE_DONE>>` — только отдельной последней непустой строкой. Inline/echo
+  marker игнорируется; user `answer_suffix`/`completion_instruction` удаляются из
+  stage-control и не могут изготовить marker.
+- **Pipeline workers**: динамические `PipelineWorkerAgent` из
+  `TaskPipelineStage.worker_agents`; это реальные вызовы модели с отдельными
+  `SwarmRunRecord`, а не текстовые подсказки в prompt.
+- **`GeneralAgent`** — ответчик для обычного чата без задачи.
+- **Сервисные**: `MemoryAgent` (KV-факты + слои), `SummaryAgent` (компакция),
+  `TopicAgent` (scoped-routing), `ProfileAgent` (интервью-профиль), `InvariantAgent`
+  (Pass/Fail).
+
+`SwarmOrchestrator` (`orchestrator.rs`) — **чистый код-роутер**, детерминированный
+FSM. На каждом ходу (`run_turn`): локальный lifecycle guard → sticky-facts memory
+ДО ответа → реальные pipeline workers → выбор stage-ответчика по сохранённой
+`task.stage` → invariant-проверка с retry (`MAX_INVARIANT_RETRIES`) → commit →
+детерминированное завершение текущей стадии с gates → пост-агенты
+Memory/Summary/Profile. Возвращает
+`(ChatResponse, StatefulReport)`. `ChatAgent::respond*` — тонкая обёртка:
+`build_turn` → `orchestrator.run_turn`. Стриминг: `stream_prepare`/`stream_finalize`
+(тот же marker/gate path). Web для агента с инвариантами буферизует provider
+stream и отдаёт браузеру только финальный текст после invariant gate, поэтому
+нарушающие partial tokens не успевают утечь.
+
+`PromptBuilder` (`prompt_builder.rs`) — единственное место сборки итогового
+промпта (заменил `inject_memory_layers`). Слои в фиксированном порядке: `system →
+[agent:domain] → [memory:long-term] → [user-profile] (дедуп) → [memory:working] →
+[invariants] → facts → [stage:rules] → окно сообщений → query`. Дедуп: одно
+значение из профиля агента и профиля юзера инъектится один раз (seen-set), поэтому
+дублирования между профилями нет.
+
+- `swarm/config.rs` — `SubAgentRole` (4 stage + general + 5 сервисных),
+  `SubAgentConfig`, `SwarmConfig`.
+- `swarm/runtime.rs` — `resolve_swarm()` → `ResolvedSwarm` (per-role
+  `ProfileConfig` + token). Пустые override = наследовать основного агента;
+  кастомный provider → токен через `get_config_profile_token`, иначе fallback.
+  Секреты читаются только здесь.
+- `swarm/agent.rs` — `trait SubAgent` + `SwarmTurn` (мутабельный контекст хода) +
+  `SubAgentOutcome`.
+
+FSM-переход детерминирован: `complete_pipeline_stage` для pipeline-задач (с
+паузой на human-approval), иначе `allowed_next`. Pause/resume (`pause`/`resume`/
+`approve_pipeline_pause`) и seed goal/title — тоже код в оркестраторе
+(`apply_pause_resume`, `seed_task_progress`), без LLM. Стриминг **тоже** двигает
+FSM: `stream_prepare` шлёт stage-rules с маркером, `stream_finalize` парсит маркер
+и продвигает стадию; web-слой вырезает маркер из живого потока токенов
+(line-buffered фильтр по `\n`).
+
+**Критично:** `Memory` работает на ЛЮБОЙ стратегии. Для `sticky-facts` экстракция
+ДО запроса (facts block), для остальных — ПОСЛЕ ответа. Поэтому долговременная
+память сама обновляется при сообщении нового факта (переезд) на любой стратегии.
+Пустой `facts_extraction_prompt` (и пустой swarm-override) = локальный
+keyword-fallback без LLM. Дефолтная стратегия — `sticky-facts`. UI: вкладка «Рой»
+(без чекбоксов), API `agents/manage` actions `swarm-load`/`swarm-save`.
+
+Старый `stateful_postprocess` и LLM-инференс стадии (`advance_task_state` и т.п.)
+удалены полностью — единственный путь хода теперь оркестратор. Stateful-данные web
+берёт из `ChatAgent::take_stateful_report()` (стрим — после `finalize_stream`).
+
 ## Что важно не ломать
 
 - Provider API не знает про `agent_id`; это локальная сущность.
@@ -79,7 +307,12 @@ Scoped Branches
 - Для branching каждая ветка имеет свою историю/session; сообщения разных веток не смешиваются.
 - Для scoped branches история хранится в одной session, а агент автоматически выбирает тему для каждого нового user message. Web debug должен показывать выбранную тему и счетчики сообщений по темам.
 - Slash-команды должны менять локальное состояние предсказуемо и не отправлять служебный текст провайдеру.
-- History, facts и memory не должны содержать токены.
+- History, facts и memory не должны содержать токены. Чувствительные строки
+  отсекаются `is_sensitive_text()` ДО роутинга, поэтому в `long-term` (и в
+  profile-shared store) секреты не попадают.
+- `long-term` факты переживают новую сессию, `working`/`short-term` — нет. Не
+  сохраняйте working-данные в `save_long_term` и не seed-ите short-term в новую
+  сессию.
 - Новый чатовый сценарий должен идти через `ChatAgent`, если только это не узкий unit test.
 
 ## Где искать баг
@@ -89,6 +322,7 @@ Scoped Branches
 - Сессия не восстанавливается: `store.rs`.
 - Summary не обновляется или prompt не применяется: `ChatAgent::precompact_before_request()`, `summary_prompt` и `AgentMemory::next_summary_range()`.
 - Facts не обновились, не видны или неверно ушли в запрос: `ChatAgent::update_sticky_facts()`, `facts_extraction_prompt`, fallback `AgentMemory::update_facts_from_user_message()`, `facts_block`, `ContextDebugView.facts` и `AgentMemory::build_context()`.
+- Факт ушёл не в тот слой или long-term не переносится в новую сессию: `MemoryLayer`, `default_fact_layer()`, `AgentMemory::fact_layer()`/`facts_in_layer()` и `LocalSessionStore::{save_long_term, seed_long_term}`.
 - Branching в UI смешал ветки: `ui.html` branch state и `ChatWebRequest::initial_history()`.
 - Scoped topics смешали context или не видны в debug: `AgentMemory.branch_assignments`, `active_branch`, `AgentMemory::build_context()` и `ContextDebugView` в web.
 - Goal завершается рано/поздно: `goal.rs`.

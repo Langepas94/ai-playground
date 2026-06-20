@@ -132,6 +132,17 @@ provider-запрос: system message = этот extraction prompt, user message
 KV updates. Если prompt пустой или extractor вернул невалидный JSON, используется
 локальный fallback `AgentMemory::update_facts_from_user_message()`.
 
+Слой каждого факта выбирает сам агент: экстрактор возвращает `layer` рядом с
+`key`/`value` (`{"facts":[{"key","value","layer"}]}`), и
+`merge_extracted_facts_with_layers()` кладёт факт в выбранный слой. Если слой не
+задан (legacy flat JSON или keyword-fallback без LLM), применяется
+`default_fact_layer()`: `goal`/`constraints` -> `working`, остальное ->
+`long-term`. `long-term` факты
+дополнительно пишутся в profile-shared store и seed-ятся в новую сессию
+(`save_long_term`/`seed_long_term`), `working`/`short-term` — нет. Facts block
+группируется по слоям, чтобы было видно источник факта в provider request.
+Полная модель слоёв — в `src/chat/README.md`.
+
 Это не summary и не raw history. Sticky facts не режет сохраненную историю: вся
 session history остается локальным source of truth, а N применяется только при
 сборке provider request. В основной provider request отправляется отдельный
@@ -241,14 +252,44 @@ Web routes `/api/agent/chat` и `/api/agent/session` - это routes локал�
 runtime, а не routes провайдера. Провайдер вызывается только внутри
 `ProviderClient`.
 
+## Рой и оркестратор хода
+
+Живой чат (`ChatAgent::respond*`) исполняется детерминированным
+`SwarmOrchestrator` (код, не LLM). Каждый агент — сущность `trait SubAgent`.
+Дефолтная стратегия — `sticky-facts`. Поток хода:
+
+```text
+User Query
+  -> lifecycle guard (pause/resume/approval/invalid future stage; локально)
+  -> PromptBuilder (system + [agent:domain] + [memory:long-term] +
+     [user-profile дедуп] + [memory:working] + [invariants] + facts +
+     [stage:rules] + окно + query)
+  -> PipelineWorkerAgent* -> [pipeline:worker-results]
+  -> stage-ответчик по task.stage (Planning|Execution|Validation|Done) | General
+  -> InvariantAgent: Pass -> commit | Fail -> retry ответчика (<= MAX_INVARIANT_RETRIES)
+  -> commit + seed task goal/title
+  -> stage_complete? -> artifact + approval/validation gates -> canonical transition
+  -> пост-агенты: Memory(non-sticky) -> Summary -> Profile
+  -> (ChatResponse, StatefulReport)
+```
+
+FSM этапов: `Clarify -> Planning -> Execution -> Validation -> Done` (+ легальные
+возвраты `Execution->Planning`, `Validation->Execution`). Planning всегда
+останавливается на явном approval; Done требует успешной Validation. Responder
+выбирается только по сохранённой текущей стадии. Модель лишь помечает готовность
+строгим marker на отдельной последней строке; worker-агенты выполняются реальными
+provider sub-request. Полная карта сущностей — секция «Рой агентов» в `README.md`.
+
 ## Что еще не реализовано
 
 Сейчас нет:
 
 - vector embeddings;
-- semantic retrieval;
-- долговременной памяти пользователя между разными сессиями;
-- self-reflective memory.
+- semantic retrieval.
+
+Долговременная память между сессиями реализована: `Memory` под-агент роя
+извлекает KV-факты на любой стратегии и пишет `long-term` в profile-shared store
+(переживает новую сессию). Подробнее — секция «Рой агентов» в `README.md`.
 
 Текущая стратегия - явный request-time context builder:
 
