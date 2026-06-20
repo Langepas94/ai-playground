@@ -325,7 +325,7 @@ impl LocalSessionStore {
             .read_toon(&self.agents_index_path())?
             .unwrap_or_default();
         let mut agents = index.agents;
-        agents.sort_by(|left, right| right.updated_at_unix.cmp(&left.updated_at_unix));
+        agents.sort_by_key(|right| std::cmp::Reverse(right.updated_at_unix));
         Ok(agents)
     }
 
@@ -506,7 +506,7 @@ impl LocalSessionStore {
             .read_toon(&self.user_profiles_index_path())?
             .unwrap_or_default();
         let mut profiles = index.profiles;
-        profiles.sort_by(|left, right| right.updated_at_unix.cmp(&left.updated_at_unix));
+        profiles.sort_by_key(|right| std::cmp::Reverse(right.updated_at_unix));
         Ok(profiles)
     }
 
@@ -601,7 +601,7 @@ impl LocalSessionStore {
             .read_toon(&self.agent_dialogs_path(agent_id))?
             .unwrap_or_default();
         let mut dialogs = index.dialogs;
-        dialogs.sort_by(|left, right| right.updated_at_unix.cmp(&left.updated_at_unix));
+        dialogs.sort_by_key(|right| std::cmp::Reverse(right.updated_at_unix));
         Ok(dialogs)
     }
 
