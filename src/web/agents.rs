@@ -257,6 +257,13 @@ pub(super) async fn agents_manage(
                 .load_agent(&id)?
                 .ok_or_else(|| AppError::InvalidInput(format!("Unknown agent: {id}")))?;
             response.swarm = Some(agent.swarm.normalized());
+            response.swarm_role_defaults = crate::chat::SubAgentRole::ALL
+                .iter()
+                .map(|&role| RoleDefaultPrompt {
+                    role: role.as_str().to_string(),
+                    prompt: crate::chat::swarm::agents::default_role_prompt(role).to_string(),
+                })
+                .collect();
         }
         "swarm-save" => {
             let id = require_agent_id(request.id.as_deref())?;
@@ -669,6 +676,16 @@ pub(super) struct AgentsManageResponse {
     pub(super) dialogs: Vec<crate::chat::DialogMeta>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) swarm: Option<SwarmConfig>,
+    /// Built-in default prompt per role, so the UI can show how each agent
+    /// understands its role even when its prompt field is left empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) swarm_role_defaults: Vec<RoleDefaultPrompt>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct RoleDefaultPrompt {
+    pub(super) role: String,
+    pub(super) prompt: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

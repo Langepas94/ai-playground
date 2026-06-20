@@ -6,19 +6,19 @@ use async_trait::async_trait;
 
 use crate::chat::agent::{
     local_invariant_check, memory_facts_extraction_control, memory_summary_control,
-    parse_extracted_facts, parse_invariant_check, parse_profile_updates,
-    parse_topic_route_decision, topic_classifier_control, topic_not_found_message,
+    parse_extracted_facts, parse_profile_updates, parse_topic_route_decision,
+    topic_classifier_control, topic_not_found_message,
 };
 use crate::chat::memory::{
-    DEFAULT_SUMMARY_PROMPT, DEFAULT_TOPIC_CLASSIFIER_PROMPT, MemoryStrategy, TopicRouteDecision,
-    format_messages_for_summary, looks_sensitive,
+    AgentMemory, DEFAULT_SUMMARY_PROMPT, DEFAULT_TOPIC_CLASSIFIER_PROMPT, MemoryLayer,
+    MemoryStrategy, TopicRouteDecision, format_messages_for_summary, looks_sensitive,
 };
 
 use super::super::agent::{InvariantCheckStatus, SubAgent, SubAgentOutcome, SwarmTurn};
 use super::super::config::SubAgentRole;
 use super::{
-    DEFAULT_INVARIANT_CHECK_PROMPT, DEFAULT_PROFILE_FILL_PROMPT, MEMORY_COMPACT_TIMEOUT,
-    MEMORY_FACTS_EXTRACT_TIMEOUT, STATEFUL_STEP_TIMEOUT, TOPIC_CLASSIFIER_TIMEOUT,
+    DEFAULT_PROFILE_FILL_PROMPT, MEMORY_COMPACT_TIMEOUT, MEMORY_FACTS_EXTRACT_TIMEOUT,
+    STATEFUL_STEP_TIMEOUT, TOPIC_CLASSIFIER_TIMEOUT,
 };
 
 /// Extracts durable KV facts and routes them to memory layers. Runs on every
@@ -47,12 +47,17 @@ impl SubAgent for MemoryAgent {
                 .trim()
                 .to_string()
         };
+        let scope = turn.active_scope.clone();
         if effective.is_empty() {
-            turn.memory.update_facts_from_user_message(turn.prompt);
+            extract_local_facts(turn, &scope);
             return SubAgentOutcome::default();
         }
-        let existing_facts =
-            serde_json::to_string(&turn.memory.facts).unwrap_or_else(|_| "{}".to_string());
+        let existing_facts = if AgentMemory::is_scoped(&scope) {
+            serde_json::to_string(&turn.memory.partition(&scope).map(|p| &p.facts))
+                .unwrap_or_else(|_| "{}".to_string())
+        } else {
+            serde_json::to_string(&turn.memory.facts).unwrap_or_else(|_| "{}".to_string())
+        };
         let user_content = format!(
             "Existing facts JSON:\n{existing_facts}\n\nLatest user message:\n{}\n\nReturn JSON object with fact updates only. When the user states a new value for a fact that already has a key (e.g. a new location), OVERWRITE it with the new value.",
             turn.prompt
@@ -67,25 +72,46 @@ impl SubAgent for MemoryAgent {
             )
             .await
         else {
-            turn.memory.update_facts_from_user_message(turn.prompt);
+            extract_local_facts(turn, &scope);
             return SubAgentOutcome::default();
         };
         if let Some(facts) = parse_extracted_facts(response.text.as_str()) {
             if !facts.is_empty() {
-                turn.memory.merge_extracted_facts_with_layers(
-                    facts
-                        .into_iter()
-                        .map(|fact| (fact.key, fact.value, fact.layer)),
-                );
+                let layered = facts
+                    .into_iter()
+                    .map(|fact| (fact.key, fact.value, fact.layer));
+                if AgentMemory::is_scoped(&scope) {
+                    turn.memory.merge_partition_facts(&scope, layered);
+                } else {
+                    turn.memory.merge_extracted_facts_with_layers(layered);
+                }
             }
         } else {
-            turn.memory.update_facts_from_user_message(turn.prompt);
+            extract_local_facts(turn, &scope);
         }
         SubAgentOutcome {
             metrics: Some(response.metrics),
             ..SubAgentOutcome::default()
         }
     }
+}
+
+/// Local keyword fact extraction, routed to the agent's private partition when a
+/// scope is set, else to the shared store. Reuses the full shared-extraction
+/// heuristics via a throwaway memory so partition and shared paths never drift.
+fn extract_local_facts(turn: &mut SwarmTurn<'_>, scope: &str) {
+    if !AgentMemory::is_scoped(scope) {
+        turn.memory.update_facts_from_user_message(turn.prompt);
+        return;
+    }
+    let mut scratch = AgentMemory::default();
+    scratch.update_facts_from_user_message(turn.prompt);
+    let layered: Vec<(String, String, Option<MemoryLayer>)> = scratch
+        .facts
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone(), Some(scratch.fact_layer(key))))
+        .collect();
+    turn.memory.merge_partition_facts(scope, layered);
 }
 
 /// Compacts old history into a running summary (Summary strategy).
@@ -98,22 +124,37 @@ impl SubAgent for SummaryAgent {
     }
 
     async fn run(&self, turn: &mut SwarmTurn<'_>) -> SubAgentOutcome {
-        let Some(range) = turn
-            .memory
-            .next_summary_range(turn.history, turn.memory_config)
-        else {
+        let scope = turn.active_scope.clone();
+        let scoped = AgentMemory::is_scoped(&scope);
+        let Some(range) = (if scoped {
+            turn.memory
+                .next_summary_range_scoped(&scope, turn.history, turn.memory_config)
+        } else {
+            turn.memory
+                .next_summary_range(turn.history, turn.memory_config)
+        }) else {
             return SubAgentOutcome::default();
         };
         let fragment = format_messages_for_summary(&turn.history[range.clone()]);
         if fragment.trim().is_empty() {
-            turn.memory.summarized_message_count = range.end;
+            if scoped {
+                turn.memory.partition_mut(&scope).summarized_message_count = range.end;
+            } else {
+                turn.memory.summarized_message_count = range.end;
+            }
             return SubAgentOutcome::default();
         }
-        let previous_summary = turn
-            .memory
-            .session_summary
-            .clone()
-            .unwrap_or_else(|| "No previous summary.".to_string());
+        let previous_summary = if scoped {
+            turn.memory
+                .partition(&scope)
+                .and_then(|partition| partition.session_summary.clone())
+                .unwrap_or_else(|| "No previous summary.".to_string())
+        } else {
+            turn.memory
+                .session_summary
+                .clone()
+                .unwrap_or_else(|| "No previous summary.".to_string())
+        };
         let cfg_prompt = turn.memory_config.summary_prompt.trim();
         let default_prompt = if cfg_prompt.is_empty() {
             DEFAULT_SUMMARY_PROMPT.to_string()
@@ -137,8 +178,14 @@ impl SubAgent for SummaryAgent {
         };
         let summary = response.text.trim();
         if !summary.is_empty() {
-            turn.memory.session_summary = Some(summary.to_string());
-            turn.memory.summarized_message_count = range.end;
+            if scoped {
+                let partition = turn.memory.partition_mut(&scope);
+                partition.session_summary = Some(summary.to_string());
+                partition.summarized_message_count = range.end;
+            } else {
+                turn.memory.session_summary = Some(summary.to_string());
+                turn.memory.summarized_message_count = range.end;
+            }
             return SubAgentOutcome {
                 metrics: Some(response.metrics),
                 ..SubAgentOutcome::default()
@@ -222,101 +269,32 @@ impl SubAgent for InvariantAgent {
         if turn.invariants.is_empty() {
             return SubAgentOutcome::default();
         }
-        // Check the responder's pending answer (before it is committed).
+        // Pure code check — no provider sub-request. Invariants are a deterministic
+        // linter (lecture rule), not an LLM agent: the check must never depend on a
+        // provider being reachable, and must never fail closed with internal jargon.
         let answer = turn.pending_answer.clone().unwrap_or_default();
         if answer.trim().is_empty() {
+            // An empty answer carries no content to violate; missing output is a
+            // lifecycle/provider concern handled upstream, not an invariant block.
             return SubAgentOutcome {
-                invariant_status: InvariantCheckStatus::Unavailable,
+                invariant_status: InvariantCheckStatus::Passed,
                 ..SubAgentOutcome::default()
             };
         }
         let local = local_invariant_check(turn.invariants, &answer);
-        if local.unknown.is_empty() {
-            return SubAgentOutcome {
-                invariant_status: if local.violations.is_empty() {
-                    InvariantCheckStatus::Passed
-                } else {
-                    InvariantCheckStatus::Failed
-                },
-                violations: local.violations,
-                ..SubAgentOutcome::default()
-            };
-        }
-        let list = turn
-            .invariants
-            .iter()
-            .enumerate()
-            .map(|(index, line)| format!("{}. {line}", index + 1))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let user_content = format!(
-            "Constraints:\n{list}\n\nAssistant response:\n{answer}\n\nWhich constraints (if any) does this response actually violate?"
-        );
-        let Some(response) = turn
-            .sub_request(
-                SubAgentRole::Invariant,
-                DEFAULT_INVARIANT_CHECK_PROMPT,
-                user_content,
-                topic_classifier_control(),
-                STATEFUL_STEP_TIMEOUT,
-            )
-            .await
-        else {
-            // Locally supported rules remain deterministic. Any unknown rule is
-            // fail-closed: the pending answer must not be released.
-            return SubAgentOutcome {
-                invariant_status: if local.violations.is_empty() && local.unknown.is_empty() {
-                    InvariantCheckStatus::Passed
-                } else if !local.violations.is_empty() {
-                    InvariantCheckStatus::Failed
-                } else {
-                    InvariantCheckStatus::Unavailable
-                },
-                violations: local.violations,
-                ..SubAgentOutcome::default()
-            };
-        };
-        let Some(reported) = parse_invariant_check(response.text.as_str()) else {
-            return SubAgentOutcome {
-                invariant_status: if local.violations.is_empty() && local.unknown.is_empty() {
-                    InvariantCheckStatus::Passed
-                } else if !local.violations.is_empty() {
-                    InvariantCheckStatus::Failed
-                } else {
-                    InvariantCheckStatus::Unavailable
-                },
-                violations: local.violations,
-                metrics: Some(response.metrics),
-                ..SubAgentOutcome::default()
-            };
-        };
-        let mut invalid_reference = false;
-        let mut violations = Vec::new();
-        for reported_violation in reported {
-            if let Some(configured) = turn
-                .invariants
-                .iter()
-                .find(|configured| configured.trim() == reported_violation.trim())
-            {
-                violations.push(configured.clone());
-            } else {
-                invalid_reference = true;
-            }
-        }
-        violations.extend(local.violations);
-        violations.sort();
-        violations.dedup();
-        let invariant_status = if invalid_reference {
-            InvariantCheckStatus::Unavailable
-        } else if violations.is_empty() {
+        let invariant_status = if !local.violations.is_empty() {
+            InvariantCheckStatus::Failed
+        } else if local.unknown.is_empty() {
             InvariantCheckStatus::Passed
         } else {
-            InvariantCheckStatus::Failed
+            // Verifiable rules passed; the remainder are not deterministically
+            // checkable in code. They stay in the prompt as guidance and are
+            // reported as advisory — never withheld from the user.
+            InvariantCheckStatus::Advisory
         };
         SubAgentOutcome {
-            violations,
+            violations: local.violations,
             invariant_status,
-            metrics: Some(response.metrics),
             ..SubAgentOutcome::default()
         }
     }

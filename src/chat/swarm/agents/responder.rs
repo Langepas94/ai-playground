@@ -111,7 +111,7 @@ impl SubAgent for PipelineWorkerAgent {
         );
         let request = ChatRequest {
             model: profile.model.clone(),
-            messages: PromptBuilder::build(turn, Some(&instruction)),
+            messages: PromptBuilder::build(turn, SubAgentRole::Worker, Some(&instruction)),
             control: lifecycle_safe_control(turn.control, stage_role),
             pricing: turn.pricing.clone(),
             billing: turn.billing.clone(),
@@ -162,7 +162,7 @@ async fn respond(
     stage_rules: Option<&str>,
 ) -> SubAgentOutcome {
     let (profile, token) = turn.responder_profile(role);
-    let messages = PromptBuilder::build(turn, stage_rules);
+    let messages = PromptBuilder::build(turn, role, stage_rules);
     let request = ChatRequest {
         model: profile.model.clone(),
         messages,

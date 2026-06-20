@@ -348,6 +348,45 @@ fn task_stage_transitions_enforced() {
 }
 
 #[test]
+fn allowed_next_table_is_the_only_source_of_legal_transitions() {
+    // Exhaustive property: for EVERY ordered stage pair, `can_transition` must
+    // agree with the `allowed_next` table (plus the always-legal self-loop).
+    // This locks the table against accidental widening — e.g. someone adding a
+    // skip edge would have to update this test deliberately.
+    for &from in &TaskStage::ORDERED {
+        for &to in &TaskStage::ORDERED {
+            let expected = from == to || from.allowed_next().contains(&to);
+            assert_eq!(
+                from.can_transition(to),
+                expected,
+                "{from} -> {to}: can_transition must match allowed_next"
+            );
+        }
+    }
+
+    // A rejected skip must NOT mutate the stage (the FSM stays put on refusal).
+    let mut clarify = TaskContext {
+        stage: TaskStage::Clarify,
+        ..TaskContext::default()
+    };
+    let jump = clarify.try_transition(TaskStage::Execution);
+    assert!(!jump.accepted);
+    assert!(jump.reason.contains("запрещён"));
+    assert_eq!(clarify.stage, TaskStage::Clarify);
+
+    let mut planning = TaskContext {
+        stage: TaskStage::Planning,
+        plan_approved: true,
+        ..TaskContext::default()
+    };
+    // Planning -> Done is not in the table at all: rejected before any gate runs.
+    let jump = planning.try_transition(TaskStage::Done);
+    assert!(!jump.accepted);
+    assert!(jump.reason.contains("запрещён"));
+    assert_eq!(planning.stage, TaskStage::Planning);
+}
+
+#[test]
 fn lifecycle_guards_require_artifacts_approval_and_validation() {
     let mut task = TaskContext {
         stage: TaskStage::Planning,

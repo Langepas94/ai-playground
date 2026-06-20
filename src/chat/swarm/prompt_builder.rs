@@ -11,21 +11,27 @@ use super::super::agent::{
 };
 use super::super::memory::MemoryStrategy;
 use super::agent::SwarmTurn;
+use super::config::SubAgentRole;
 
 /// Assembles the full message list for a responder's provider request.
 pub struct PromptBuilder;
 
 impl PromptBuilder {
-    /// Build the ordered message list: managed context window + layered system
-    /// blocks (deduped) + optional current-stage rules + the user prompt.
-    pub fn build(turn: &SwarmTurn<'_>, stage_rules: Option<&str>) -> Vec<ChatMessage> {
+    /// Build the ordered message list for `role`: the agent's own persona prompt
+    /// + managed context window + layered system blocks (deduped) + optional
+    /// current-stage rules + the user prompt.
+    pub fn build(
+        turn: &SwarmTurn<'_>,
+        role: SubAgentRole,
+        stage_rules: Option<&str>,
+    ) -> Vec<ChatMessage> {
         let mut memory_config = turn.memory_config.clone();
         if memory_config.strategy == MemoryStrategy::StickyFacts {
             // The current user prompt counts as one of the last N messages.
             memory_config.recent_messages = memory_config.recent_messages.saturating_sub(1);
         }
         let mut messages = turn.memory.build_context(turn.history, &memory_config);
-        Self::inject_layers(turn, &mut messages, stage_rules);
+        Self::inject_layers(turn, role, &mut messages, stage_rules);
         messages.push(ChatMessage {
             role: Role::User,
             content: turn.prompt.to_string(),
@@ -38,11 +44,21 @@ impl PromptBuilder {
     /// the agent's domain / profile / invariants.
     fn inject_layers(
         turn: &SwarmTurn<'_>,
+        role: SubAgentRole,
         messages: &mut Vec<ChatMessage>,
         stage_rules: Option<&str>,
     ) {
         let mut blocks: Vec<ChatMessage> = Vec::new();
         let mut seen_profile_context: Vec<String> = Vec::new();
+
+        // The responding agent's OWN system prompt (per-role swarm config). Leads
+        // the block list so each agent has its own persona — not a shared prompt.
+        if let Some(agent) = turn.roster.for_role(role) {
+            let persona = agent.system_prompt.trim();
+            if !persona.is_empty() {
+                blocks.push(system(format!("[agent:role] {persona}")));
+            }
+        }
 
         if !turn.domain.is_empty() {
             remember_context_value(&mut seen_profile_context, turn.domain);
@@ -57,6 +73,29 @@ impl PromptBuilder {
         {
             remember_agent_profile_context(&mut seen_profile_context, profile);
             blocks.push(system(block));
+        }
+
+        // Private memory of the responding agent: its own facts + summary
+        // partition, isolated from other agents. Only this agent's prompt sees it.
+        if !turn.active_scope.is_empty() {
+            if let Some(partition) = turn.memory.partition(&turn.active_scope) {
+                if let Some(summary) = partition
+                    .session_summary
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    blocks.push(system(format!(
+                        "[agent:private-memory] Summary of this agent's earlier work:\n{summary}"
+                    )));
+                }
+            }
+            if let Some(block) = turn
+                .memory
+                .partition_facts_block(&turn.active_scope, turn.memory_config.facts_prompt.as_str())
+            {
+                blocks.push(system(format!("[agent:private-memory]\n{block}")));
+            }
         }
 
         if let Some(task) = turn.task.as_ref() {

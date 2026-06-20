@@ -377,6 +377,7 @@ impl ChatAgent {
             aux_metrics: None,
             captured_debug: None,
             report: SwarmReport::default(),
+            active_scope: String::new(),
         }
     }
 
@@ -736,7 +737,7 @@ pub(crate) fn task_decision_from_exchange(user_prompt: &str, answer: &str) -> Op
     Some(format!("Approved decision: {candidate}"))
 }
 
-fn contains_any_agent(value: &str, needles: &[&str]) -> bool {
+pub(crate) fn contains_any_agent(value: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| value.contains(needle))
 }
 
@@ -1005,43 +1006,6 @@ pub(crate) fn parse_profile_updates(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Parse a strict invariant-check response. `None` means the checker did not
-/// return the required schema, which must be handled fail-closed for invariants
-/// that code cannot evaluate deterministically.
-pub(crate) fn parse_invariant_check(text: &str) -> Option<Vec<String>> {
-    let raw = text.trim();
-    let trimmed = if let Some(body) = raw
-        .strip_prefix("```json")
-        .or_else(|| raw.strip_prefix("```JSON"))
-        .or_else(|| raw.strip_prefix("```"))
-    {
-        body.strip_suffix("```")?.trim()
-    } else {
-        raw
-    };
-    if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
-        return None;
-    }
-    let value = serde_json::from_str::<serde_json::Value>(trimmed).ok()?;
-    let array = match value {
-        serde_json::Value::Object(map) => map
-            .get("violations")
-            .and_then(|value| value.as_array())
-            .cloned()?,
-        _ => return None,
-    };
-    let violations = array
-        .iter()
-        .map(|item| item.as_str())
-        .collect::<Option<Vec<_>>>()?
-        .into_iter()
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .map(ToOwned::to_owned)
-        .collect();
-    Some(violations)
-}
-
 pub(crate) fn local_invariant_violations(invariants: &[String], answer: &str) -> Vec<String> {
     local_invariant_check(invariants, answer).violations
 }
@@ -1115,6 +1079,13 @@ pub(crate) fn local_invariant_check(invariants: &[String], answer: &str) -> Loca
             let requires_check = answer_lower.contains("провер")
                 && (answer_lower.contains("реквизит") || answer_lower.contains("данн"));
             Some(recommends_send && !requires_check)
+        } else if is_lifecycle_enforced_invariant(&normalized) {
+            // Stage-ordering invariants ("plan before code", "no final before
+            // validation") are not a property of the answer text — they are
+            // enforced structurally by the task FSM (allowed transitions). The
+            // content checker treats them as satisfied so they never fall through
+            // to the (possibly absent) semantic checker.
+            Some(false)
         } else {
             extract_forbidden_literal(&normalized)
                 .map(|forbidden| contains_non_negated_phrase(&answer_lower, &[forbidden.as_str()]))
@@ -1130,6 +1101,32 @@ pub(crate) fn local_invariant_check(invariants: &[String], answer: &str) -> Loca
         }
     }
     result
+}
+
+/// Whether an invariant describes task-stage ordering rather than a property of
+/// the answer text. These are enforced by the FSM's allowed transitions, not by
+/// inspecting the response, so the content checker must never escalate them to
+/// the semantic checker.
+fn is_lifecycle_enforced_invariant(normalized: &str) -> bool {
+    let plan_before_code = (normalized.contains("план")
+        && contains_any_agent(
+            normalized,
+            &["не переход", "до утвержд", "сначала", "прежде"],
+        ))
+        || (normalized.contains("не")
+            && normalized.contains("реализац")
+            && normalized.contains("план"));
+    let final_after_check = contains_any_agent(normalized, &["финал", "итог", "результат"])
+        && contains_any_agent(normalized, &["проверк", "валидац", "validation"])
+        && contains_any_agent(
+            normalized,
+            &["не выдав", "не выда", "до ", "после", "прежде"],
+        );
+    let stage_order = contains_any_agent(
+        normalized,
+        &["перепрыг", "пропуск", "порядок стади", "порядок этап"],
+    );
+    plan_before_code || final_after_check || stage_order
 }
 
 fn explicit_fact_assumption_mixing(answer: &str) -> bool {
@@ -1356,17 +1353,16 @@ fn known_technologies() -> &'static [&'static str] {
     ]
 }
 
-/// Deterministic refusal shown when a response still breaks hard invariants
-/// after the bounded retries. Invariants live outside the dialog and outrank the
-/// current request, so the orchestrator blocks the violating answer instead of
-/// returning it (lecture rule: the assistant refuses to propose solutions that
-/// break invariants, and explains why). Code-level, never an LLM decision.
+/// Plain-language refusal shown when the answer breaks a constraint the user set
+/// and the bounded retries could not fix it. Speaks to the end user (not a
+/// developer): names which of *their* constraints conflicts, never exposes
+/// internal check mechanics. Deterministic, never an LLM decision.
 pub(crate) fn build_invariant_refusal_for_prompt(
     violations: &[String],
     user_prompt: &str,
 ) -> String {
     let mut out = String::from(
-        "⛔ Не могу выдать этот ответ: он нарушает инварианты задачи.\n\nНарушенные инварианты:\n",
+        "Не могу выполнить эту часть запроса так, как просили: ответ нарушил бы установленные ограничения, которые вы задали:\n",
     );
     for violation in violations {
         let line = violation.trim();
@@ -1379,31 +1375,11 @@ pub(crate) fn build_invariant_refusal_for_prompt(
     }
     let prompt = user_prompt.trim();
     if !prompt.is_empty() {
-        out.push_str("\nКонфликт: текущая просьба требует результата, который нельзя безопасно выдать при этих ограничениях.");
+        out.push_str("\nЭти ограничения важнее текущей просьбы, поэтому я не стал выдавать вариант, который им противоречит.");
     }
     out.push_str(
-        "\nПочему отказ: инварианты зафиксированы отдельно от диалога и не меняются \
-от запроса к запросу — они приоритетнее текущей просьбы. Я переработал ответ, но \
-снять нарушение не удалось.\n\nЧто можно сделать: переформулируйте запрос в рамках \
-ограничений или измените сам инвариант, если это допустимо.",
-    );
-    out
-}
-
-pub(crate) fn build_invariant_unverified_response(invariants: &[String]) -> String {
-    let mut out = String::from(
-        "⚠️ Я не могу безопасно выдать подготовленный ответ: проверка обязательных инвариантов не завершилась, поэтому ответ заблокирован на уровне кода.\n\nНужно подтвердить:\n",
-    );
-    for invariant in invariants {
-        let line = invariant.trim();
-        if !line.is_empty() {
-            out.push_str("• ");
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-    out.push_str(
-        "\nУточните ограничение более формально либо повторите запрос — я заново проверю ответ. Сам неподтверждённый вариант пользователю не показывается.",
+        "\nЧто можно сделать: переформулируйте запрос в рамках этих ограничений — \
+или, если ограничение больше не нужно, измените его в настройках агента.",
     );
     out
 }
@@ -1446,6 +1422,36 @@ pub(crate) fn starts_new_task(current: TaskStage, prompt: &str) -> bool {
     // task: the current one is finished and cannot advance further.
     let done_with_intent = current == TaskStage::Done && requested_task_stage(prompt).is_some();
     explicit || done_with_intent
+}
+
+/// Whether the user asks to step the CURRENT task back to the previous stage
+/// (changed their mind). Distinct from switching to another paused task. Pure
+/// keyword heuristic, no LLM; the orchestrator performs the allowed back edge.
+pub(crate) fn requested_back_step(prompt: &str) -> bool {
+    let lower = prompt.to_lowercase();
+    contains_any_agent(
+        &lower,
+        &[
+            "шаг назад",
+            "на шаг назад",
+            "вернись назад",
+            "вернуться назад",
+            "верни назад",
+            "верни на шаг",
+            "вернись на шаг",
+            "вернись к плану",
+            "вернуться к плану",
+            "обратно к плану",
+            "вернись на предыдущ",
+            "откати назад",
+            "откатить назад",
+            "передумал",
+            "step back",
+            "go back a step",
+            "previous stage",
+            "revert stage",
+        ],
+    )
 }
 
 /// Whether the prompt asks to switch back to a paused task already on the board.

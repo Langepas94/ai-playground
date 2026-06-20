@@ -32,6 +32,7 @@ fn config_serde_round_trip() {
         base_url: String::new(),
         model: "deepseek-chat".to_string(),
         system_prompt: "extract facts".to_string(),
+        memory_scope: "memory-private".to_string(),
     });
     let json = serde_json::to_string(&config).expect("serialize");
     let parsed: SwarmConfig = serde_json::from_str(&json).expect("deserialize");
@@ -73,6 +74,7 @@ fn model_only_override_keeps_main_token() {
         base_url: String::new(),
         model: "cheap-model".to_string(),
         system_prompt: String::new(),
+        memory_scope: String::new(),
     });
     let secrets = MemorySecretStore::default();
     let app = AppConfig::default();

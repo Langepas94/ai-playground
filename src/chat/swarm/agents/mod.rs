@@ -25,5 +25,28 @@ pub(crate) const STATEFUL_STEP_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Default system prompt for the Profile agent (long-term interview fill).
 pub(crate) const DEFAULT_PROFILE_FILL_PROMPT: &str = "You extract profile field values from a user message. Only return values the user actually stated. Reply with a JSON object mapping field keys to string values; omit fields not mentioned. No prose.";
-/// Default system prompt for the Invariant agent (constraint checker).
-pub(crate) const DEFAULT_INVARIANT_CHECK_PROMPT: &str = "You are a strict invariant checker. Return ONLY constraints the assistant response CLEARLY and CONCRETELY breaks — e.g. it recommends or produces something a constraint forbids. Asking questions, clarifying, planning, or simply not mentioning a constraint is NOT a violation. When in doubt, return nothing. Reply with JSON {\"violations\":[\"<exact constraint text>\", ...]}; empty array if the response is fine. No prose.";
+// Invariant checking is a deterministic code linter (see `InvariantAgent`), not an
+// LLM sub-request — so it has no default system prompt.
+
+/// The built-in system prompt a role uses when its swarm config leaves the
+/// prompt empty. Surfaced to the UI so each agent's role is visible even before
+/// the user customizes it. Empty string ⇒ no role prompt (general / code-check).
+pub(crate) fn default_role_prompt(role: super::config::SubAgentRole) -> &'static str {
+    use super::config::SubAgentRole;
+    match role {
+        SubAgentRole::Planning
+        | SubAgentRole::Execution
+        | SubAgentRole::Validation
+        | SubAgentRole::Done => stage_rules(role).unwrap_or_default(),
+        SubAgentRole::Summary => crate::chat::memory::DEFAULT_SUMMARY_PROMPT,
+        SubAgentRole::Topic => crate::chat::memory::DEFAULT_TOPIC_CLASSIFIER_PROMPT,
+        SubAgentRole::Profile => DEFAULT_PROFILE_FILL_PROMPT,
+        SubAgentRole::Memory => {
+            "Извлекает факты из сообщения и раскладывает по слоям памяти. Если промт пуст — работает локально, без LLM."
+        }
+        SubAgentRole::General => {
+            "Обычный ответчик для чата без активной задачи: помогает пользователю напрямую."
+        }
+        SubAgentRole::Invariant | SubAgentRole::Worker | SubAgentRole::Task => "",
+    }
+}

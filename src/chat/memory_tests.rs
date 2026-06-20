@@ -726,3 +726,43 @@ fn agent_memory_json_fallback_with_branch_assignments() {
     assert_eq!(decoded.session_summary, Some("Old session".to_string()));
     assert_eq!(decoded.summarized_message_count, 3);
 }
+
+#[test]
+fn private_partitions_isolate_facts_per_agent() {
+    let mut memory = AgentMemory::default();
+    // Two agents write into their own scopes; the shared store stays empty.
+    memory.merge_partition_facts("exec", [("stack".to_string(), "rust".to_string(), None)]);
+    memory.merge_partition_facts(
+        "validation",
+        [("checks".to_string(), "cargo test".to_string(), None)],
+    );
+
+    // Each agent sees ONLY its own facts.
+    let exec = memory.partition("exec").expect("exec");
+    assert!(exec.facts.contains_key("stack"));
+    assert!(!exec.facts.contains_key("checks"));
+    let val = memory.partition("validation").expect("validation");
+    assert!(val.facts.contains_key("checks"));
+    assert!(!val.facts.contains_key("stack"));
+
+    // Private facts never leak into the shared store.
+    assert!(memory.facts.is_empty());
+    assert!(memory.facts_block("").is_none());
+
+    // The private facts block renders only that agent's facts.
+    let block = memory
+        .partition_facts_block("exec", "")
+        .expect("exec block");
+    assert!(block.contains("stack: rust"));
+    assert!(!block.contains("cargo test"));
+    assert!(memory.partition_facts_block("unknown", "").is_none());
+
+    // Partitions survive serialization (persist/resume).
+    let json = serde_json::to_string(&memory).expect("serialize");
+    let decoded: AgentMemory = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(decoded, memory);
+    assert_eq!(
+        decoded.partition("exec").map(|p| p.facts.get("stack")),
+        Some(Some(&"rust".to_string()))
+    );
+}

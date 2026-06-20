@@ -25,6 +25,12 @@ pub enum InvariantCheckStatus {
     NotRun,
     Passed,
     Failed,
+    /// Some invariants are not deterministically checkable in code. The verifiable
+    /// ones passed; the rest are carried in the prompt as guidance. Advisory is
+    /// NOT a block — it never withholds the answer.
+    Advisory,
+    /// Retained for serialized back-compat; the code-only invariant check no
+    /// longer emits this. Treated like `Advisory` by the UI.
     Unavailable,
 }
 
@@ -101,9 +107,48 @@ pub struct SwarmTurn<'a> {
     pub captured_debug: Option<ProviderExchangeDebug>,
     /// Per-turn report of swarm activity, surfaced to the UI.
     pub report: SwarmReport,
+    /// Memory scope of the agent currently responding this turn. Empty ⇒ shared
+    /// store; non-empty ⇒ facts read/written go to that agent's private partition.
+    /// Set by the orchestrator before the responder + memory agents run.
+    pub active_scope: String,
+}
+
+/// Resolve a configured `memory_scope` string into the effective partition key.
+///
+/// Default is PRIVATE memory for the specialized swarm roles (stage responders +
+/// service agents): an unset scope gives the agent its own role-named partition.
+/// The `General` responder is the main agent's own voice, so it defaults to the
+/// SHARED store. Either default can be overridden: a name forces a private scope,
+/// the `shared` sentinel forces the shared store.
+pub fn effective_memory_scope(role: SubAgentRole, configured: &str) -> String {
+    let configured = configured.trim();
+    if configured.eq_ignore_ascii_case("shared")
+        || configured.eq_ignore_ascii_case("общая")
+        || configured.eq_ignore_ascii_case("общий")
+    {
+        return String::new();
+    }
+    if !configured.is_empty() {
+        return configured.to_string();
+    }
+    if role == SubAgentRole::General {
+        return String::new();
+    }
+    role.as_str().to_string()
 }
 
 impl<'a> SwarmTurn<'a> {
+    /// The effective private memory scope for `role`. Default is PRIVATE: an
+    /// unset scope gives the agent its own role-named partition. The explicit
+    /// sentinel `shared` opts back into the common store.
+    pub fn scope_for(&self, role: SubAgentRole) -> String {
+        let configured = self
+            .roster
+            .for_role(role)
+            .map(|agent| agent.memory_scope.trim().to_string())
+            .unwrap_or_default();
+        effective_memory_scope(role, &configured)
+    }
     /// Run one service sub-request as a `[system, user]` exchange using the
     /// resolved provider/model for `role`. `default_prompt` is used unless the
     /// agent carries a custom system prompt. Records activity in the report.
