@@ -160,6 +160,11 @@ pub struct SubAgentConfig {
     pub model: String,
     #[serde(default)]
     pub system_prompt: String,
+    /// Private memory namespace for this agent. Empty ⇒ shares the agent's main
+    /// memory store; non-empty ⇒ the agent reads/writes its own isolated facts +
+    /// summary partition, exchanging knowledge only through the orchestrator.
+    #[serde(default)]
+    pub memory_scope: String,
 }
 
 fn default_true() -> bool {
@@ -176,6 +181,7 @@ impl SubAgentConfig {
             base_url: String::new(),
             model: String::new(),
             system_prompt: String::new(),
+            memory_scope: String::new(),
         }
     }
 

@@ -2491,23 +2491,6 @@ fn stack_architecture_and_business_rules_are_enforced_locally() {
 }
 
 #[test]
-fn malformed_invariant_checker_payload_is_distinct_from_pass() {
-    assert_eq!(parse_invariant_check("PASS"), None);
-    assert_eq!(
-        parse_invariant_check(r#"{"violations":[]}"#),
-        Some(Vec::new())
-    );
-    assert_eq!(
-        parse_invariant_check("```json\n{\"violations\":[]}\n```"),
-        Some(Vec::new())
-    );
-    assert_eq!(
-        parse_invariant_check("explanation\n{\"violations\":[]}"),
-        None
-    );
-}
-
-#[test]
 fn invariant_refusal_names_every_broken_constraint() {
     let refusal = build_invariant_refusal_for_prompt(
         &[
@@ -2517,12 +2500,12 @@ fn invariant_refusal_names_every_broken_constraint() {
         ],
         "Сделай на Rust",
     );
-    assert!(refusal.starts_with("⛔"));
     assert!(refusal.contains("Только Kotlin и Ktor"));
     assert!(refusal.contains("Без RxJava"));
-    assert!(refusal.contains("Почему отказ"));
-    assert!(refusal.contains("Конфликт"));
     assert!(refusal.contains("Что можно сделать"));
+    // Plain-language refusal: no developer-facing jargon leaks to the user.
+    assert!(!refusal.contains("инвариант"));
+    assert!(!refusal.contains("на уровне кода"));
     assert_eq!(
         refusal.matches('•').count(),
         2,

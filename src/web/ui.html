@@ -164,6 +164,37 @@
       color: var(--muted);
     }
     .swarm-role-title { font-weight: 600; }
+    .swarm-kind-tag {
+      margin-left: 8px;
+      padding: 1px 7px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      color: #1e3a8a;
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+    }
+    details.code-check .swarm-kind-tag {
+      color: #3f3f46;
+      background: #f4f4f5;
+      border-color: #d4d4d8;
+    }
+    details.code-check > summary { color: #3f3f46; }
+    .swarm-default-prompt { margin: 4px 0 2px; }
+    .swarm-default-prompt > summary { font-size: 11px; color: var(--muted); cursor: pointer; }
+    .swarm-default-text {
+      margin-top: 4px;
+      padding: 6px 8px;
+      font-size: 11px;
+      line-height: 1.4;
+      color: #475569;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      white-space: pre-wrap;
+    }
     input, select, textarea, button {
       font: inherit;
     }
@@ -1059,7 +1090,8 @@
             <div id="profileAgentContextStatus" class="field-help"></div>
             <h3>Известная информация</h3>
             <div id="profileFields" class="profile-fields">Войди в агента, чтобы увидеть профиль.</div>
-            <h3>Недостающие вопросы</h3>
+            <h3>Недостающие вопросы интервью</h3>
+            <div class="field-help">Поля профиля, которые агент ещё не узнал. Он сам задаст эти вопросы пользователю по ходу диалога и заполнит их — это онбординг-интервью, а не ручная форма.</div>
             <div id="profilePending" class="topic-debug">Вопросы появятся после входа в агента.</div>
             <h3>Факты long-term</h3>
             <div id="profileLongTermFacts" class="topic-debug">Факты появятся после первого запроса или ручной записи.</div>
@@ -1131,18 +1163,19 @@
 
         <div id="tab-swarm" class="inspector-pane">
           <div class="group">
-            <h2>Рой агентов</h2>
+            <h2>Рой агентов и код-проверки</h2>
             <div class="field-help">
-              Ты видишь одно окно чата, но под капотом работает рой. Детерминированный
-              оркестратор (код, не LLM) запускает pipeline-workers, выбирает ответчика строго
-              по сохранённой стадии, прогоняет проверку инвариантов с retry и применяет
-              approval/artifact/validation gates. Сервисные агенты (память, саммари, темы,
-              профиль) обслуживают ход.
-              Все агенты обязательны — их нельзя отключить, можно только задать свою модель и
-              промпт. Пусто в provider/model = наследовать от основного агента; пусто в
-              промпте = промпт роли по умолчанию.
+              Ты видишь одно окно чата, но под капотом работает детерминированный
+              оркестратор (код, не LLM): он выбирает ответчика строго по сохранённой стадии,
+              запускает pipeline-workers и применяет approval/artifact/validation gates.
+              <b>Не всё здесь — агент.</b> Ниже честно разделено: <b>LLM-агенты</b> делают
+              реальные запросы к провайдеру (им можно задать модель и промпт), а
+              <b>код-проверки</b> выполняются прямо в коде — без LLM и без провайдера, поэтому
+              у них нет полей модели/промпта.
+              Пусто в provider/model = наследовать от основного агента; пусто в промпте =
+              промпт роли по умолчанию.
             </div>
-            <div class="field-help"><b>Оркестратор:</b> модель завершает только текущую стадию; код проверяет artifact, approval и validation перед переходом.</div>
+            <div class="field-help"><b>Инварианты — это код-проверка, а не агент:</b> детерминированный линтер ответа. Стадийные правила («сначала план», «финал только после проверки») обеспечивает FSM. Правила, которые нельзя проверить кодом, передаются модели как рекомендация (advisory) и не блокируют ответ.</div>
             <h3>Последний фактический прогон</h3>
             <div id="swarmActivity" class="swarm-activity">
               <div class="field-help">После ответа здесь появятся реально вызванные stage-, service- и pipeline-worker агенты.</div>
@@ -1425,6 +1458,8 @@
     let userProfiles = [];
     let pendingAttachments = []; // [{name, content}]
     let branchState = { checkpoint: null, branches: [], activeId: null };
+    let loadedModelIds = []; // model ids from the last /api/models load, for swarm dropdowns
+    let swarmRoleDefaults = {}; // role -> built-in default system prompt (from swarm-load)
 
     function pricingCacheKey(provider, modelId) {
       return `ai_pricing:${provider}:${modelId}`;
@@ -2734,17 +2769,18 @@
       }
     }
 
+    // kind: 'llm' = настоящий агент с запросом к провайдеру (есть модель/промпт);
+    //       'code' = детерминированная проверка в коде (нет LLM и провайдера).
     const SWARM_ROLES = [
-      { role: 'planning', group: 'Этапы задачи', label: 'Planning', hint: 'Собирает требования и утверждает план (сюда сворачивается Clarify).' },
-      { role: 'execution', group: 'Этапы задачи', label: 'Execution', hint: 'Пишет код / создаёт артефакты в рамках текущего шага.' },
-      { role: 'validation', group: 'Этапы задачи', label: 'Validation', hint: 'Тесты, ревью, соответствие плану.' },
-      { role: 'done', group: 'Этапы задачи', label: 'Done', hint: 'Фиксирует итог. Терминальная стадия.' },
-      { role: 'general', group: 'Ответчик', label: 'General', hint: 'Дефолтный ответчик для обычного чата без задачи.' },
-      { role: 'memory', group: 'Сервисные', label: 'Память', hint: 'Извлекает факты и обновляет долговременную память на любой стратегии.' },
-      { role: 'summary', group: 'Сервисные', label: 'Саммари', hint: 'Сжимает старую историю в summary.' },
-      { role: 'topic', group: 'Сервисные', label: 'Темы', hint: 'LLM-классификатор тем для scoped-branches.' },
-      { role: 'profile', group: 'Сервисные', label: 'Профиль', hint: 'Заполняет интервью-профиль агента из диалога.' },
-      { role: 'invariant', group: 'Сервисные', label: 'Инварианты', hint: 'Проверяет ответ против инвариантов (Pass/Fail → retry).' },
+      { role: 'planning', group: 'Этапы задачи (LLM-агенты)', kind: 'llm', label: 'Planning', hint: 'Собирает требования и утверждает план (сюда сворачивается Clarify).' },
+      { role: 'execution', group: 'Этапы задачи (LLM-агенты)', kind: 'llm', label: 'Execution', hint: 'Пишет код / создаёт артефакты в рамках текущего шага.' },
+      { role: 'validation', group: 'Этапы задачи (LLM-агенты)', kind: 'llm', label: 'Validation', hint: 'Тесты, ревью, соответствие плану.' },
+      { role: 'done', group: 'Этапы задачи (LLM-агенты)', kind: 'llm', label: 'Done', hint: 'Фиксирует итог. Терминальная стадия.' },
+      { role: 'general', group: 'Ответчик (LLM-агент)', kind: 'llm', label: 'General', hint: 'Дефолтный ответчик для обычного чата без задачи.' },
+      { role: 'memory', group: 'Сервисные LLM-агенты', kind: 'llm', label: 'Память', hint: 'Извлекает факты и обновляет долговременную память на любой стратегии.' },
+      { role: 'summary', group: 'Сервисные LLM-агенты', kind: 'llm', label: 'Саммари', hint: 'Сжимает старую историю в summary.' },
+      { role: 'topic', group: 'Сервисные LLM-агенты', kind: 'llm', label: 'Темы', hint: 'Авто-роутинг по scoped-branches — локально; при включённой классификации тем зовёт LLM.' },
+      { role: 'profile', group: 'Сервисные LLM-агенты', kind: 'llm', label: 'Профиль', hint: 'Заполняет интервью-профиль агента из диалога.' },
     ];
 
     function renderSwarmActivity(report) {
@@ -2780,20 +2816,62 @@
           lastGroup = meta.group;
           header = `<div class="swarm-group-title">${escapeHtml(meta.group)}</div>`;
         }
+        const def = (swarmRoleDefaults[meta.role] || '').trim();
+        const scopeHint = meta.role === 'general'
+          ? 'Пусто — общая (основная) память агента. Своё имя scope — приватная.'
+          : 'Пусто — СВОЯ приватная память (по умолчанию). Впиши «shared», чтобы делить общую память.';
+        const defaultBlock = def
+          ? `<details class="swarm-default-prompt"><summary>Промт роли по умолчанию</summary><div class="swarm-default-text">${escapeHtml(def)}</div></details>`
+          : '';
         return `${header}
-          <details class="panel" data-role="${meta.role}">
+          <details class="panel" data-role="${meta.role}" data-kind="llm">
             <summary>
               <span class="swarm-role-title">${escapeHtml(meta.label)}</span>
+              <span class="swarm-kind-tag">LLM</span>
             </summary>
             <div class="panel-body">
               <div class="field-help">${escapeHtml(meta.hint)}</div>
               <label>Provider (пусто = как у агента)<input class="swarm-provider" spellcheck="false" value="${escapeHtml(agent.provider || '')}" placeholder="openai-compatible / deepseek / openrouter ..."></label>
               <label>Base URL<input class="swarm-base-url" spellcheck="false" value="${escapeHtml(agent.base_url || '')}" placeholder="пусто = как у агента"></label>
-              <label>Model<input class="swarm-model" spellcheck="false" value="${escapeHtml(agent.model || '')}" placeholder="пусто = как у агента"></label>
-              <label>System prompt<textarea class="swarm-prompt" rows="3" placeholder="пусто = промпт роли по умолчанию">${escapeHtml(agent.system_prompt || '')}</textarea></label>
+              <label>Model${swarmModelSelectHtml(agent.model || '')}</label>
+              <label>System prompt<textarea class="swarm-prompt" rows="3" placeholder="${def ? 'пусто = промт роли по умолчанию (см. ниже)' : 'пусто = промт роли по умолчанию'}">${escapeHtml(agent.system_prompt || '')}</textarea></label>
+              ${defaultBlock}
+              <label>Память (scope)<input class="swarm-memory-scope" spellcheck="false" value="${escapeHtml(agent.memory_scope || '')}" placeholder="пусто = своя приватная; 'shared' = общая"></label>
+              <div class="field-help">${escapeHtml(scopeHint)} Факты изолированы между агентами; обмен только через оркестратор.</div>
             </div>
           </details>`;
       }).join('');
+    }
+
+    // Model field as a dropdown (same list as the main form) + a "свой id" option,
+    // so the user picks from the list instead of typing the id by hand.
+    function swarmModelSelectHtml(current) {
+      const ids = [...loadedModelIds];
+      if (current && !ids.includes(current)) ids.unshift(current);
+      const options = ['<option value="">пусто = как у агента</option>']
+        .concat(ids.map((id) => `<option value="${escapeHtml(id)}"${id === current ? ' selected' : ''}>${escapeHtml(id)}</option>`))
+        .concat('<option value="__custom__">— свой id…</option>')
+        .join('');
+      const showCustom = current && !loadedModelIds.includes(current);
+      return `<select class="swarm-model">${options}</select>`
+        + `<input class="swarm-model-custom" spellcheck="false" value="${showCustom ? escapeHtml(current) : ''}" placeholder="свой id модели" style="display:${showCustom ? 'block' : 'none'};margin-top:4px;">`;
+    }
+
+    // Re-fill the model <select> options after a fresh /api/models load without
+    // losing the current per-agent selection.
+    function refreshSwarmModelOptions() {
+      document.querySelectorAll('#swarmRows details[data-kind="llm"]').forEach((row) => {
+        const select = row.querySelector('.swarm-model');
+        const custom = row.querySelector('.swarm-model-custom');
+        if (!select) return;
+        const current = select.value === '__custom__' ? (custom ? custom.value.trim() : '') : select.value;
+        const ids = [...loadedModelIds];
+        if (current && !ids.includes(current)) ids.unshift(current);
+        select.innerHTML = ['<option value="">пусто = как у агента</option>']
+          .concat(ids.map((id) => `<option value="${escapeHtml(id)}"${id === current ? ' selected' : ''}>${escapeHtml(id)}</option>`))
+          .concat('<option value="__custom__">— свой id…</option>')
+          .join('');
+      });
     }
 
     async function loadSwarm() {
@@ -2804,6 +2882,8 @@
       }
       try {
         const data = await agentsManage({ action: 'swarm-load', id: activeAgentId });
+        swarmRoleDefaults = {};
+        for (const item of (data.swarm_role_defaults || [])) swarmRoleDefaults[item.role] = item.prompt;
         renderSwarmRows(data.swarm);
         $('swarmStatusLine').textContent = '';
       } catch (error) {
@@ -2812,16 +2892,38 @@
     }
 
     function collectSwarmPayload() {
-      const agents = Array.from($('swarmRows').querySelectorAll('details[data-role]')).map((row) => ({
+      // Code-checks have no provider/model/prompt — only LLM agents are configurable.
+      const agents = Array.from($('swarmRows').querySelectorAll('details[data-kind="llm"]')).map((row) => ({
         role: row.dataset.role,
         enabled: true,
         provider: row.querySelector('.swarm-provider').value.trim(),
         base_url: row.querySelector('.swarm-base-url').value.trim(),
-        model: row.querySelector('.swarm-model').value.trim(),
+        model: swarmModelValue(row),
         system_prompt: row.querySelector('.swarm-prompt').value,
+        memory_scope: row.querySelector('.swarm-memory-scope').value.trim(),
       }));
       return { agents };
     }
+
+    // Resolve the model for one swarm row: the dropdown value, or the custom-id
+    // input when "— свой id…" is chosen.
+    function swarmModelValue(row) {
+      const select = row.querySelector('.swarm-model');
+      if (!select) return '';
+      if (select.value === '__custom__') {
+        const custom = row.querySelector('.swarm-model-custom');
+        return custom ? custom.value.trim() : '';
+      }
+      return select.value.trim();
+    }
+
+    // Toggle the custom-id input when the user picks "— свой id…".
+    $('swarmRows').addEventListener('change', (event) => {
+      if (!event.target.classList.contains('swarm-model')) return;
+      const row = event.target.closest('details[data-kind="llm"]');
+      const custom = row && row.querySelector('.swarm-model-custom');
+      if (custom) custom.style.display = event.target.value === '__custom__' ? 'block' : 'none';
+    });
 
     async function saveSwarm() {
       if (!activeAgentId) { $('swarmStatusLine').textContent = 'Сначала войди в агента.'; return; }
@@ -3264,6 +3366,9 @@
         if (model.context_length != null) modelContextById.set(model.id, model.context_length);
       }
       $('model').innerHTML = uniqueModels.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.id)}</option>`).join('');
+      // Cache ids so swarm-agent cards can offer the same dropdown as the main form.
+      loadedModelIds = uniqueModels.map((model) => model.id);
+      if (typeof refreshSwarmModelOptions === 'function') refreshSwarmModelOptions();
       if (selectedModel && uniqueModels.some((model) => model.id === selectedModel)) {
         $('model').value = selectedModel;
       }

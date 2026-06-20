@@ -210,6 +210,22 @@ pub struct TopicRouteDecision {
     pub reason: String,
 }
 
+/// Private memory of a single swarm agent (its own facts + running summary),
+/// isolated from the shared store and from every other agent's partition. Agents
+/// only exchange knowledge through the orchestrator's explicit outcomes — never by
+/// reading each other's partition. Keyed by the agent's `memory_scope`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct MemoryPartition {
+    #[serde(default)]
+    pub facts: BTreeMap<String, String>,
+    #[serde(default)]
+    pub fact_layers: BTreeMap<String, MemoryLayer>,
+    #[serde(default)]
+    pub session_summary: Option<String>,
+    #[serde(default)]
+    pub summarized_message_count: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct AgentMemory {
     #[serde(default)]
@@ -226,6 +242,10 @@ pub struct AgentMemory {
     pub summarized_message_count: usize,
     #[serde(default)]
     pub topic_catalog: BTreeMap<String, TopicMetadata>,
+    /// Per-agent private memory, keyed by `memory_scope`. Empty scope ⇒ the agent
+    /// uses the shared store above. Serde-default keeps old sidecars compatible.
+    #[serde(default)]
+    pub partitions: BTreeMap<String, MemoryPartition>,
     #[serde(default, skip)]
     pub active_topic_file: Option<TopicFile>,
     #[serde(default, skip)]
@@ -324,6 +344,34 @@ impl AgentMemory {
             return None;
         }
         Some(self.summarized_message_count..end)
+    }
+
+    /// Summary range for a private agent partition, tracking that partition's own
+    /// `summarized_message_count` instead of the shared one.
+    pub fn next_summary_range_scoped(
+        &self,
+        scope: &str,
+        history: &[ChatMessage],
+        config: &MemoryConfig,
+    ) -> Option<std::ops::Range<usize>> {
+        if config.strategy != MemoryStrategy::Summary {
+            return None;
+        }
+        if history.len() < config.summarize_after_messages {
+            return None;
+        }
+        let summarized = self
+            .partition(scope)
+            .map(|partition| partition.summarized_message_count)
+            .unwrap_or(0);
+        let end = history.len().saturating_sub(config.recent_messages);
+        if end <= summarized {
+            return None;
+        }
+        if end - summarized < config.summary_chunk_messages.max(1) {
+            return None;
+        }
+        Some(summarized..end)
     }
 
     pub fn next_summary_range_for_pressure(
@@ -644,6 +692,86 @@ impl AgentMemory {
             };
             self.set_fact(key, value, layer);
         }
+    }
+
+    /// Whether `scope` selects a private agent partition (non-empty) vs the
+    /// shared store (empty).
+    pub fn is_scoped(scope: &str) -> bool {
+        !scope.trim().is_empty()
+    }
+
+    /// Read-only access to an agent's private partition.
+    pub fn partition(&self, scope: &str) -> Option<&MemoryPartition> {
+        self.partitions.get(scope.trim())
+    }
+
+    /// Mutable access to an agent's private partition, creating it on first use.
+    pub fn partition_mut(&mut self, scope: &str) -> &mut MemoryPartition {
+        self.partitions.entry(scope.trim().to_string()).or_default()
+    }
+
+    /// Merge extracted facts into a private partition (isolated from the shared
+    /// store). Mirrors [`Self::merge_extracted_facts_with_layers`] for one scope.
+    pub fn merge_partition_facts<I>(&mut self, scope: &str, facts: I)
+    where
+        I: IntoIterator<Item = (String, String, Option<MemoryLayer>)>,
+    {
+        let partition = self.partition_mut(scope);
+        for (key, value, layer) in facts {
+            let key = key.trim().to_string();
+            let value = value.trim().to_string();
+            if key.is_empty() || value.is_empty() {
+                continue;
+            }
+            let layer = match layer.unwrap_or_else(|| default_fact_layer(&key)) {
+                MemoryLayer::ShortTerm => MemoryLayer::Working,
+                chosen => chosen,
+            };
+            partition.fact_layers.insert(key.clone(), layer);
+            partition.facts.insert(key, value);
+        }
+    }
+
+    /// Facts block for a private partition, grouped by layer (mirrors
+    /// [`Self::facts_block`] but reads only the agent's own facts).
+    pub fn partition_facts_block(&self, scope: &str, prompt: &str) -> Option<String> {
+        let partition = self.partition(scope)?;
+        if partition.facts.is_empty() {
+            return None;
+        }
+        let prompt = prompt.trim();
+        let prompt = if prompt.is_empty() {
+            DEFAULT_FACTS_PROMPT
+        } else {
+            prompt
+        };
+        let mut sections = Vec::new();
+        for layer in MemoryLayer::ORDERED {
+            let entries = partition
+                .facts
+                .iter()
+                .filter(|(key, _)| {
+                    partition
+                        .fact_layers
+                        .get(key.as_str())
+                        .copied()
+                        .unwrap_or_else(|| default_fact_layer(key))
+                        == layer
+                })
+                .map(|(key, value)| format!("- {key}: {value}"))
+                .collect::<Vec<_>>();
+            if entries.is_empty() {
+                continue;
+            }
+            sections.push(format!("[{layer}]\n{}", entries.join("\n")));
+        }
+        if sections.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "{prompt}\n\nFACTS_KV: (private memory of this agent, grouped by layer)\n{}",
+            sections.join("\n")
+        ))
     }
 
     pub fn facts_block(&self, prompt: &str) -> Option<String> {

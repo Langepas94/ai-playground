@@ -14,9 +14,9 @@
 //! 6. Post-turn service agents: Memory (non-sticky), Summary, Profile.
 
 use crate::chat::agent::{
-    StageTransition, StatefulReport, build_invariant_refusal_for_prompt,
-    build_invariant_unverified_response, is_invariant_compliance_response, local_chat_response,
-    merge_optional_metrics, paused_user_supplied_next_info, requested_task_stage,
+    StageTransition, StatefulReport, build_invariant_refusal_for_prompt, contains_any_agent,
+    is_invariant_compliance_response, local_chat_response, merge_optional_metrics,
+    paused_user_supplied_next_info, requested_back_step, requested_task_stage,
     sanitize_unverified_legal_claims, starts_new_task, switch_back_target,
     task_decision_from_exchange, task_resume_hint, task_title_from_prompt,
 };
@@ -97,6 +97,13 @@ impl SwarmOrchestrator {
         if let Some((message, transition)) = apply_lifecycle_control(turn, &prompt) {
             return Ok(self.local_lifecycle_result(turn, &prompt, message, transition));
         }
+        // User changed their mind: step the task BACK one stage along an allowed
+        // back edge (execution→planning, validation→execution). Deterministic.
+        if requested_back_step(&prompt)
+            && let Some((message, transition)) = apply_back_step(turn)
+        {
+            return Ok(self.local_lifecycle_result(turn, &prompt, message, Some(transition)));
+        }
         if let Some((requested, reason)) = lifecycle_request_rejection(turn, &prompt) {
             let current = turn
                 .task
@@ -118,6 +125,14 @@ impl SwarmOrchestrator {
                 }),
             ));
         }
+
+        // Resolve the responding agent's memory scope up front, so even the
+        // sticky-facts memory pass (which runs before the responder) routes facts
+        // to the correct private partition. Per-agent memory isolation.
+        turn.active_scope = match turn.task.as_ref() {
+            Some(task) => turn.scope_for(stage_responder_role(task.stage)),
+            None => turn.scope_for(SubAgentRole::General),
+        };
 
         // 1. Sticky-facts: extract before the responder so the facts block is fresh.
         if turn.memory_config.strategy == MemoryStrategy::StickyFacts {
@@ -160,6 +175,7 @@ impl SwarmOrchestrator {
             Some(task) => stage_responder_role(task.stage),
             None => SubAgentRole::General,
         };
+        debug_assert_eq!(turn.active_scope, turn.scope_for(responder_role));
         turn.retry_violations.clear();
         let mut outcome = self.responder(responder_role).run(turn).await;
         let mut main_metrics = outcome.metrics.clone();
@@ -200,17 +216,15 @@ impl SwarmOrchestrator {
         if violations.is_empty() && invariant_status == InvariantCheckStatus::Failed {
             invariant_status = InvariantCheckStatus::Passed;
         }
-        // Hard enforcement: unresolved semantic validation and surviving
-        // violations are both blocked. The pending answer is never committed.
-        let blocked = if invariant_status == InvariantCheckStatus::Unavailable {
-            answer = build_invariant_unverified_response(turn.invariants);
-            true
-        } else if !violations.is_empty() {
+        // Hard enforcement: only a deterministic, code-verified violation blocks
+        // the answer (with a plain-language refusal). Advisory invariants — those
+        // code cannot verify — never withhold the answer.
+        let blocked = if !violations.is_empty() {
             invariant_status = InvariantCheckStatus::Failed;
             answer = build_invariant_refusal_for_prompt(&violations, &prompt);
             true
         } else {
-            if !turn.invariants.is_empty() {
+            if !turn.invariants.is_empty() && invariant_status == InvariantCheckStatus::Failed {
                 invariant_status = InvariantCheckStatus::Passed;
             }
             false
@@ -373,11 +387,12 @@ impl SwarmOrchestrator {
             Some(task) => stage_responder_role(task.stage),
             None => SubAgentRole::General,
         };
+        turn.active_scope = turn.scope_for(role);
         let (profile, _token) = turn.responder_profile(role);
         // Same stage rules as a non-streamed turn (with the completion marker) so
         // the FSM advances on streamed turns too; the web layer filters the
         // marker out of the live token stream.
-        let messages = PromptBuilder::build(turn, super::agents::stage_rules(role));
+        let messages = PromptBuilder::build(turn, role, super::agents::stage_rules(role));
         let request = ChatRequest {
             model: profile.model.clone(),
             messages,
@@ -397,6 +412,12 @@ impl SwarmOrchestrator {
         prompt: &str,
         raw_answer: &str,
     ) -> (StatefulReport, Option<RequestMetrics>, String) {
+        // Route post-turn memory to the responding agent's private partition.
+        let role = match turn.task.as_ref() {
+            Some(task) => stage_responder_role(task.stage),
+            None => SubAgentRole::General,
+        };
+        turn.active_scope = turn.scope_for(role);
         // Parse the stage marker, commit the cleaned answer, then advance the FSM
         // deterministically — same path as a non-streamed turn.
         let (raw_answer, complete, key) = strip_stage_marker(raw_answer);
@@ -421,15 +442,12 @@ impl SwarmOrchestrator {
         if violations.is_empty() && invariant_status == InvariantCheckStatus::Failed {
             invariant_status = InvariantCheckStatus::Passed;
         }
-        let blocked = if invariant_status == InvariantCheckStatus::Unavailable {
-            answer = build_invariant_unverified_response(turn.invariants);
-            true
-        } else if !violations.is_empty() {
+        let blocked = if !violations.is_empty() {
             invariant_status = InvariantCheckStatus::Failed;
             answer = build_invariant_refusal_for_prompt(&violations, prompt);
             true
         } else {
-            if !turn.invariants.is_empty() {
+            if !turn.invariants.is_empty() && invariant_status == InvariantCheckStatus::Failed {
                 invariant_status = InvariantCheckStatus::Passed;
             }
             false
@@ -731,9 +749,9 @@ fn apply_stage_completion(
         }
         task.pause_for(
             TaskPauseReason::PlanApproval,
-            "Проверьте подготовленный план и явно напишите «утверждаю план».",
+            "Готов план — посмотрите. Согласие в любой форме («да, продолжай») — и начну реализацию.",
         );
-        task.current_step = "утвердить план".to_string();
+        task.current_step = "подтвердить план".to_string();
         task.expected_action = "approve_plan".to_string();
         return Some(StageTransition {
             from: current,
@@ -770,20 +788,32 @@ fn apply_lifecycle_control(
             TaskPauseReason::PlanApproval | TaskPauseReason::StageApproval
         ) {
             if !explicit_approval_intent(&prompt, task.pause_reason) {
-                let reason = match task.pause_reason {
+                let message = match task.pause_reason {
                     TaskPauseReason::PlanApproval => {
-                        "План ожидает явного утверждения. Напишите «утверждаю план»."
+                        let plan = if task.plan.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                "\n\nВот план:\n{}",
+                                task.plan
+                                    .iter()
+                                    .map(|step| format!("• {}", step.trim()))
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            )
+                        };
+                        format!(
+                            "Подготовил план — посмотрите.{plan}\n\nЕсли всё устраивает, просто скажите, что согласны (например «да, продолжай»), и я начну реализацию. Если нужно что-то поправить или уточнить — напишите, что именно."
+                        )
                     }
                     TaskPauseReason::StageApproval => {
-                        "Артефакт ожидает явного утверждения. Напишите «утверждаю результат»."
+                        "Готов результат текущей стадии — посмотрите. Если всё ок, скажите, что согласны (например «да, продолжай»), и я двинусь дальше. Если нужно поправить — напишите, что именно.".to_string()
                     }
                     _ => unreachable!(),
                 };
-                task.transition_block_reason = reason.to_string();
-                return Some((
-                    format!("⏸ {reason}\n\nТекущая стадия: `{}`.", task.stage),
-                    None,
-                ));
+                task.transition_block_reason =
+                    "Жду вашего подтверждения, чтобы продолжить.".to_string();
+                return Some((message, None));
             }
             let from = task.stage;
             if task.approve_pipeline_pause() {
@@ -838,6 +868,46 @@ fn apply_lifecycle_control(
         ));
     }
     None
+}
+
+/// The allowed back-edge target from `stage` (an `allowed_next` entry that sits
+/// earlier in the canonical order): execution→planning, validation→execution.
+fn back_step_target(stage: TaskStage) -> Option<TaskStage> {
+    let order = |s: TaskStage| TaskStage::ORDERED.iter().position(|x| *x == s);
+    let current = order(stage)?;
+    stage
+        .allowed_next()
+        .iter()
+        .copied()
+        .filter(|to| order(*to).is_some_and(|index| index < current))
+        .min_by_key(|to| order(*to).unwrap_or(usize::MAX))
+}
+
+/// Perform a deterministic one-stage rollback when the user changed their mind.
+/// Returns the user-facing message + the transition, or `None` if no back edge
+/// exists from the current stage (clarify / planning / done).
+fn apply_back_step(turn: &mut SwarmTurn<'_>) -> Option<(String, StageTransition)> {
+    let task = turn.task.as_mut()?;
+    let from = task.stage;
+    let target = back_step_target(from)?;
+    let decision = task.try_transition(target);
+    let message = if decision.accepted {
+        format!(
+            "⏪ Откатил задачу `{from}` → `{}`. Прежние подтверждения этой стадии сброшены — продолжайте с предыдущего шага.",
+            decision.to
+        )
+    } else {
+        lifecycle_block_message(from, &decision.reason)
+    };
+    Some((
+        message,
+        StageTransition {
+            from: decision.from,
+            to: decision.to,
+            accepted: decision.accepted,
+            reason: decision.reason,
+        },
+    ))
 }
 
 fn lifecycle_request_rejection(turn: &SwarmTurn<'_>, prompt: &str) -> Option<(TaskStage, String)> {
@@ -910,30 +980,88 @@ fn normalize_control_intent(value: &str) -> String {
         .join(" ")
 }
 
+/// Whether the user confirmed an approval gate. Accepts natural affirmations in
+/// any wording (not a magic command), but an explicit rejection or edit request
+/// keeps the gate closed. `prompt` is already normalized (lowercased, punctuation
+/// collapsed to spaces).
 fn explicit_approval_intent(prompt: &str, reason: TaskPauseReason) -> bool {
-    let exact_short = matches!(prompt, "ок" | "ok" | "approved" | "утверждаю" | "одобряю");
-    exact_short
-        || match reason {
-            TaskPauseReason::PlanApproval => [
-                "утверждаю план",
-                "одобряю план",
-                "план утвержден",
-                "план утверждён",
-                "approve plan",
-                "plan approved",
-            ]
-            .contains(&prompt),
-            TaskPauseReason::StageApproval => [
-                "утверждаю результат",
-                "одобряю результат",
-                "результат утвержден",
-                "результат утверждён",
-                "approve result",
-                "artifact approved",
-            ]
-            .contains(&prompt),
-            _ => false,
-        }
+    if !matches!(
+        reason,
+        TaskPauseReason::PlanApproval | TaskPauseReason::StageApproval
+    ) {
+        return false;
+    }
+    let words: Vec<&str> = prompt.split_whitespace().collect();
+    let has_word = |word: &str| words.contains(&word);
+
+    // Rejection / change request is never approval — keep the gate closed.
+    let rejects = has_word("нет")
+        || has_word("стоп")
+        || has_word("подожди")
+        || has_word("погоди")
+        || contains_any_agent(
+            prompt,
+            &[
+                "не согласен",
+                "не согласна",
+                "не утвержд",
+                "не одобр",
+                "не надо",
+                "не нравится",
+                "не то",
+                "исправь",
+                "измени",
+                "переделай",
+                "поправь",
+                "другой план",
+                "верни назад",
+            ],
+        );
+    if rejects {
+        return false;
+    }
+
+    let affirmative = contains_any_agent(
+        prompt,
+        &[
+            "утвержд",
+            "одобр",
+            "согласен",
+            "согласна",
+            "принято",
+            "принимаю",
+            "годится",
+            "устраивает",
+            "подтвержд",
+            "давай дальше",
+            "давай продолж",
+            "продолжай",
+            "поехали",
+            "можно дальше",
+            "всё ок",
+            "все ок",
+            "всё хорошо",
+            "все хорошо",
+            "approve",
+            "approved",
+            "go ahead",
+            "looks good",
+            "lgtm",
+            "proceed",
+        ],
+    );
+    let short_yes = has_word("да")
+        || has_word("ок")
+        || has_word("окей")
+        || has_word("ладно")
+        || has_word("хорошо")
+        || has_word("го")
+        || has_word("ага")
+        || has_word("конечно")
+        || has_word("yes")
+        || has_word("ok")
+        || has_word("yep");
+    affirmative || short_yes
 }
 
 fn resume_intent(prompt: &str) -> bool {
@@ -1118,7 +1246,7 @@ fn invariant_status_label(status: InvariantCheckStatus) -> &'static str {
         InvariantCheckStatus::NotRun => "not_run",
         InvariantCheckStatus::Passed => "pass",
         InvariantCheckStatus::Failed => "blocked",
-        InvariantCheckStatus::Unavailable => "unverified",
+        InvariantCheckStatus::Advisory | InvariantCheckStatus::Unavailable => "advisory",
     }
 }
 
@@ -1137,9 +1265,10 @@ fn invariant_summary(
             "BLOCKED: ответ не выдан; нарушено {} инвариант(ов).",
             violations.len()
         ),
-        InvariantCheckStatus::Unavailable => {
-            "UNVERIFIED: семантическую проверку нельзя подтвердить; ответ заблокирован, требуется уточнение или повторная проверка.".to_string()
-        }
+        InvariantCheckStatus::Advisory | InvariantCheckStatus::Unavailable => format!(
+            "ADVISORY: формально проверяемые ограничения из {} пройдены; остальные переданы модели как рекомендация, ответ выдан.",
+            invariants.len()
+        ),
     }
 }
 

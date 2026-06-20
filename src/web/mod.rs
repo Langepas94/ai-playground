@@ -1408,7 +1408,7 @@ fn build_context_debug(
             message_count,
         })
         .collect();
-    let persisted = memory
+    let mut persisted = memory
         .facts
         .iter()
         .map(|(key, value)| FactDebugView {
@@ -1417,6 +1417,22 @@ fn build_context_debug(
             value: value.clone(),
         })
         .collect::<Vec<_>>();
+    // Per-agent private memory: surface each partition's facts, tagged by scope,
+    // so the debug view reflects the default-private model (not just the shared
+    // store).
+    for (scope, partition) in &memory.partitions {
+        for (key, value) in &partition.facts {
+            persisted.push(FactDebugView {
+                layer: partition
+                    .fact_layers
+                    .get(key)
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "working".to_string()),
+                key: format!("[{scope}] {key}"),
+                value: value.clone(),
+            });
+        }
+    }
     let recent_messages_sent = if config.strategy == MemoryStrategy::StickyFacts {
         history
             .iter()

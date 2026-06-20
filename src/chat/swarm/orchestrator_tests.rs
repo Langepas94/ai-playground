@@ -14,7 +14,7 @@ use crate::config::{AppConfig, ProfileConfig};
 use crate::errors::AppError;
 use crate::providers::{
     ChatRequest, ChatResponse, ProviderClient, ProviderExchangeDebug, RequestMetrics,
-    ResponseControl,
+    ResponseControl, Role,
 };
 use crate::secrets::MemorySecretStore;
 
@@ -24,6 +24,9 @@ use crate::secrets::MemorySecretStore;
 struct MarkerClient {
     text: String,
     seen_models: std::sync::Mutex<Vec<String>>,
+    /// Concatenated system-message text of every request, for asserting which
+    /// per-agent system prompt actually reached the provider.
+    seen_system: std::sync::Mutex<Vec<String>>,
 }
 
 impl MarkerClient {
@@ -31,6 +34,7 @@ impl MarkerClient {
         Self {
             text: text.to_string(),
             seen_models: std::sync::Mutex::new(Vec::new()),
+            seen_system: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -55,6 +59,14 @@ impl ProviderClient for MarkerClient {
             .lock()
             .expect("models")
             .push(request.model.clone());
+        let system = request
+            .messages
+            .iter()
+            .filter(|message| message.role == Role::System)
+            .map(|message| message.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.seen_system.lock().expect("system").push(system);
         Ok(ChatResponse {
             text: self.text.clone(),
             finish_reason: Some("stop".to_string()),
@@ -340,7 +352,14 @@ async fn approval_pause_rejects_substring_false_positive() {
         .await
         .unwrap();
 
-    assert!(response.text.contains("утверждаю план"));
+    // A non-affirmation must NOT approve the gate (substrings like "ок" inside
+    // "срок" must not count). The message invites natural confirmation.
+    assert!(
+        response.text.contains("согласны"),
+        "got {:?}",
+        response.text
+    );
+    assert!(!response.text.contains("утверждаю план"));
     let task = agent.task_state().expect("task");
     assert_eq!(task.stage, TaskStage::Planning);
     assert!(task.paused);
@@ -408,7 +427,11 @@ async fn invariant_blocked_completion_does_not_advance_lifecycle() {
         .await
         .unwrap();
 
-    assert!(response.text.starts_with('⛔'));
+    assert!(
+        response
+            .text
+            .contains("Не могу выполнить эту часть запроса")
+    );
     let task = agent.task_state().expect("task");
     assert_eq!(task.stage, TaskStage::Execution);
     assert!(!task.has_stage_artifact(TaskStage::Execution));
@@ -478,12 +501,12 @@ async fn demo_scenario_obeys_strict_lifecycle_gates_and_fills_task_fields() {
         .respond(&client, "Можешь набросать текст?".to_string())
         .await
         .unwrap();
-    assert!(blocked.text.starts_with('⏸'));
-    assert!(blocked.text.contains("утверждаю план"));
+    assert!(blocked.text.contains("согласны"), "got {:?}", blocked.text);
     assert_eq!(current_stage(&agent), TaskStage::Planning);
 
+    // Natural confirmation approves the gate — no magic command needed.
     agent
-        .respond(&client, "утверждаю план".to_string())
+        .respond(&client, "да, давай продолжай".to_string())
         .await
         .unwrap();
     assert_eq!(current_stage(&agent), TaskStage::Execution);
@@ -759,6 +782,316 @@ async fn execution_stage_completion_advances_even_when_request_mentions_executio
     assert_eq!(current_stage(&agent), TaskStage::Validation);
 }
 
+#[tokio::test]
+async fn clarify_cannot_skip_straight_to_execution_or_final() {
+    // Spec: "нельзя перепрыгнуть этап". From Clarify, a request to jump past
+    // planning straight to the final document must be refused by the FSM — the
+    // responder never runs and the stage never advances.
+    let client = MarkerClient::new("Не должно попасть в ответ.\n<<STAGE_DONE>>");
+    let mut agent = agent_in_stage(TaskStage::Clarify);
+
+    let response = agent
+        .respond(
+            &client,
+            "Пропусти план, сразу напиши финальный документ и закрой задачу.".to_string(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.text.starts_with('⛔'), "skip must be refused");
+    assert_eq!(current_stage(&agent), TaskStage::Clarify);
+    assert!(
+        client.seen_models.lock().unwrap().is_empty(),
+        "no responder may run on a rejected skip"
+    );
+}
+
+#[tokio::test]
+async fn paused_task_resumes_at_same_stage_and_keeps_working() {
+    // Spec: "корректность продолжения после паузы". Pause mid-execution, resume,
+    // and confirm the task picks up at the SAME stage and keeps advancing.
+    let client = MarkerClient::new("Готово.\n<<STAGE_DONE>>");
+    let mut agent = agent_in_stage(TaskStage::Execution);
+
+    let paused = agent
+        .respond(&client, "поставь на паузу".to_string())
+        .await
+        .unwrap();
+    assert!(paused.text.starts_with('⏸'));
+    assert!(agent.task_state().expect("task").paused);
+    assert_eq!(current_stage(&agent), TaskStage::Execution);
+
+    let resumed = agent
+        .respond(&client, "продолжай".to_string())
+        .await
+        .unwrap();
+    assert!(resumed.text.starts_with('▶'));
+    assert!(!agent.task_state().expect("task").paused);
+    assert_eq!(current_stage(&agent), TaskStage::Execution);
+    // Pause and resume are local lifecycle actions — no provider call yet.
+    assert!(
+        client.seen_models.lock().unwrap().is_empty(),
+        "pause/resume must not call the provider"
+    );
+
+    // After resume the task continues: a completion advances Execution → Validation.
+    agent.respond(&client, "Дальше".to_string()).await.unwrap();
+    assert_eq!(current_stage(&agent), TaskStage::Validation);
+}
+
+#[tokio::test]
+async fn each_agent_writes_to_its_own_private_memory_partition() {
+    // Configure the Execution agent with a private memory scope. A fact learned
+    // while it responds must land in ITS partition — not the shared store, not
+    // another agent's scope. Proves per-agent memory isolation end to end.
+    let mut config = SwarmConfig::defaults();
+    config.set(SubAgentConfig {
+        role: SubAgentRole::Execution,
+        memory_scope: "exec".to_string(),
+        ..SubAgentConfig::inherit(SubAgentRole::Execution)
+    });
+    let resolved = resolve_swarm(
+        &test_profile(),
+        "secret",
+        &config,
+        &AppConfig::default(),
+        &MemorySecretStore::default(),
+    );
+    let client = MarkerClient::new("Принято, работаю по плану.");
+    let mut agent = agent_in_stage(TaskStage::Execution);
+    agent.set_swarm(resolved);
+
+    agent
+        .respond(&client, "Цель: выпустить релиз в пятницу".to_string())
+        .await
+        .unwrap();
+
+    let mem = agent.memory();
+    // Fact landed in the Execution agent's private partition...
+    let exec = mem.partition("exec").expect("exec partition exists");
+    assert!(
+        exec.facts.contains_key("goal"),
+        "exec partition must hold the fact, got {:?}",
+        exec.facts
+    );
+    // ...and is NOT visible in the shared store or any other agent's scope.
+    assert!(
+        !mem.facts.contains_key("goal"),
+        "private fact must not leak into the shared store"
+    );
+    assert!(mem.partition("validation").is_none());
+}
+
+#[tokio::test]
+async fn each_responder_uses_its_own_configured_system_prompt() {
+    // A per-role system prompt configured for the Execution agent must actually
+    // reach the provider for that agent's turn — agents do NOT share one prompt.
+    let mut config = SwarmConfig::defaults();
+    config.set(SubAgentConfig {
+        role: SubAgentRole::Execution,
+        system_prompt: "ТЫ — ПЕРСОНАЛЬНЫЙ EXECUTION-АГЕНТ-МАРКЕР.".to_string(),
+        ..SubAgentConfig::inherit(SubAgentRole::Execution)
+    });
+    let resolved = resolve_swarm(
+        &test_profile(),
+        "secret",
+        &config,
+        &AppConfig::default(),
+        &MemorySecretStore::default(),
+    );
+    let client = MarkerClient::new("Черновик готов.");
+    let mut agent = agent_in_stage(TaskStage::Execution);
+    agent.set_swarm(resolved);
+
+    agent
+        .respond(&client, "Продолжай реализацию".to_string())
+        .await
+        .unwrap();
+
+    let systems = client.seen_system.lock().expect("system");
+    assert!(
+        systems
+            .iter()
+            .any(|block| block.contains("ПЕРСОНАЛЬНЫЙ EXECUTION-АГЕНТ-МАРКЕР")),
+        "the Execution agent's own system prompt must reach the provider, saw {systems:?}"
+    );
+}
+
+#[test]
+fn scoped_summary_range_tracks_each_partition_independently() {
+    use crate::chat::memory::{AgentMemory, MemoryConfig, MemoryStrategy};
+    use crate::providers::ChatMessage;
+
+    let mut memory = AgentMemory::default();
+    let history: Vec<ChatMessage> = (0..8)
+        .map(|index| ChatMessage {
+            role: if index % 2 == 0 {
+                Role::User
+            } else {
+                Role::Assistant
+            },
+            content: format!("m{index}"),
+        })
+        .collect();
+    let config = MemoryConfig {
+        strategy: MemoryStrategy::Summary,
+        recent_messages: 2,
+        summarize_after_messages: 4,
+        summary_chunk_messages: 1,
+        ..MemoryConfig::default()
+    };
+
+    // Fresh "exec" partition: range starts at 0.
+    let range = memory
+        .next_summary_range_scoped("exec", &history, &config)
+        .expect("exec range");
+    assert_eq!(range.start, 0);
+
+    // Advancing "exec" must not affect "validation": each tracks its own count.
+    memory.partition_mut("exec").summarized_message_count = range.end;
+    assert!(
+        memory
+            .next_summary_range_scoped("exec", &history, &config)
+            .is_none(),
+        "exec is fully summarized"
+    );
+    let val_range = memory
+        .next_summary_range_scoped("validation", &history, &config)
+        .expect("validation range");
+    assert_eq!(val_range.start, 0, "validation partition is independent");
+}
+
+#[tokio::test]
+async fn specialized_agents_get_private_memory_by_default() {
+    // Default is PRIVATE: a stage agent with no configured scope writes to its own
+    // role-named partition, NOT the shared store.
+    let client = MarkerClient::new("Ок.");
+    let mut agent = agent_in_stage(TaskStage::Execution);
+
+    agent
+        .respond(&client, "Цель: выпустить релиз".to_string())
+        .await
+        .unwrap();
+
+    let mem = agent.memory();
+    assert!(
+        !mem.facts.contains_key("goal"),
+        "shared store must stay empty by default for a specialized agent"
+    );
+    let exec = mem.partition("execution").expect("execution partition");
+    assert!(exec.facts.contains_key("goal"));
+}
+
+#[tokio::test]
+async fn general_agent_defaults_to_the_shared_main_memory() {
+    // The General responder is the main agent's voice ⇒ defaults to the shared
+    // store (no task active ⇒ General responds).
+    let client = MarkerClient::new("Ок.");
+    let mut agent = ChatAgent::new(
+        test_profile(),
+        "secret".to_string(),
+        Vec::new(),
+        AgentMemory::default(),
+        ResponseControl::uncontrolled(),
+        None,
+        None,
+    );
+
+    agent
+        .respond(&client, "Цель: выпустить релиз".to_string())
+        .await
+        .unwrap();
+
+    let mem = agent.memory();
+    assert!(mem.facts.contains_key("goal"));
+    assert!(mem.partition("general").is_none());
+}
+
+#[tokio::test]
+async fn plan_approval_accepts_natural_confirmation_and_rejects_edits() {
+    // Approval must not require a magic phrase. A natural "ок, поехали" approves;
+    // an edit request ("нет, исправь …") keeps the gate closed.
+    let paused = || {
+        agent_with_task(TaskContext {
+            stage: TaskStage::Planning,
+            paused: true,
+            pause_reason: TaskPauseReason::PlanApproval,
+            plan: vec!["Шаг 1".to_string()],
+            artifacts: vec![TaskArtifact {
+                stage: TaskStage::Planning,
+                key: "plan".to_string(),
+                value: "Шаг 1".to_string(),
+            }],
+            ..TaskContext::default()
+        })
+    };
+
+    // Edit request → gate stays closed.
+    let mut agent = paused();
+    let client = MarkerClient::new("x");
+    agent
+        .respond(&client, "нет, исправь второй пункт".to_string())
+        .await
+        .unwrap();
+    assert_eq!(current_stage(&agent), TaskStage::Planning);
+    assert!(agent.task_state().expect("task").paused);
+
+    // Natural affirmation → advances to execution.
+    let mut agent = paused();
+    agent
+        .respond(&client, "Ок, поехали!".to_string())
+        .await
+        .unwrap();
+    assert_eq!(current_stage(&agent), TaskStage::Execution);
+}
+
+#[tokio::test]
+async fn user_can_step_the_task_back_one_stage() {
+    // Changed their mind: a "шаг назад" intent rolls the FSM back along the
+    // allowed edge (execution→planning) and resets that stage's approval, without
+    // running the responder.
+    let client = MarkerClient::new("Не должно сработать.\n<<STAGE_DONE>>");
+    let mut agent = agent_with_task(TaskContext {
+        stage: TaskStage::Execution,
+        plan_approved: true,
+        ..TaskContext::default()
+    });
+
+    let response = agent
+        .respond(&client, "Стоп, вернись на шаг назад".to_string())
+        .await
+        .unwrap();
+
+    assert!(response.text.starts_with("⏪"), "got {:?}", response.text);
+    let task = agent.task_state().expect("task");
+    assert_eq!(task.stage, TaskStage::Planning);
+    assert!(!task.plan_approved, "rollback must reset plan approval");
+    assert!(
+        client.seen_models.lock().unwrap().is_empty(),
+        "a rollback must not run the responder"
+    );
+}
+
+#[tokio::test]
+async fn step_back_from_validation_returns_to_execution() {
+    let client = MarkerClient::new("x");
+    let mut agent = agent_with_task(TaskContext {
+        stage: TaskStage::Validation,
+        plan_approved: true,
+        validation_passed: true,
+        ..TaskContext::default()
+    });
+
+    agent
+        .respond(&client, "передумал, обратно к плану реализации".to_string())
+        .await
+        .unwrap();
+
+    let task = agent.task_state().expect("task");
+    assert_eq!(task.stage, TaskStage::Execution);
+    assert!(!task.validation_passed);
+}
+
 fn agent_with_task(task: TaskContext) -> ChatAgent {
     let mut agent = ChatAgent::new(
         test_profile(),
@@ -789,13 +1122,15 @@ async fn persistent_invariant_violation_is_refused_not_returned() {
         .unwrap();
 
     assert!(
-        response.text.starts_with("⛔"),
-        "expected a refusal, got: {}",
+        response
+            .text
+            .contains("Не могу выполнить эту часть запроса"),
+        "expected a plain-language refusal, got: {}",
         response.text
     );
     assert!(
         response.text.contains("Отвечать только на русском языке"),
-        "refusal must name the broken invariant"
+        "refusal must name the broken constraint"
     );
     assert!(
         !response.text.contains("auth service"),
@@ -830,7 +1165,11 @@ async fn clean_answer_with_invariants_is_not_refused() {
 }
 
 #[tokio::test]
-async fn unknown_invariant_with_invalid_checker_is_fail_closed_and_reasks() {
+async fn invariant_not_checkable_in_code_is_advisory_not_blocked() {
+    // An invariant code cannot verify deterministically must NOT fail closed with
+    // a developer-facing block. Invariant checking is a code linter, not an LLM
+    // agent — unverifiable rules stay in the prompt as guidance and the answer is
+    // delivered, reported as advisory.
     let client = MarkerClient::new("Перепишем сервис на Rust и Axum.");
     let mut agent = agent_in_stage(TaskStage::Execution);
     agent.set_invariants(vec![
@@ -842,15 +1181,15 @@ async fn unknown_invariant_with_invalid_checker_is_fail_closed_and_reasks() {
         .await
         .unwrap();
 
-    assert!(response.text.starts_with("⚠️"));
-    assert!(response.text.contains("ответ заблокирован на уровне кода"));
-    assert!(!response.text.contains("Rust и Axum"));
-    let task = agent.task_state().expect("task");
-    assert_eq!(task.stage, TaskStage::Execution);
-    assert!(task.expected_action.is_empty());
+    assert!(
+        response.text.contains("Rust и Axum"),
+        "advisory invariant must not withhold the answer, got {:?}",
+        response.text
+    );
+    assert!(!response.text.contains("на уровне кода"));
     let report = agent.take_stateful_report();
-    assert_eq!(report.invariant_status, "unverified");
-    assert!(report.invariant_summary.contains("UNVERIFIED"));
+    assert_eq!(report.invariant_status, "advisory");
+    assert!(report.invariant_summary.contains("ADVISORY"));
 }
 
 #[tokio::test]
@@ -864,7 +1203,11 @@ async fn forbidden_stack_is_blocked_by_local_code_without_valid_checker_json() {
         .await
         .unwrap();
 
-    assert!(response.text.starts_with("⛔"));
+    assert!(
+        response
+            .text
+            .contains("Не могу выполнить эту часть запроса")
+    );
     assert!(response.text.contains("Без RxJava"));
     assert!(!response.text.contains("Добавим RxJava"));
     assert!(agent.task_state().expect("task").expected_action.is_empty());
@@ -886,7 +1229,11 @@ async fn architecture_and_business_rule_violations_are_blocked() {
         .await
         .unwrap();
 
-    assert!(response.text.starts_with("⛔"));
+    assert!(
+        response
+            .text
+            .contains("Не могу выполнить эту часть запроса")
+    );
     assert!(response.text.contains(architecture));
     assert!(response.text.contains(business));
     assert!(!response.text.contains("гарантируем победу"));
@@ -942,6 +1289,47 @@ async fn legal_demo_positive_invariants_do_not_block_normal_planning_turn() {
     let task = agent.task_state().expect("task");
     assert_eq!(task.stage, TaskStage::Clarify);
     assert_eq!(task.expected_action, "agent_work");
+}
+
+#[tokio::test]
+async fn lifecycle_invariants_never_emit_developer_block_message() {
+    // Exact regression for the reported legal-demo failure: a local-style turn
+    // where the invariant checker has no provider, with the demo's stage-ordering
+    // invariants ("plan before code", "final after check"). Those are FSM-enforced,
+    // so they must NOT route to an (absent) LLM and must NEVER surface the old
+    // developer-facing "заблокирован на уровне кода" message on question #1.
+    let client = MarkerClient::new(
+        "Готовлю требования по досудебной претензии. Уточню реквизиты договора и акт.",
+    );
+    let mut agent = agent_in_stage(TaskStage::Execution);
+    agent.set_invariants(vec![
+        "Отвечать только на русском языке".to_string(),
+        "Не выдумывать отсутствующие реквизиты и нормы права".to_string(),
+        "Отделять подтверждённые факты от предположений".to_string(),
+        "Не переходить к реализации до утверждения плана".to_string(),
+        "Не выдавать финал до успешной проверки".to_string(),
+    ]);
+
+    let response = agent
+        .respond(&client, "Продолжай готовить претензию".to_string())
+        .await
+        .unwrap();
+
+    // The user gets the actual answer, not an internal block.
+    assert!(
+        response.text.contains("досудебной претензии"),
+        "answer must be delivered, got {:?}",
+        response.text
+    );
+    assert!(!response.text.contains("на уровне кода"));
+    assert!(
+        !response
+            .text
+            .contains("проверка обязательных инвариантов не завершилась")
+    );
+    let report = agent.take_stateful_report();
+    assert_ne!(report.invariant_status, "blocked");
+    assert_ne!(report.invariant_status, "unverified");
 }
 
 #[tokio::test]

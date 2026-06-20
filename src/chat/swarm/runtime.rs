@@ -24,6 +24,8 @@ pub struct ResolvedSubAgent {
     pub token: String,
     /// Custom system prompt; empty means "use the role default".
     pub system_prompt: String,
+    /// Private memory namespace; empty means "share the main memory store".
+    pub memory_scope: String,
     /// True when this agent reuses the main agent's provider/model/token.
     pub inherits: bool,
 }
@@ -47,6 +49,7 @@ impl ResolvedSwarm {
                 profile: main_profile.clone(),
                 token: main_token.to_string(),
                 system_prompt: String::new(),
+                memory_scope: String::new(),
                 inherits: true,
             })
             .collect();
@@ -106,6 +109,7 @@ fn resolve_one(
     secrets: &dyn SecretStore,
 ) -> ResolvedSubAgent {
     let system_prompt = cfg.system_prompt.trim().to_string();
+    let memory_scope = cfg.memory_scope.trim().to_string();
 
     // Common case: same provider/credentials, optional model swap.
     if cfg.inherits_provider() {
@@ -121,6 +125,7 @@ fn resolve_one(
             profile,
             token: main_token.to_string(),
             system_prompt,
+            memory_scope,
             inherits,
         };
     }
@@ -162,6 +167,7 @@ fn resolve_one(
             profile,
             token,
             system_prompt,
+            memory_scope,
             inherits: false,
         },
         // No token for the overridden provider: fall back to the main agent so
@@ -172,6 +178,7 @@ fn resolve_one(
             profile: main_profile.clone(),
             token: main_token.to_string(),
             system_prompt,
+            memory_scope,
             inherits: true,
         },
     }
