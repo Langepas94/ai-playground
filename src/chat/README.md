@@ -268,6 +268,18 @@ stream и отдаёт браузеру только финальный текс
 значение из профиля агента и профиля юзера инъектится один раз (seen-set), поэтому
 дублирования между профилями нет.
 
+**History scoping (оркестратор — единственный владелец истории).** Сырую
+историю чата получают только фронт-стадии сбора требований (`Clarify`/`Planning`)
+и обычный чат без задачи. На поздних стадиях (`Execution`/`Validation`/`Done`)
+`PromptBuilder::build` НЕ кладёт транскрипт (`stage_consumes_history` → false):
+вход стадии — артефакт предыдущей стадии (`Plan` + `Pipeline artifacts` в блоке
+Task state) плюс `[pipeline:worker-results]`. Добавляется пометка `[stage:input]`,
+чтобы агент работал с выходом предыдущей стадии, а не просил повторить задачу.
+Зачем: меньше токенов (поздние стадии не перечитывают весь чат каждый ход),
+чище system-промпт, меньше дрейфа на устаревшие формулировки пользователя.
+Тесты: `execution_stage_excludes_raw_transcript_keeps_prior_artifact`,
+`planning_stage_receives_raw_transcript` в `orchestrator_tests.rs`.
+
 - `swarm/config.rs` — `SubAgentRole` (4 stage + general + 5 сервисных),
   `SubAgentConfig`, `SwarmConfig`.
 - `swarm/runtime.rs` — `resolve_swarm()` → `ResolvedSwarm` (per-role
@@ -277,13 +289,26 @@ stream и отдаёт браузеру только финальный текс
 - `swarm/agent.rs` — `trait SubAgent` + `SwarmTurn` (мутабельный контекст хода) +
   `SubAgentOutcome`.
 
-FSM-переход детерминирован: `complete_pipeline_stage` для pipeline-задач (с
-паузой на human-approval), иначе `allowed_next`. Pause/resume (`pause`/`resume`/
-`approve_pipeline_pause`) и seed goal/title — тоже код в оркестраторе
-(`apply_pause_resume`, `seed_task_progress`), без LLM. Стриминг **тоже** двигает
-FSM: `stream_prepare` шлёт stage-rules с маркером, `stream_finalize` парсит маркер
-и продвигает стадию; web-слой вырезает маркер из живого потока токенов
-(line-buffered фильтр по `\n`).
+**FSM-переход: LLM предлагает, код гейтит.** `TransitionAgent` (`agents/service.rs`)
+делает отдельный LLM-запрос (роль `Task`, промт `DEFAULT_TRANSITION_PROMPT`) и
+возвращает НАПРАВЛЕНИЕ: `advance` / `back` / `stay` (JSON `{"decision":...}`,
+`parse_transition_decision`). Целевую стадию выбирает КОД через гейт
+(`resolve_transition` → `apply_stage_completion`/`allowed_next` для вперёд,
+`apply_back_step`/back-edge для назад), поэтому перепрыгнуть стадию нельзя по
+построению — модель не называет целевую стадию. Если модель не дала разбираемого
+решения (`None`) — fallback на детерминированный маркер `<<STAGE_DONE>>`
+(`strip_stage_marker`), поэтому стриминг и оффлайн-устойчивость сохранены.
+Pipeline (`complete_pipeline_stage`, human-approval pause), pause/resume и seed
+goal/title — по-прежнему код без LLM. Стриминг двигает FSM так же:
+`stream_prepare` шлёт stage-rules с маркером, `stream_finalize` зовёт
+`TransitionAgent` (как не-стрим ход), web-слой вырезает маркер из живого потока
+токенов (line-buffered фильтр по `\n`).
+
+**Stage-rules конфигурируемы, не хардкод.** `[stage:rules]` берётся из
+swarm-конфига агента стадии (`SubAgentConfig.system_prompt`), а встроенный
+`stage_rules(role)` — только fallback по умолчанию (`resolved_stage_rules`).
+Для stage-ролей `[agent:role]` не инъектится отдельно — чтобы кастомный промт не
+дублировался с `[stage:rules]`.
 
 **Критично:** `Memory` работает на ЛЮБОЙ стратегии. Для `sticky-facts` экстракция
 ДО запроса (facts block), для остальных — ПОСЛЕ ответа. Поэтому долговременная

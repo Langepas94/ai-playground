@@ -1642,10 +1642,6 @@
       return $('provider').value;
     }
 
-    function tokenSessionKey(provider = currentProvider()) {
-      return `ai_token_override:${provider}`;
-    }
-
     function resetTokenOverrideForProvider() {
       tokenProvider = currentProvider();
       $('token').value = '';
@@ -2120,10 +2116,6 @@
 
     function lineToList(id) {
       return $(id).value.split('\n').map((s) => s.trim()).filter(Boolean);
-    }
-
-    function listToLines(list) {
-      return (list || []).join('\n');
     }
 
     function renderUserProfiles(bindings) {

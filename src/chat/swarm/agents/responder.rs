@@ -58,7 +58,24 @@ impl SubAgent for StageAgent {
     }
 
     async fn run(&self, turn: &mut SwarmTurn<'_>) -> SubAgentOutcome {
-        respond(turn, self.role, stage_rules(self.role)).await
+        let rules = resolved_stage_rules(turn, self.role);
+        respond(turn, self.role, rules.as_deref()).await
+    }
+}
+
+/// The stage instruction injected as `[stage:rules]`: the swarm-config prompt for
+/// this stage agent when set, else the built-in [`stage_rules`] default. This is
+/// what makes per-stage rules configurable instead of hardcoded — the constant is
+/// now only a fallback default.
+pub(crate) fn resolved_stage_rules(turn: &SwarmTurn<'_>, role: SubAgentRole) -> Option<String> {
+    let configured = turn
+        .roster
+        .for_role(role)
+        .map(|agent| agent.system_prompt.trim())
+        .filter(|prompt| !prompt.is_empty());
+    match configured {
+        Some(prompt) => Some(prompt.to_string()),
+        None => stage_rules(role).map(ToOwned::to_owned),
     }
 }
 
