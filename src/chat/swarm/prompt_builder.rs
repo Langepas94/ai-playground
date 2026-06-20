@@ -17,9 +17,9 @@ use super::config::SubAgentRole;
 pub struct PromptBuilder;
 
 impl PromptBuilder {
-    /// Build the ordered message list for `role`: the agent's own persona prompt
-    /// + managed context window + layered system blocks (deduped) + optional
-    /// current-stage rules + the user prompt.
+    /// Build the ordered message list for `role`: the agent's own persona
+    /// prompt, managed context window, layered system blocks (deduped),
+    /// optional current-stage rules, and the user prompt.
     pub fn build(
         turn: &SwarmTurn<'_>,
         role: SubAgentRole,
@@ -78,17 +78,16 @@ impl PromptBuilder {
         // Private memory of the responding agent: its own facts + summary
         // partition, isolated from other agents. Only this agent's prompt sees it.
         if !turn.active_scope.is_empty() {
-            if let Some(partition) = turn.memory.partition(&turn.active_scope) {
-                if let Some(summary) = partition
+            if let Some(partition) = turn.memory.partition(&turn.active_scope)
+                && let Some(summary) = partition
                     .session_summary
                     .as_deref()
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
-                {
-                    blocks.push(system(format!(
-                        "[agent:private-memory] Summary of this agent's earlier work:\n{summary}"
-                    )));
-                }
+            {
+                blocks.push(system(format!(
+                    "[agent:private-memory] Summary of this agent's earlier work:\n{summary}"
+                )));
             }
             if let Some(block) = turn
                 .memory

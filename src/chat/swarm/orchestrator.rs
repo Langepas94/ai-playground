@@ -992,7 +992,7 @@ fn explicit_approval_intent(prompt: &str, reason: TaskPauseReason) -> bool {
         return false;
     }
     let words: Vec<&str> = prompt.split_whitespace().collect();
-    let has_word = |word: &str| words.iter().any(|token| *token == word);
+    let has_word = |word: &str| words.contains(&word);
 
     // Rejection / change request is never approval — keep the gate closed.
     let rejects = has_word("нет")
