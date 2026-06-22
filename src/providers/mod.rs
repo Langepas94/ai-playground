@@ -17,7 +17,7 @@ pub mod openrouter;
 
 const DEFAULT_CA_BUNDLE_FILE: &str = "russian_trusted_root_ca_pem.crt";
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProviderKind {
     OpenAiCompatible,
@@ -31,14 +31,35 @@ impl std::str::FromStr for ProviderKind {
     type Err = AppError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.to_ascii_lowercase().as_str() {
-            "openai-compatible" | "openai" | "compatible" => Ok(Self::OpenAiCompatible),
+        // Normalize by lowercasing and dropping separators so every historical
+        // spelling resolves: PascalCase variant names (`OpenRouter`), kebab-case
+        // (`open-router`), and compact aliases (`openrouter`). This keeps old
+        // config.toml files readable across versions.
+        let normalized: String = value
+            .chars()
+            .filter(|c| *c != '-' && *c != '_')
+            .flat_map(|c| c.to_lowercase())
+            .collect();
+        match normalized.as_str() {
+            "openaicompatible" | "openai" | "compatible" => Ok(Self::OpenAiCompatible),
             "openrouter" => Ok(Self::OpenRouter),
             "deepseek" => Ok(Self::DeepSeek),
             "gigachat" => Ok(Self::GigaChat),
             "kimi" | "moonshot" => Ok(Self::Kimi),
-            other => Err(AppError::UnsupportedProvider(other.to_string())),
+            _ => Err(AppError::UnsupportedProvider(value.to_string())),
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for ProviderKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Tolerant of legacy spellings via FromStr so configs written by older
+        // builds (e.g. `provider = "OpenRouter"`) still load.
+        let raw = String::deserialize(deserializer)?;
+        raw.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -759,6 +780,39 @@ mod tests {
     use super::*;
     use crate::errors::{EndpointCategory, HttpProblem};
     use reqwest::StatusCode;
+
+    #[test]
+    fn provider_kind_deserialize_accepts_legacy_kebab_and_compact_spellings() {
+        // Legacy PascalCase variant name from old config.toml files.
+        #[derive(Deserialize)]
+        struct Holder {
+            provider: ProviderKind,
+        }
+        let legacy: Holder =
+            toml::from_str("provider = \"OpenRouter\"").expect("legacy PascalCase");
+        assert_eq!(legacy.provider, ProviderKind::OpenRouter);
+
+        for raw in ["OpenRouter", "open-router", "openrouter", "OPENROUTER"] {
+            let parsed: ProviderKind = serde_json::from_str(&format!("\"{raw}\"")).expect(raw);
+            assert_eq!(parsed, ProviderKind::OpenRouter, "input {raw}");
+        }
+
+        let compat: ProviderKind = serde_json::from_str("\"OpenAiCompatible\"").expect("compat");
+        assert_eq!(compat, ProviderKind::OpenAiCompatible);
+        assert_eq!(
+            serde_json::from_str::<ProviderKind>("\"open-ai-compatible\"").unwrap(),
+            ProviderKind::OpenAiCompatible
+        );
+
+        // Unknown values still fail rather than silently defaulting.
+        assert!(serde_json::from_str::<ProviderKind>("\"totally-unknown\"").is_err());
+    }
+
+    #[test]
+    fn provider_kind_serializes_as_kebab_case() {
+        let value = serde_json::to_string(&ProviderKind::OpenRouter).unwrap();
+        assert_eq!(value, "\"open-router\"");
+    }
 
     #[test]
     fn provider_request_mapping_matches_openai_shape() {

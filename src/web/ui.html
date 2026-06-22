@@ -481,7 +481,29 @@
       color: #334155;
       font-size: 12px;
       line-height: 1.45;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
+    .topic-row {
+      padding: 4px 0;
+      border-bottom: 1px solid #eef3f3;
+      overflow-wrap: anywhere;
+    }
+    .topic-row:last-child { border-bottom: none; }
+    #tab-mcp { overflow-x: hidden; }
+    #tab-mcp input,
+    #tab-mcp select {
+      max-width: 100%;
+      box-sizing: border-box;
+    }
+    .mcp-save-row {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-top: 6px;
+    }
+    .mcp-save-row input { flex: 1 1 140px; }
     .memory-layer {
       padding: 7px 9px;
       margin-bottom: 6px;
@@ -1024,6 +1046,7 @@
           <button class="tab-button" type="button" data-tab="params">Параметры</button>
           <button class="tab-button" type="button" data-tab="metrics">Метрики</button>
           <button class="tab-button" type="button" data-tab="debug">Debug</button>
+          <button class="tab-button" type="button" data-tab="mcp">MCP</button>
         </div>
 
         <div id="tab-profile" class="inspector-pane active">
@@ -1433,6 +1456,43 @@
             </div>
           </details>
         </div>
+
+        <div id="tab-mcp" class="inspector-pane">
+          <div class="group">
+            <h2>🔌 MCP — инструменты сервера</h2>
+            <div class="field-help">
+              Подключитесь к любому MCP-серверу и посмотрите список инструментов. Выберите настроенный
+              сервер, либо укажите stdio-команду с аргументами, либо удалённый URL. URL имеет приоритет
+              над командой, команда — над выбранным сервером.
+            </div>
+            <label>Настроенный сервер
+              <select id="mcpServerSelect"><option value="">— выбрать —</option></select>
+            </label>
+            <label>stdio команда (необязательно)
+              <input id="mcpCommand" spellcheck="false" placeholder="npx">
+            </label>
+            <label>Аргументы команды (через пробел)
+              <input id="mcpArgs" spellcheck="false" placeholder="-y @modelcontextprotocol/server-filesystem .">
+            </label>
+            <label>Удалённый URL (необязательно)
+              <input id="mcpUrl" spellcheck="false" placeholder="https://host/mcp">
+            </label>
+            <button id="mcpConnect" type="button">Подключиться</button>
+            <div id="mcpStatus" class="field-help">Не подключено.</div>
+            <h3>Сохранить сервер</h3>
+            <div class="field-help">
+              Сохранённые серверы пишутся в config.toml и переживают перезагрузку страницы.
+            </div>
+            <div class="mcp-save-row">
+              <input id="mcpSaveName" spellcheck="false" placeholder="имя, напр. filesystem">
+              <button id="mcpSaveServer" type="button">Сохранить</button>
+              <button id="mcpDeleteServer" type="button">Удалить выбранный</button>
+            </div>
+            <div id="mcpSaveStatus" class="field-help"></div>
+            <h3>Инструменты</h3>
+            <div id="mcpTools" class="topic-debug">Список инструментов появится после подключения.</div>
+          </div>
+        </div>
       </section>
     </div>
   </main>
@@ -1511,6 +1571,153 @@
       if (name === 'swarm') {
         loadSwarm();
       }
+      if (name === 'mcp') {
+        restoreMcpDraft();
+        loadMcpServers();
+      }
+    }
+
+    // Keep the free-form inputs across tab switches and page reloads so a
+    // half-entered server is not lost. Saved (named) servers live server-side
+    // in config.toml; this only mirrors the unsaved draft locally.
+    const MCP_DRAFT_FIELDS = ['mcpCommand', 'mcpArgs', 'mcpUrl', 'mcpSaveName'];
+    function persistMcpDraft() {
+      const draft = {};
+      MCP_DRAFT_FIELDS.forEach((id) => { draft[id] = $(id).value; });
+      localStorage.setItem('ai_mcp_draft', JSON.stringify(draft));
+    }
+    function restoreMcpDraft() {
+      try {
+        const draft = JSON.parse(localStorage.getItem('ai_mcp_draft') || '{}');
+        MCP_DRAFT_FIELDS.forEach((id) => { if (typeof draft[id] === 'string') $(id).value = draft[id]; });
+      } catch {}
+    }
+
+    let mcpServersLoaded = false;
+    let mcpServerDetails = {}; // name -> { transport, detail }
+    async function loadMcpServers(force = false) {
+      if (mcpServersLoaded && !force) return;
+      const select = $('mcpServerSelect');
+      const previous = select.value;
+      try {
+        const response = await fetch('/api/mcp/servers');
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
+        const options = ['<option value="">— выбрать —</option>'];
+        mcpServerDetails = {};
+        for (const server of data.servers || []) {
+          mcpServerDetails[server.name] = server;
+          const text = `${server.name} (${server.transport}: ${server.detail})`;
+          options.push(`<option value="${escapeHtml(server.name)}">${escapeHtml(text)}</option>`);
+        }
+        select.innerHTML = options.join('');
+        if (mcpServerDetails[previous]) select.value = previous;
+        mcpServersLoaded = true;
+      } catch (error) {
+        select.innerHTML = '<option value="">— выбрать —</option>';
+        $('mcpStatus').textContent = 'Не удалось загрузить серверы: ' + error.message;
+      }
+    }
+
+    // Selecting a configured server prefills the draft fields so it can be
+    // re-saved, edited, or its name reused for delete.
+    function prefillMcpFromSelected() {
+      const name = $('mcpServerSelect').value;
+      const info = mcpServerDetails[name];
+      if (!info) return;
+      $('mcpSaveName').value = name;
+      if (info.transport === 'http') {
+        $('mcpUrl').value = info.detail;
+        $('mcpCommand').value = '';
+        $('mcpArgs').value = '';
+      } else {
+        const parts = info.detail.split(/\s+/);
+        $('mcpCommand').value = parts.shift() || '';
+        $('mcpArgs').value = parts.join(' ');
+        $('mcpUrl').value = '';
+      }
+      persistMcpDraft();
+    }
+
+    async function saveMcpServer(del = false) {
+      const statusEl = $('mcpSaveStatus');
+      const name = $('mcpSaveName').value.trim();
+      if (!name) { statusEl.className = 'field-help'; statusEl.textContent = 'Укажите имя сервера.'; return; }
+      const body = {
+        name,
+        command: $('mcpCommand').value.trim(),
+        args: $('mcpArgs').value.trim() ? $('mcpArgs').value.trim().split(/\s+/) : [],
+        url: $('mcpUrl').value.trim(),
+        delete: del,
+      };
+      try {
+        const response = await fetch('/api/mcp/servers', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
+        await loadMcpServers(true);
+        if (!del) $('mcpServerSelect').value = name;
+        statusEl.className = 'field-help';
+        statusEl.textContent = del ? `Сервер «${name}» удалён.` : `Сервер «${name}» сохранён.`;
+      } catch (error) {
+        statusEl.className = 'field-help';
+        statusEl.textContent = (del ? 'Не удалось удалить: ' : 'Не удалось сохранить: ') + error.message;
+      }
+    }
+
+    async function connectMcp() {
+      const statusEl = $('mcpStatus');
+      const toolsEl = $('mcpTools');
+      const body = {
+        server: $('mcpServerSelect').value.trim(),
+        command: $('mcpCommand').value.trim(),
+        args: $('mcpArgs').value.trim() ? $('mcpArgs').value.trim().split(/\s+/) : [],
+        url: $('mcpUrl').value.trim(),
+      };
+      const label = body.url || body.command || body.server || 'сервер';
+      statusEl.className = 'status busy';
+      statusEl.textContent = `Подключение к ${label}…`;
+      toolsEl.textContent = '…';
+      try {
+        const response = await fetch('/api/mcp/tools', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
+        if (data.ok) {
+          statusEl.className = 'status';
+          statusEl.textContent = `Connected ✓ ${data.server} (${data.tool_count} tools)`;
+          renderMcpTools(data.tools || []);
+        } else {
+          statusEl.className = 'status error';
+          statusEl.textContent = 'Connection failed: ' + (data.error || 'неизвестная ошибка');
+          toolsEl.textContent = 'Инструменты недоступны.';
+        }
+      } catch (error) {
+        statusEl.className = 'status error';
+        statusEl.textContent = 'Connection failed: ' + error.message;
+        toolsEl.textContent = 'Инструменты недоступны.';
+      }
+    }
+
+    function renderMcpTools(tools) {
+      const toolsEl = $('mcpTools');
+      if (!tools.length) {
+        toolsEl.textContent = 'Сервер не вернул инструментов.';
+        return;
+      }
+      toolsEl.innerHTML = tools
+        .map((tool) => {
+          const name = `<strong>${escapeHtml(tool.name)}</strong>`;
+          const desc = tool.description ? `: ${escapeHtml(tool.description)}` : '';
+          return `<div class="topic-row">${name}${desc}</div>`;
+        })
+        .join('');
     }
 
     function numberValue(id) {
@@ -3859,6 +4066,13 @@
     });
     $('token').addEventListener('input', markTokenOverrideProvider);
     $('saveToken').addEventListener('click', saveTokenOverride);
+    $('mcpConnect').addEventListener('click', connectMcp);
+    $('mcpSaveServer').addEventListener('click', () => saveMcpServer(false));
+    $('mcpDeleteServer').addEventListener('click', () => saveMcpServer(true));
+    $('mcpServerSelect').addEventListener('change', prefillMcpFromSelected);
+    ['mcpCommand', 'mcpArgs', 'mcpUrl', 'mcpSaveName'].forEach((id) => {
+      $(id).addEventListener('input', persistMcpDraft);
+    });
     $('model').addEventListener('change', () => { resolveSelectedModelPricing(); updateContextBadge(); persistSelectedModel(); loadChatSession(); });
     $('customModel').addEventListener('input', () => { resolveSelectedModelPricing(); updateContextBadge(); persistSelectedModel(); loadChatSession(); });
     $('memoryStrategy').addEventListener('change', () => {

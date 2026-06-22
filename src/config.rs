@@ -13,10 +13,56 @@ pub struct ProfileConfig {
     pub token_ref: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+/// A configured MCP server the client can connect to. Either a local stdio
+/// child process or a remote streamable-HTTP endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "transport", rename_all = "snake_case")]
+pub enum McpServerConfig {
+    Stdio {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+    },
+    Http {
+        url: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppConfig {
     pub active_profile: Option<String>,
     pub profiles: BTreeMap<String, ProfileConfig>,
+    #[serde(default = "default_mcp_servers")]
+    pub mcp_servers: BTreeMap<String, McpServerConfig>,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            active_profile: None,
+            profiles: BTreeMap::new(),
+            mcp_servers: default_mcp_servers(),
+        }
+    }
+}
+
+/// A sane default server so the inspector is usable out of the box: the
+/// reference filesystem MCP server launched via `npx`, scoped to the current
+/// directory.
+fn default_mcp_servers() -> BTreeMap<String, McpServerConfig> {
+    let mut servers = BTreeMap::new();
+    servers.insert(
+        "filesystem".to_string(),
+        McpServerConfig::Stdio {
+            command: "npx".to_string(),
+            args: vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-filesystem".to_string(),
+                ".".to_string(),
+            ],
+        },
+    );
+    servers
 }
 
 impl AppConfig {
@@ -123,6 +169,12 @@ impl AppConfig {
             .ok_or_else(|| AppError::ProfileMissing(name.clone()))?;
         Ok((name, profile))
     }
+
+    pub fn mcp_server(&self, name: &str) -> Result<&McpServerConfig, AppError> {
+        self.mcp_servers
+            .get(name)
+            .ok_or_else(|| AppError::Mcp(format!("MCP server '{name}' is not configured")))
+    }
 }
 
 fn project_config_path(qualifier: &str, application: &str) -> Result<PathBuf, AppError> {
@@ -174,6 +226,75 @@ mod tests {
             legacy_token_ref(&ProviderKind::DeepSeek, "work"),
             "deepseek:work"
         );
+    }
+
+    #[test]
+    fn default_config_includes_filesystem_mcp_server() {
+        let config = AppConfig::default();
+        let server = config
+            .mcp_servers
+            .get("filesystem")
+            .expect("default filesystem server");
+        match server {
+            McpServerConfig::Stdio { command, args } => {
+                assert_eq!(command, "npx");
+                assert!(args.iter().any(|arg| arg.contains("server-filesystem")));
+            }
+            other => panic!("expected stdio server, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mcp_server_lookup_ok_and_missing() {
+        let config = AppConfig::default();
+        assert!(config.mcp_server("filesystem").is_ok());
+        let error = config.mcp_server("absent").expect_err("missing server");
+        assert!(matches!(error, AppError::Mcp(_)));
+    }
+
+    #[test]
+    fn config_roundtrip_preserves_stdio_and_http_servers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut config = AppConfig::default();
+        config.mcp_servers.insert(
+            "remote".to_string(),
+            McpServerConfig::Http {
+                url: "https://example.test/mcp".to_string(),
+            },
+        );
+        config.mcp_servers.insert(
+            "local".to_string(),
+            McpServerConfig::Stdio {
+                command: "npx".to_string(),
+                args: vec!["-y".to_string(), "some-server".to_string()],
+            },
+        );
+
+        config.save_to_path(path.clone()).expect("save");
+        let loaded = AppConfig::load_from_path(path).expect("load");
+
+        assert_eq!(loaded, config);
+        assert!(matches!(
+            loaded.mcp_servers["remote"],
+            McpServerConfig::Http { .. }
+        ));
+    }
+
+    #[test]
+    fn config_without_mcp_servers_section_gets_default_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let raw = "active_profile = \"work\"\n\
+            [profiles.work]\n\
+            provider = \"open-router\"\n\
+            model = \"m\"\n\
+            base_url = \"https://openrouter.ai/api/v1\"\n\
+            token_ref = \"openrouter\"\n";
+        fs::write(&path, raw).expect("write config");
+
+        let loaded = AppConfig::load_from_path(path).expect("load");
+        assert!(loaded.mcp_servers.contains_key("filesystem"));
     }
 
     #[test]

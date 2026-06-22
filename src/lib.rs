@@ -3,6 +3,7 @@ pub mod cli;
 pub mod config;
 pub mod dist;
 pub mod errors;
+pub mod mcp;
 pub mod pricing;
 pub mod providers;
 pub mod secrets;
