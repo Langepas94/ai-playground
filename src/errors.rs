@@ -64,6 +64,8 @@ pub enum AppError {
     InvalidBaseUrl { profile: String, url: String },
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("MCP error: {0}")]
+    Mcp(String),
 }
 
 impl std::fmt::Display for ProviderHttpError {
