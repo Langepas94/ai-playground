@@ -53,36 +53,6 @@ pub enum Command {
         command: ConfigCommand,
     },
     Doctor(ProfileArg),
-    #[command(about = "Connect to an MCP server and list the tools it exposes")]
-    Mcp {
-        #[command(subcommand)]
-        command: McpCommand,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum McpCommand {
-    #[command(about = "Connect to an MCP server and list its tools")]
-    Tools(McpToolsArgs),
-}
-
-#[derive(Debug, Args)]
-pub struct McpToolsArgs {
-    #[arg(long, help = "Name of a configured MCP server to connect to")]
-    pub server: Option<String>,
-    #[arg(
-        long,
-        help = "Ad-hoc stdio server command to launch (e.g. npx), instead of a configured server"
-    )]
-    pub command: Option<String>,
-    #[arg(
-        long = "arg",
-        action = clap::ArgAction::Append,
-        help = "Argument for the ad-hoc --command; can be provided multiple times"
-    )]
-    pub args: Vec<String>,
-    #[arg(long, help = "Remote MCP server streamable-HTTP URL")]
-    pub url: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]

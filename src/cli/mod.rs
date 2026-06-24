@@ -21,14 +21,14 @@ pub(crate) use profile_input::{
 };
 
 use args::{
-    Command, ConfigCommand, DistCommand, McpCommand, ModelsCommand, PricingCommand, ProfileCommand,
+    Command, ConfigCommand, DistCommand, ModelsCommand, PricingCommand, ProfileCommand,
     ProfileUseArgs, TokenCommand,
 };
 use commands::{
     run_ask, run_chat, run_compare, run_compare_goal, run_config_path, run_dist_install,
-    run_dist_status, run_dist_update, run_doctor, run_mcp_tools, run_models_list,
-    run_pricing_status, run_pricing_sync, run_profile_add, run_profile_list, run_profile_remove,
-    run_profile_use, run_setup, run_token_delete, run_token_demo, run_token_set,
+    run_dist_status, run_dist_update, run_doctor, run_models_list, run_pricing_status,
+    run_pricing_sync, run_profile_add, run_profile_list, run_profile_remove, run_profile_use,
+    run_setup, run_token_delete, run_token_demo, run_token_set,
 };
 
 #[derive(Debug, Parser)]
@@ -81,9 +81,6 @@ async fn run_with_store(cli: &Cli, secrets: &dyn SecretStore) -> Result<(), AppE
             ConfigCommand::Path => run_config_path(),
         },
         Command::Doctor(args) => run_doctor(args, secrets),
-        Command::Mcp { command } => match command {
-            McpCommand::Tools(args) => run_mcp_tools(args).await,
-        },
     }
 }
 
@@ -192,58 +189,6 @@ mod tests {
         };
 
         assert_eq!(profile_name_from_parts(&args.name), "ВуDeepSeek pro");
-    }
-
-    #[test]
-    fn mcp_tools_parses_adhoc_command_with_dash_args() {
-        use args::{McpCommand, McpToolsArgs};
-
-        let cli = Cli::try_parse_from([
-            "ai",
-            "mcp",
-            "tools",
-            "--command",
-            "npx",
-            "--arg=-y",
-            "--arg",
-            "@modelcontextprotocol/server-filesystem",
-        ])
-        .expect("parse mcp tools");
-
-        let Command::Mcp { command } = cli.command else {
-            panic!("expected mcp command");
-        };
-        let McpCommand::Tools(McpToolsArgs {
-            server,
-            command,
-            args,
-            url,
-        }) = command;
-
-        assert_eq!(command.as_deref(), Some("npx"));
-        assert_eq!(
-            args,
-            vec![
-                "-y".to_string(),
-                "@modelcontextprotocol/server-filesystem".to_string()
-            ]
-        );
-        assert!(server.is_none());
-        assert!(url.is_none());
-    }
-
-    #[test]
-    fn mcp_tools_parses_remote_url() {
-        use args::{McpCommand, McpToolsArgs};
-
-        let cli = Cli::try_parse_from(["ai", "mcp", "tools", "--url", "https://host.test/mcp"])
-            .expect("parse mcp tools url");
-
-        let Command::Mcp { command } = cli.command else {
-            panic!("expected mcp command");
-        };
-        let McpCommand::Tools(McpToolsArgs { url, .. }) = command;
-        assert_eq!(url.as_deref(), Some("https://host.test/mcp"));
     }
 
     #[test]

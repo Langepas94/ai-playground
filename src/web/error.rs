@@ -51,7 +51,7 @@ impl IntoResponse for WebError {
     fn into_response(self) -> Response {
         let status = match self.0 {
             AppError::InvalidInput(_) | AppError::InvalidBaseUrl { .. } => StatusCode::BAD_REQUEST,
-            AppError::ProviderHttp(_) | AppError::Mcp(_) => StatusCode::BAD_GATEWAY,
+            AppError::ProviderHttp(_) => StatusCode::BAD_GATEWAY,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (
