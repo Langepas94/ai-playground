@@ -1,0 +1,6 @@
+{
+  "self": "https://api.tracker.yandex.net/v3/issues/TASK-1/comments/100",
+  "id": 100,
+  "text": "Deployed to staging.",
+  "createdAt": "2026-01-16T09:30:00.000+0000"
+}

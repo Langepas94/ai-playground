@@ -1,0 +1,29 @@
+# Fly.io config for the remote tracker-mcp HTTP server.
+# Deploy (run from this crate dir):
+#   fly launch --no-deploy --copy-config --name tracker-mcp
+#   fly secrets set TRACKER_TOKEN=... TRACKER_ORG_ID=... \
+#       TRACKER_TOKEN_KIND=oauth TRACKER_ORG_KIND=x_org_id \
+#       MCP_AUTH_TOKEN=$(openssl rand -hex 32) \
+#       MCP_ALLOWED_HOSTS=tracker-mcp.fly.dev
+#   fly deploy
+#
+# auto_stop/start scale to zero when idle (free-friendly); the first request
+# after a stop cold-starts and the MCP handshake may need one retry.
+app = "tracker-mcp"
+primary_region = "fra"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[http_service.checks]]
+  path = "/health"
+  interval = "30s"
+  timeout = "5s"
+  grace_period = "10s"

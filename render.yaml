@@ -1,0 +1,31 @@
+# Render.com blueprint for the remote tracker-mcp HTTP server (free tier).
+# Deploy: push to a GitHub repo, then "New + → Blueprint" in Render and point
+# it at this file. Set the `sync: false` secrets in the dashboard.
+#
+# Notes:
+# - Render injects PORT; the binary reads it. /health is the (open) probe.
+# - Free instances sleep when idle; the first request after a sleep cold-starts
+#   (~30-50s) and the MCP handshake may need one retry.
+# - MCP_AUTH_TOKEN is auto-generated; copy it from the dashboard into the MCP
+#   client's Authorization (the ai-playground panel uses the remote URL).
+services:
+  - type: web
+    name: tracker-mcp
+    runtime: docker
+    plan: free
+    dockerfilePath: ./crates/tracker-mcp/Dockerfile
+    dockerContext: ./crates/tracker-mcp
+    healthCheckPath: /health
+    envVars:
+      - key: MCP_AUTH_TOKEN
+        generateValue: true
+      - key: TRACKER_TOKEN
+        sync: false
+      - key: TRACKER_ORG_ID
+        sync: false
+      - key: TRACKER_TOKEN_KIND
+        value: oauth
+      - key: TRACKER_ORG_KIND
+        value: x_org_id
+      - key: MCP_ALLOWED_HOSTS
+        sync: false

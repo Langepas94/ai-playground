@@ -325,24 +325,51 @@ fn build_saved_server(request: &McpServerSaveRequest) -> Result<McpServerConfig,
 async fn mcp_tools(
     ApiJson(request): ApiJson<McpToolsRequest>,
 ) -> Result<Json<McpToolsResponse>, WebError> {
+    // Capture persistence intent before the request is consumed by resolution.
+    // "Connect = save": an ad-hoc command/url is written to config.toml under
+    // `save_as` once the handshake succeeds. A configured-server connection is
+    // already persisted, so nothing is written for it.
+    let save_as = blank_to_none(request.save_as.clone());
+    let adhoc = McpServerSaveRequest {
+        name: save_as.clone().unwrap_or_default(),
+        command: request.command.clone().unwrap_or_default(),
+        args: request.args.clone(),
+        url: request.url.clone().unwrap_or_default(),
+        delete: false,
+    };
+    let is_adhoc =
+        blank_str_to_none(&adhoc.command).is_some() || blank_str_to_none(&adhoc.url).is_some();
+
     let (label, server) = resolve_mcp_server(request)?;
 
     // Connection / handshake / list failures are reported as ok=false with a
     // reason so the UI can show the status inline on every attempt. Invalid
     // requests (handled above) still return a 4xx via WebError.
     match connect_and_list(&server).await {
-        Ok(connection) => Ok(Json(McpToolsResponse {
-            ok: true,
-            server: connection.server_name,
-            tool_count: connection.tool_count,
-            tools: connection.tools,
-            error: None,
-        })),
+        Ok(connection) => {
+            let mut saved = false;
+            if let (Some(name), true) = (save_as.as_ref(), is_adhoc) {
+                let server = build_saved_server(&adhoc)?;
+                let mut config = AppConfig::load()?;
+                config.mcp_servers.insert(name.clone(), server);
+                config.save()?;
+                saved = true;
+            }
+            Ok(Json(McpToolsResponse {
+                ok: true,
+                server: connection.server_name,
+                tool_count: connection.tool_count,
+                tools: connection.tools,
+                saved,
+                error: None,
+            }))
+        }
         Err(error) => Ok(Json(McpToolsResponse {
             ok: false,
             server: label,
             tool_count: 0,
             tools: Vec::new(),
+            saved: false,
             error: Some(error.to_string()),
         })),
     }
@@ -412,6 +439,9 @@ struct McpToolsRequest {
     args: Vec<String>,
     #[serde(default)]
     url: Option<String>,
+    /// Name to persist an ad-hoc server under once the connection succeeds.
+    #[serde(default)]
+    save_as: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -420,6 +450,8 @@ struct McpToolsResponse {
     server: String,
     tool_count: usize,
     tools: Vec<McpToolInfo>,
+    /// `true` when an ad-hoc server was written to config on this connect.
+    saved: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }

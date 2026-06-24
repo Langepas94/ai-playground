@@ -2128,6 +2128,7 @@ fn mcp_resolve_prefers_url_over_command_and_server() {
         command: Some("npx".to_string()),
         args: vec!["-y".to_string()],
         url: Some("https://host.test/mcp".to_string()),
+        save_as: None,
     })
     .expect("resolve url");
     assert_eq!(label, "https://host.test/mcp");
@@ -2141,6 +2142,7 @@ fn mcp_resolve_prefers_command_over_server_and_builds_label() {
         command: Some("npx".to_string()),
         args: vec!["-y".to_string(), "srv".to_string()],
         url: None,
+        save_as: None,
     })
     .expect("resolve command");
     assert_eq!(label, "npx -y srv");
@@ -2160,6 +2162,7 @@ fn mcp_resolve_empty_request_is_invalid_input() {
         command: None,
         args: Vec::new(),
         url: None,
+        save_as: None,
     })
     .expect_err("empty request must be rejected");
     assert!(matches!(error.0, AppError::InvalidInput(_)));
@@ -2172,6 +2175,7 @@ fn mcp_resolve_treats_blank_fields_as_absent() {
         command: Some("".to_string()),
         args: Vec::new(),
         url: Some("  ".to_string()),
+        save_as: None,
     })
     .expect_err("blank fields must be rejected");
     assert!(matches!(error.0, AppError::InvalidInput(_)));
@@ -2196,6 +2200,7 @@ fn mcp_tools_response_omits_error_on_success() {
             name: "alpha".to_string(),
             description: Some("desc".to_string()),
         }],
+        saved: false,
         error: None,
     };
     let value = serde_json::to_value(&response).expect("serialize");
@@ -2212,6 +2217,7 @@ fn mcp_tools_response_includes_error_on_failure() {
         server: "fixture".to_string(),
         tool_count: 0,
         tools: Vec::new(),
+        saved: false,
         error: Some("could not connect".to_string()),
     };
     let value = serde_json::to_value(&response).expect("serialize");

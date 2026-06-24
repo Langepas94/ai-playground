@@ -1,0 +1,50 @@
+[package]
+name = "tracker-mcp"
+version = "0.2.0"
+edition = "2021"
+description = "Library-first Model Context Protocol server for the Yandex Tracker REST API v3"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Langepas94/ai-playground"
+readme = "README.md"
+keywords = ["mcp", "yandex", "tracker", "llm"]
+categories = ["api-bindings"]
+
+# Transport-agnostic core. Zero stdio / main / rmcp deps live here.
+[lib]
+name = "tracker_mcp"
+path = "src/lib.rs"
+
+# Thin stdio wrapper. Transport lives ONLY here.
+[[bin]]
+name = "tracker-mcp-server"
+path = "src/bin/server.rs"
+
+# Thin Streamable-HTTP wrapper for remote deployment. Transport lives ONLY here.
+[[bin]]
+name = "tracker-mcp-http"
+path = "src/bin/http.rs"
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
+jsonschema = "0.46"
+
+# Binary-only: transport + protocol SDK. stdio for the local server, the
+# Streamable-HTTP server transport for the remote (deployable) binary.
+rmcp = { version = "1.7", features = [
+    "server",
+    "transport-io",
+    "transport-streamable-http-server",
+    "macros",
+] }
+anyhow = "1.0"
+# HTTP host for the remote binary (mounts the rmcp tower service + auth gate).
+axum = "0.8"
+
+[dev-dependencies]
+wiremock = "0.6"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+serde_json = "1.0"

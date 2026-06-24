@@ -4,7 +4,7 @@ version = "1.28.0"
 edition = "2024"
 
 [workspace]
-members = ["crates/aiteach-compat"]
+members = ["crates/aiteach-compat", "crates/tracker-mcp"]
 
 [lib]
 name = "ai_playground"
